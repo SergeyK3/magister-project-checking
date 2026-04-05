@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from magister_checking.docs_extract import HyperlinkRecord
-from magister_checking.docs_tables import extract_tables
+from magister_checking.docs_tables import TableCell, extract_tables
+
+_DOC_URL_IN_TEXT = re.compile(
+    r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)(?:/[^\s\)\]\"]*)?",
+    re.IGNORECASE,
+)
 
 
 def _is_docs_url(url: str) -> bool:
@@ -18,6 +24,17 @@ def _first_doc_link(links: list[HyperlinkRecord]) -> str | None:
     for h in links:
         if _is_docs_url(h.url):
             return h.url
+    return None
+
+
+def _report_url_from_cell(cell: TableCell) -> str | None:
+    """Гиперссылка в ячейке или URL как обычный текст."""
+    u = _first_doc_link(cell.links)
+    if u:
+        return u
+    m = _DOC_URL_IN_TEXT.search(cell.text)
+    if m:
+        return f"https://docs.google.com/document/d/{m.group(1)}/edit"
     return None
 
 
@@ -95,10 +112,10 @@ def parse_summary_document(document: dict[str, Any]) -> list[SummaryStudentRow]:
 
         report_url: str | None = None
         if idx_report is not None and idx_report < len(row):
-            report_url = _first_doc_link(row[idx_report].links)
+            report_url = _report_url_from_cell(row[idx_report])
         if not report_url:
             for cell in reversed(row):
-                u = _first_doc_link(cell.links)
+                u = _report_url_from_cell(cell)
                 if u:
                     report_url = u
                     break

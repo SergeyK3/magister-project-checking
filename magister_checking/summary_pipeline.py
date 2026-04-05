@@ -213,7 +213,7 @@ def run_summary_pipeline(
     out = build_summary_rows(summary_document=summary, docs_service=docs)
     if not dry_run:
         write_summary_to_sheet(
-            spreadsheetId=spreadsheet_id,
+            spreadsheet_id=spreadsheet_id,
             result=out,
             creds=creds,
         )

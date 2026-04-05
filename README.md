@@ -1,6 +1,6 @@
 # Magister Project Checking
 
-Автоматизация сбора проверяемых сведений о магистерском проекте (Google Диск, отчёты, сводные таблицы). Пилот — личный Google-аккаунт и OAuth.
+Проект для проверки магистерских работ. Автоматизация сбора проверяемых сведений (Google Диск, отчёты, сводные таблицы). Пилот — личный Google-аккаунт и OAuth.
 
 **Репозиторий на GitHub:** [github.com/SergeyK3/magister-project-checking](https://github.com/SergeyK3/magister-project-checking)
 

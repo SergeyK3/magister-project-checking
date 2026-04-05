@@ -1,0 +1,32 @@
+﻿# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Секреты OAuth / Google: содержимое папки не в Git (см. credentials/README.md)
+credentials/*
+!credentials/.gitkeep
+!credentials/README.md
+
+# Секреты вне credentials/ (на случай случайного сохранения)
+**/client_secret*.json
+**/token.json
+*.pickle
+
+# Локальные переменные окружения
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Личные черновики рядом с документацией (не коммитить)
+docs/private/

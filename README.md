@@ -22,7 +22,32 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-Дальше: `pip install -r requirements.txt` (появится после добавления зависимостей).
+```powershell
+python -m pip install -r requirements.txt
+```
+
+### Что уже можно запускать
+
+1. Положите в `credentials/` файл OAuth **Desktop** из Google Cloud Console (см. [docs/google_cloud_console.md](docs/google_cloud_console.md)), имя: `client_secret.json` или `client_secret_….json`.
+2. Первый вход в браузере (сохранится `credentials/token.json`):
+
+   ```powershell
+   python -m magister_checking login
+   ```
+
+3. Проверка доступа к любому Google Doc (ссылка из тестовой папки или id):
+
+   ```powershell
+   python -m magister_checking doc-info "https://docs.google.com/document/d/ВАШ_ID/edit"
+   ```
+
+4. Модульные тесты разбора ссылок:
+
+   ```powershell
+   python -m unittest discover -s tests -v
+   ```
+
+Дальше по ТЗ: парсинг «Промежуточного отчёта», метрики диссертации, запись в Sheets.
 
 ## Секреты
 

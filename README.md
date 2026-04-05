@@ -41,13 +41,20 @@ python -m pip install -r requirements.txt
    python -m magister_checking doc-info "https://docs.google.com/document/d/ВАШ_ID/edit"
    ```
 
-4. Модульные тесты разбора ссылок:
+4. Полный текст (включая **таблицы**) и все **внешние гиперссылки**:
+
+   ```powershell
+   python -m magister_checking doc-extract "https://docs.google.com/document/d/ВАШ_ID/edit"
+   python -m magister_checking doc-extract "ВАШ_ID" --links-only
+   ```
+
+5. Модульные тесты разбора ссылок и извлечения из Docs:
 
    ```powershell
    python -m unittest discover -s tests -v
    ```
 
-Дальше по ТЗ: парсинг «Промежуточного отчёта», метрики диссертации, запись в Sheets.
+Дальше по ТЗ: маппинг полей отчёта (Прил. 1) по ссылкам и строкам таблицы, метрики диссертации, запись в Sheets.
 
 ## Секреты
 

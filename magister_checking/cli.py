@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import sys
 
@@ -12,6 +14,11 @@ from magister_checking import __version__
 from magister_checking.auth import get_credentials
 from magister_checking.docs_extract import extract_plain_text, iter_hyperlinks
 from magister_checking.drive_urls import extract_google_file_id
+from magister_checking.summary_pipeline import (
+    SUMMARY_HEADER,
+    build_summary_rows,
+    run_summary_pipeline,
+)
 
 
 def cmd_login(_: argparse.Namespace) -> int:
@@ -64,6 +71,38 @@ def cmd_doc_extract(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_summary(ns: argparse.Namespace) -> int:
+    creds = get_credentials(interactive=True)
+    summary_id = extract_google_file_id(ns.summary_doc)
+
+    if ns.dry_run:
+        docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+        summary = docs.documents().get(documentId=summary_id).execute()
+        result = build_summary_rows(summary_document=summary, docs_service=docs)
+        buf = io.StringIO()
+        w = csv.writer(buf, delimiter="\t", lineterminator="\n")
+        w.writerow(SUMMARY_HEADER)
+        w.writerows(result.rows)
+        sys.stdout.write(buf.getvalue())
+        for line in result.log_lines:
+            print(line, file=sys.stderr)
+        return 0
+
+    if not ns.output_sheet:
+        print("Укажите --output-sheet ID_таблицы или используйте --dry-run.", file=sys.stderr)
+        return 2
+
+    sheet_id = extract_google_file_id(ns.output_sheet)
+    run_summary_pipeline(
+        summary_doc_id=summary_id,
+        spreadsheet_id=sheet_id,
+        creds=creds,
+        dry_run=False,
+    )
+    print(f"Свод записана в таблицу spreadsheetId={sheet_id}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="magister_checking",
@@ -103,6 +142,27 @@ def main(argv: list[str] | None = None) -> int:
         help="только ссылки (путь, URL, якорный текст)",
     )
     p_ex.set_defaults(func=cmd_doc_extract)
+
+    p_sum = sub.add_parser(
+        "build-summary",
+        help="Сводный Google Doc (таблица) → отчёты → метрики → Google Таблица (Прил. 3)",
+    )
+    p_sum.add_argument(
+        "summary_doc",
+        help="URL или id сводного документа (Doc с таблицей магистрантов)",
+    )
+    p_sum.add_argument(
+        "output_sheet",
+        nargs="?",
+        default=None,
+        help="URL или id Google Таблицы для записи результата (не нужен при --dry-run)",
+    )
+    p_sum.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="не писать в Sheets; вывести TSV (табуляция) в stdout",
+    )
+    p_sum.set_defaults(func=cmd_build_summary)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

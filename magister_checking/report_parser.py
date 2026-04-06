@@ -77,7 +77,9 @@ def parse_intermediate_report(document: dict[str, Any]) -> ParsedReport:
             if not matched_rule:
                 if any(k in label for k in ("лкб", "биоэтик")):
                     matched_rule = "lkb"
-                elif "диссертац" in label:
+                elif "диссертац" in label or (
+                    "магистерск" in label and "проект" in label
+                ):
                     matched_rule = "dissertation"
                 elif "обзор" in label and "стать" in label:
                     matched_rule = "review_article"

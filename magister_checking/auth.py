@@ -8,11 +8,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from magister_checking.paths import TOKEN_PATH, resolve_client_secrets_path
 
-# Минимально нужные области; spreadsheets — для будущей записи в сводную таблицу
+# documents — чтение и запись целевых Google Doc (таблицы в документе)
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/documents.readonly",
-    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
 ]
 
 

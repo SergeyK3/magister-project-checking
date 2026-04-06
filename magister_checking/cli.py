@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import sys
+from datetime import datetime, timezone
 
 from googleapiclient.discovery import build
 
@@ -17,7 +18,7 @@ from magister_checking.drive_urls import extract_google_file_id
 from magister_checking.summary_pipeline import (
     SUMMARY_HEADER,
     build_summary_rows,
-    run_summary_pipeline,
+    run_test1_fill_summary_doc,
 )
 
 
@@ -75,31 +76,77 @@ def cmd_build_summary(ns: argparse.Namespace) -> int:
     creds = get_credentials(interactive=True)
     summary_id = extract_google_file_id(ns.summary_doc)
 
+    if ns.output_sheet and not ns.dry_run:
+        print(
+            "Запись в Google Sheets отключена по обновлённому ТЗ.\n"
+            "Используйте: python -m magister_checking fill-docs-test1 "
+            "<список_doc> <сводный_выход_doc>\n"
+            "Или укажите только сводный список — результат будет выведен в stdout (TSV).",
+            file=sys.stderr,
+        )
+        return 2
+
+    docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+    summary = docs.documents().get(documentId=summary_id).execute()
+    result = build_summary_rows(summary_document=summary, docs_service=docs)
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter="\t", lineterminator="\n")
+    w.writerow(SUMMARY_HEADER)
+    w.writerows(result.rows)
+    sys.stdout.write(buf.getvalue())
+    for line in result.log_lines:
+        print(line, file=sys.stderr)
+    return 0
+
+
+def cmd_fill_docs_test1(ns: argparse.Namespace) -> int:
+    """Тест 1: первый магистрант из списка → строка 1 сводного Google Doc."""
+    creds = get_credentials(interactive=True)
+    list_id = extract_google_file_id(ns.list_doc)
+    out_sum = extract_google_file_id(ns.output_summary_doc)
+
     if ns.dry_run:
         docs = build("docs", "v1", credentials=creds, cache_discovery=False)
-        summary = docs.documents().get(documentId=summary_id).execute()
-        result = build_summary_rows(summary_document=summary, docs_service=docs)
+        list_doc = docs.documents().get(documentId=list_id).execute()
+        from magister_checking.summary_doc_parser import parse_summary_document
+
+        students = parse_summary_document(list_doc)
+        if not students:
+            print("Список пуст.", file=sys.stderr)
+            return 1
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        from magister_checking.summary_pipeline import build_one_summary_row
+
+        row = build_one_summary_row(index=1, st=students[0], docs_service=docs, ts=ts)
         buf = io.StringIO()
         w = csv.writer(buf, delimiter="\t", lineterminator="\n")
         w.writerow(SUMMARY_HEADER)
-        w.writerows(result.rows)
+        w.writerow(row)
         sys.stdout.write(buf.getvalue())
-        for line in result.log_lines:
-            print(line, file=sys.stderr)
+        print("(dry-run: целевой Doc не изменён)", file=sys.stderr)
         return 0
 
-    if not ns.output_sheet:
-        print("Укажите --output-sheet ID_таблицы или используйте --dry-run.", file=sys.stderr)
-        return 2
+    try:
+        pr, name = run_test1_fill_summary_doc(
+            list_doc_id=list_id,
+            output_summary_doc_id=out_sum,
+            creds=creds,
+            data_row_index=ns.data_row,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"Ошибка: {e}", file=sys.stderr)
+        return 1
 
-    sheet_id = extract_google_file_id(ns.output_sheet)
-    run_summary_pipeline(
-        summary_doc_id=summary_id,
-        spreadsheet_id=sheet_id,
-        creds=creds,
-        dry_run=False,
-    )
-    print(f"Свод записана в таблицу spreadsheetId={sheet_id}")
+    if not pr.rows:
+        print("Нечего записывать (список пуст).", file=sys.stderr)
+        return 1
+
+    print(f"Заполнена строка {ns.data_row} сводного Doc для: {name or '(без имени)'}")
+    if ns.output_detail_doc:
+        print(
+            "Внимание: детальная таблица пока не заполняется (только сводная).",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -145,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sum = sub.add_parser(
         "build-summary",
-        help="Сводный Google Doc (таблица) → отчёты → метрики → Google Таблица (Прил. 3)",
+        help="Сводный Google Doc → отчёты → метрики; вывод TSV в stdout (без Sheets)",
     )
     p_sum.add_argument(
         "summary_doc",
@@ -155,14 +202,46 @@ def main(argv: list[str] | None = None) -> int:
         "output_sheet",
         nargs="?",
         default=None,
-        help="URL или id Google Таблицы для записи результата (не нужен при --dry-run)",
+        help="(устарело) если указано без --dry-run — команда завершится с подсказкой использовать fill-docs-test1",
     )
     p_sum.add_argument(
         "--dry-run",
         action="store_true",
-        help="не писать в Sheets; вывести TSV (табуляция) в stdout",
+        help="то же, что без второго аргумента: только TSV в stdout",
     )
     p_sum.set_defaults(func=cmd_build_summary)
+
+    p_fd = sub.add_parser(
+        "fill-docs-test1",
+        help="Тест 1 (ТЗ): список Doc → первый отчёт → строка сводного выходного Google Doc",
+    )
+    p_fd.add_argument(
+        "list_doc",
+        help="URL/id Doc со списком магистрантов и ссылками на отчёты",
+    )
+    p_fd.add_argument(
+        "output_summary_doc",
+        help="URL/id пустого сводного Google Doc (таблица в документе)",
+    )
+    p_fd.add_argument(
+        "output_detail_doc",
+        nargs="?",
+        default=None,
+        help="URL/id детального Doc (пока не используется)",
+    )
+    p_fd.add_argument(
+        "--data-row",
+        type=int,
+        default=1,
+        metavar="N",
+        help="индекс строки таблицы для заполнения (1 = первая строка под заголовком)",
+    )
+    p_fd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="не писать в Doc; вывести одну строку TSV",
+    )
+    p_fd.set_defaults(func=cmd_fill_docs_test1)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

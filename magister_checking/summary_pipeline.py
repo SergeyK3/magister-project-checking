@@ -1,4 +1,4 @@
-"""Конвейер: сводный Doc → отчёты → метрики диссертации → строки для Sheets (Прил. 3)."""
+"""Конвейер: список магистрантов (Doc) → отчёты → метрики → строки свода / запись в целевой Doc."""
 
 from __future__ import annotations
 
@@ -8,10 +8,15 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
+from magister_checking.docs_table_write import (
+    fill_table_row,
+    find_first_table,
+    table_row_cell_spans,
+)
 from magister_checking.dissertation_metrics import DissertationMetrics, analyze_dissertation
 from magister_checking.drive_urls import extract_google_file_id
 from magister_checking.report_parser import parse_intermediate_report
-from magister_checking.summary_doc_parser import parse_summary_document
+from magister_checking.summary_doc_parser import SummaryStudentRow, parse_summary_document
 
 
 @dataclass
@@ -37,6 +42,127 @@ def _article_cell(parsed: Any) -> str:
     return "; ".join(parts) if parts else ""
 
 
+def build_one_summary_row(
+    *,
+    index: int,
+    st: SummaryStudentRow,
+    docs_service: Any,
+    ts: str,
+) -> list[Any]:
+    """Одна строка свода (13 полей данных + время), без шапки SUMMARY_HEADER."""
+    try:
+        if not st.report_url:
+            return [
+                index,
+                st.name,
+                st.group,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "нет ссылки на отчёт",
+                ts,
+            ]
+
+        rid = extract_google_file_id(st.report_url)
+        report = docs_service.documents().get(documentId=rid).execute()
+        parsed = parse_intermediate_report(report)
+
+        metrics: DissertationMetrics | None = None
+        diss_pages = ""
+        sources = ""
+        has_rev = has_res = has_disc = ""
+        total_pages = ""
+        err_parts: list[str] = []
+
+        if parsed.dissertation_url:
+            try:
+                did = extract_google_file_id(parsed.dissertation_url)
+                diss_doc = docs_service.documents().get(documentId=did).execute()
+                metrics = analyze_dissertation(diss_doc)
+                diss_pages = str(metrics.approx_pages)
+                sources = (
+                    str(metrics.sources_count)
+                    if metrics.sources_count is not None
+                    else ""
+                )
+                has_rev = _fmt_bool(metrics.has_literature_review)
+                has_res = _fmt_bool(metrics.has_results)
+                has_disc = _fmt_bool(metrics.has_discussion)
+                total_pages = str(metrics.approx_pages)
+            except Exception as e:  # noqa: BLE001
+                err_parts.append(f"диссертация: {e}")
+        else:
+            err_parts.append("нет ссылки на диссертацию в отчёте")
+
+        lkb = str(parsed.lkb_status)
+        if parsed.lkb_url:
+            u = parsed.lkb_url
+            lkb += f" ({u[:48]}…)" if len(u) > 48 else f" ({u})"
+
+        article = _article_cell(parsed)
+        notes_tail = metrics.notes if metrics else []
+        err = "; ".join([*err_parts, *notes_tail])
+
+        return [
+            index,
+            st.name,
+            st.group,
+            lkb,
+            article,
+            "да" if parsed.dissertation_url else "нет",
+            diss_pages,
+            sources,
+            has_rev,
+            has_res,
+            has_disc,
+            total_pages,
+            err,
+            ts,
+        ]
+    except Exception as e:  # noqa: BLE001
+        return [
+            index,
+            st.name,
+            st.group,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            str(e),
+            ts,
+        ]
+
+
+def adapt_row_to_output_table(ncols: int, row_13_plus_ts: list[Any], report_url: str | None) -> list[str]:
+    """
+    Приводит внутреннюю строку к числу колонок целевой таблицы.
+    7 колонок — типичный шаблон сводной (№, ФИО, группа, место работы, должность, ссылка на отчёт, руководитель).
+    """
+    cells = [str(x) if x is not None else "" for x in row_13_plus_ts]
+    if ncols == 7 and len(cells) >= 3:
+        return [
+            cells[0],
+            cells[1],
+            cells[2],
+            "",
+            "",
+            report_url or "",
+            "",
+        ]
+    if ncols <= len(cells):
+        return cells[:ncols]
+    return cells + [""] * (ncols - len(cells))
+
+
 def build_summary_rows(
     *,
     summary_document: dict[str, Any],
@@ -51,104 +177,8 @@ def build_summary_rows(
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     for i, st in enumerate(students, start=1):
-        err_parts: list[str] = []
-        try:
-            if not st.report_url:
-                pr.rows.append(
-                    [
-                        i,
-                        st.name,
-                        st.group,
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "",
-                        "нет ссылки на отчёт",
-                        ts,
-                    ]
-                )
-                continue
-
-            rid = extract_google_file_id(st.report_url)
-            report = docs_service.documents().get(documentId=rid).execute()
-            parsed = parse_intermediate_report(report)
-
-            metrics: DissertationMetrics | None = None
-            diss_pages = ""
-            sources = ""
-            has_rev = has_res = has_disc = ""
-            total_pages = ""
-
-            if parsed.dissertation_url:
-                try:
-                    did = extract_google_file_id(parsed.dissertation_url)
-                    diss_doc = docs_service.documents().get(documentId=did).execute()
-                    metrics = analyze_dissertation(diss_doc)
-                    diss_pages = str(metrics.approx_pages)
-                    sources = (
-                        str(metrics.sources_count)
-                        if metrics.sources_count is not None
-                        else ""
-                    )
-                    has_rev = _fmt_bool(metrics.has_literature_review)
-                    has_res = _fmt_bool(metrics.has_results)
-                    has_disc = _fmt_bool(metrics.has_discussion)
-                    total_pages = str(metrics.approx_pages)
-                except Exception as e:  # noqa: BLE001
-                    err_parts.append(f"диссертация: {e}")
-            else:
-                err_parts.append("нет ссылки на диссертацию в отчёте")
-
-            lkb = str(parsed.lkb_status)
-            if parsed.lkb_url:
-                u = parsed.lkb_url
-                lkb += f" ({u[:48]}…)" if len(u) > 48 else f" ({u})"
-
-            article = _article_cell(parsed)
-            notes_tail = metrics.notes if metrics else []
-            err = "; ".join([*err_parts, *notes_tail])
-
-            pr.rows.append(
-                [
-                    i,
-                    st.name,
-                    st.group,
-                    lkb,
-                    article,
-                    "да" if parsed.dissertation_url else "нет",
-                    diss_pages,
-                    sources,
-                    has_rev,
-                    has_res,
-                    has_disc,
-                    total_pages,
-                    err,
-                    ts,
-                ]
-            )
-        except Exception as e:  # noqa: BLE001
-            pr.log_lines.append(f"{st.name}: {e}")
-            pr.rows.append(
-                [
-                    i,
-                    st.name,
-                    st.group,
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    str(e),
-                    ts,
-                ]
-            )
+        row = build_one_summary_row(index=i, st=st, docs_service=docs_service, ts=ts)
+        pr.rows.append(row)
 
     return pr
 
@@ -171,6 +201,56 @@ SUMMARY_HEADER = [
 ]
 
 
+def run_test1_fill_summary_doc(
+    *,
+    list_doc_id: str,
+    output_summary_doc_id: str,
+    creds: Any,
+    data_row_index: int = 1,
+) -> tuple[PipelineResult, str]:
+    """
+    Тест 1: первый магистрант из списка → чтение отчёта → заполнение строки data_row_index
+    в первой таблице выходного Google Doc (0 — заголовок, 1 — первая строка данных).
+    """
+    docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+    list_doc = docs.documents().get(documentId=list_doc_id).execute()
+    students = parse_summary_document(list_doc)
+    pr = PipelineResult()
+    if not students:
+        pr.log_lines.append("Документ-список: нет строк с магистрантами.")
+        return pr, ""
+
+    st = students[0]
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    row = build_one_summary_row(index=1, st=st, docs_service=docs, ts=ts)
+    pr.rows.append(row)
+
+    out_doc = docs.documents().get(documentId=output_summary_doc_id).execute()
+    tbl = find_first_table(out_doc)
+    if not tbl:
+        raise ValueError("Целевой документ не содержит таблицу.")
+
+    spans = table_row_cell_spans(tbl, data_row_index)
+    if not spans:
+        raise ValueError(f"В таблице нет строки с индексом {data_row_index}.")
+
+    ncols = len(spans)
+    values = adapt_row_to_output_table(ncols, row, st.report_url)
+    while len(values) < ncols:
+        values.append(" ")
+    values = values[:ncols]
+
+    fill_table_row(
+        document_id=output_summary_doc_id,
+        docs_service=docs,
+        table=tbl,
+        row_index=data_row_index,
+        values=values,
+    )
+
+    return pr, st.name
+
+
 def _sheet_a1_tab(meta: dict[str, Any]) -> str:
     title = meta["sheets"][0]["properties"]["title"]
     safe = "'" + str(title).replace("'", "''") + "'"
@@ -183,7 +263,7 @@ def write_summary_to_sheet(
     result: PipelineResult,
     creds: Any,
 ) -> None:
-    """Полностью перезаписывает первый лист: шапка + строки."""
+    """Устарело: запись в Google Sheets (нужен scope spreadsheets в токене)."""
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
     meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     tab = _sheet_a1_tab(meta)

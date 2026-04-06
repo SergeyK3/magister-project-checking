@@ -14,6 +14,25 @@
 
 Личные черновики: `docs/private/` (в `.gitignore`).
 
+## Боевые документы (выход)
+
+Пустые шаблоны на Google Диске для записи результатов бота:
+
+| Назначение | Документ |
+|------------|----------|
+| **Сводная таблица по магистерским проектам** | [открыть](https://docs.google.com/document/d/1uMKdyUkeMOHVuCgl-Gn-FkpJNI9dW0bmdEgam8ixUPk/edit?usp=sharing) · `documentId` `1uMKdyUkeMOHVuCgl-Gn-FkpJNI9dW0bmdEgam8ixUPk` |
+| **Детальная таблица по магистерским проектам** | [открыть](https://docs.google.com/document/d/16Zv1lysdXzBCzIJJrTBn9fSef4PsNK2TGIb2HFSOYZY/edit?usp=sharing) · `documentId` `16Zv1lysdXzBCzIJJrTBn9fSef4PsNK2TGIb2HFSOYZY` |
+
+Учётная запись OAuth должна иметь **право редактировать** оба файла. Документ со **списком** магистрантов и ссылками на отчёты передаётся первым аргументом (см. ниже).
+
+Пример **Тест 1** (первая строка данных сводной таблицы):
+
+```powershell
+python -m magister_checking fill-docs-test1 "URL_Doc_со_списком_магистрантов" "https://docs.google.com/document/d/1uMKdyUkeMOHVuCgl-Gn-FkpJNI9dW0bmdEgam8ixUPk/edit" "https://docs.google.com/document/d/16Zv1lysdXzBCzIJJrTBn9fSef4PsNK2TGIb2HFSOYZY/edit"
+```
+
+Третий аргумент (детальная таблица) пока только для единообразия вызова; заполнение детального Doc в коде — следующий этап.
+
 ## Быстрый старт
 
 ```powershell

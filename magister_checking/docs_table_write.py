@@ -88,7 +88,7 @@ def fill_table_row(
     if not spans:
         return 0
     n = min(len(spans), len(values))
-    operations: list[tuple[int, int, str]] = []
+    operations: list[tuple[int, int, str, bool]] = []
     for i in range(n):
         sp = spans[i]
         if sp is None:
@@ -99,20 +99,24 @@ def fill_table_row(
         text = values[i] if values[i] is not None else ""
         if not text.strip():
             text = " "
-        operations.append((start, end, text))
+        # Нельзя удалять весь диапазон ячейки — API требует оставить символ (часто \n в конце абзаца).
+        delete_end = end - 1
+        do_delete = delete_end > start
+        operations.append((start, end, text, do_delete))
 
     # Справа налево по startIndex
     operations.sort(key=lambda x: x[0], reverse=True)
 
     requests: list[dict[str, Any]] = []
-    for start, end, text in operations:
-        requests.append(
-            {
-                "deleteContentRange": {
-                    "range": {"startIndex": start, "endIndex": end},
+    for start, end, text, do_delete in operations:
+        if do_delete:
+            requests.append(
+                {
+                    "deleteContentRange": {
+                        "range": {"startIndex": start, "endIndex": end - 1},
+                    }
                 }
-            }
-        )
+            )
         requests.append(
             {
                 "insertText": {

@@ -16,10 +16,15 @@ from magister_checking.bot.config import BotConfig
 from magister_checking.bot.handlers import (
     ASK_CONFIRM,
     ASK_FIELD,
+    BIND_ASK_FIO,
+    BIND_CONFIRM,
     CONFIG_BOT_DATA_KEY,
     ask_confirm,
     cancel,
+    confirm_bind,
+    receive_bind_fio,
     receive_field,
+    skip_bind,
     skip_field,
     start,
 )
@@ -51,10 +56,21 @@ def build_application(config: BotConfig) -> Application:
 
     field_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, receive_field)
     confirm_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, ask_confirm)
+    bind_fio_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND, receive_bind_fio
+    )
+    bind_confirm_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND, confirm_bind
+    )
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            BIND_ASK_FIO: [
+                CommandHandler("skip", skip_bind),
+                bind_fio_message_handler,
+            ],
+            BIND_CONFIRM: [bind_confirm_message_handler],
             ASK_FIELD: [
                 CommandHandler("skip", skip_field),
                 field_message_handler,

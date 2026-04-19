@@ -8,9 +8,12 @@ from typing import List
 from magister_checking.bot.models import SHEET_HEADER, UserForm
 from magister_checking.bot.sheets_repo import (
     _column_letter,
+    attach_telegram_to_row,
     ensure_header,
     find_row_by_telegram_id,
+    find_rows_by_fio,
     load_user,
+    normalize_fio,
     upsert_user,
 )
 
@@ -155,6 +158,56 @@ class LoadUserTests(unittest.TestCase):
         self.assertEqual(user.telegram_username, "user")
         self.assertEqual(user.fio, "")
         self.assertEqual(user.last_action, "")
+
+
+class FioBindingTests(unittest.TestCase):
+    def _row(self, *, fio: str, telegram_id: str = "") -> List[str]:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = telegram_id
+        row[SHEET_HEADER.index("fio")] = fio
+        return row
+
+    def test_normalize_fio_collapses_spaces_and_yo(self) -> None:
+        self.assertEqual(normalize_fio("  Иванов   Иван  Иванович "), "иванов иван иванович")
+        self.assertEqual(normalize_fio("Алёшин"), "алешин")
+        self.assertEqual(normalize_fio(None), "")
+
+    def test_find_rows_by_fio_matches_normalized(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                self._row(fio="Иванов И.И."),
+                self._row(fio="иванов  и.и."),
+                self._row(fio="Петров П.П."),
+            ]
+        )
+
+        self.assertEqual(find_rows_by_fio(ws, "Иванов И.И."), [2, 3])
+        self.assertEqual(find_rows_by_fio(ws, "Петров П.П."), [4])
+        self.assertEqual(find_rows_by_fio(ws, ""), [])
+
+    def test_attach_telegram_writes_first_four_columns(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                self._row(fio="Иванов И.И."),
+            ]
+        )
+
+        attach_telegram_to_row(
+            ws,
+            2,
+            telegram_id="111",
+            telegram_username="ivanov",
+            telegram_first_name="Иван",
+            telegram_last_name="Иванов",
+        )
+
+        self.assertEqual(ws.rows[1][0], "111")
+        self.assertEqual(ws.rows[1][1], "ivanov")
+        self.assertEqual(ws.rows[1][2], "Иван")
+        self.assertEqual(ws.rows[1][3], "Иванов")
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("fio")], "Иванов И.И.")
 
 
 if __name__ == "__main__":

@@ -13,9 +13,14 @@ from magister_checking.bot import handlers
 from magister_checking.bot.handlers import (
     ASK_CONFIRM,
     ASK_FIELD,
+    BIND_ASK_FIO,
+    BIND_CONFIRM,
     ask_confirm,
     cancel,
+    confirm_bind,
+    receive_bind_fio,
     receive_field,
+    skip_bind,
     skip_field,
     start,
 )
@@ -62,7 +67,7 @@ def _patch_worksheet(worksheet: FakeWorksheet):
 
 
 class StartHandlerTests(unittest.TestCase):
-    def test_start_new_user_inits_pending_and_asks_first_field(self) -> None:
+    def test_start_unknown_user_offers_binding(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
         update = _make_update()
@@ -70,13 +75,10 @@ class StartHandlerTests(unittest.TestCase):
         with _patch_worksheet(ws):
             state = _run(start(update, ctx))
 
-        self.assertEqual(state, ASK_FIELD)
-        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+        self.assertEqual(state, BIND_ASK_FIO)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.telegram_id, "111")
-        self.assertEqual(form.telegram_username, "ivanov")
-        self.assertEqual(form.last_action, "ask_fio")
-        self.assertEqual(update.message.reply_text.call_count, 2)
+        self.assertEqual(form.last_action, "ask_bind_fio")
 
     def test_start_existing_user_with_missing_only_asks_missing(self) -> None:
         ws = FakeWorksheet(
@@ -116,10 +118,9 @@ class ReceiveFieldTests(unittest.TestCase):
     def test_advances_through_fields_and_skip_token(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
-        update = _make_update()
-
-        with _patch_worksheet(ws):
-            _run(start(update, ctx))
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(telegram_id="111")
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = ["group_name", "workplace"]
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "fio"
 
         update_fio = _make_update(text="Иванов И.И.")
         with _patch_worksheet(ws):
@@ -254,6 +255,123 @@ class AskConfirmTests(unittest.TestCase):
         update = _make_update(text="возможно")
         state = _run(ask_confirm(update, ctx))
         self.assertEqual(state, ASK_CONFIRM)
+
+
+class BindFlowTests(unittest.TestCase):
+    def _row(self, *, fio: str, telegram_id: str = "", group: str = "") -> list:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = telegram_id
+        row[SHEET_HEADER.index("fio")] = fio
+        row[SHEET_HEADER.index("group_name")] = group
+        return row
+
+    def _start_in_bind_state(self, ws: FakeWorksheet) -> _FakeContext:
+        ctx = _FakeContext(ws)
+        update = _make_update()
+        with _patch_worksheet(ws):
+            state = _run(start(update, ctx))
+        self.assertEqual(state, BIND_ASK_FIO)
+        return ctx
+
+    def test_skip_bind_starts_new_registration(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = self._start_in_bind_state(ws)
+
+        update = _make_update(text="/skip")
+        with _patch_worksheet(ws):
+            state = _run(skip_bind(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+
+    def test_unknown_fio_falls_back_to_new_registration(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Сидоров С.С.")])
+        ctx = self._start_in_bind_state(ws)
+
+        update = _make_update(text="Неизвестный И.И.")
+        with _patch_worksheet(ws):
+            state = _run(receive_bind_fio(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+
+    def test_single_match_asks_for_confirmation(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.", group="М-101")])
+        ctx = self._start_in_bind_state(ws)
+
+        update = _make_update(text="иванов  и.и.")
+        with _patch_worksheet(ws):
+            state = _run(receive_bind_fio(update, ctx))
+
+        self.assertEqual(state, BIND_CONFIRM)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_BIND_ROW_KEY], 2)
+
+    def test_confirm_yes_attaches_telegram_and_resumes(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.", group="М-101")])
+        ctx = self._start_in_bind_state(ws)
+
+        with _patch_worksheet(ws):
+            _run(receive_bind_fio(_make_update(text="Иванов И.И."), ctx))
+
+        update = _make_update(text="да")
+        with _patch_worksheet(ws):
+            state = _run(confirm_bind(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "111")
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_username")], "ivanov")
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.fio, "Иванов И.И.")
+        self.assertEqual(form.group_name, "М-101")
+        self.assertEqual(form.last_action, "ask_workplace")
+
+    def test_confirm_no_starts_new_registration(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.")])
+        ctx = self._start_in_bind_state(ws)
+
+        with _patch_worksheet(ws):
+            _run(receive_bind_fio(_make_update(text="Иванов И.И."), ctx))
+
+        update = _make_update(text="нет")
+        with _patch_worksheet(ws):
+            state = _run(confirm_bind(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_BIND_ROW_KEY], None)
+
+    def test_already_bound_to_other_user_falls_back(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                self._row(fio="Иванов И.И.", telegram_id="999"),
+            ]
+        )
+        ctx = self._start_in_bind_state(ws)
+
+        update = _make_update(text="Иванов И.И.")
+        with _patch_worksheet(ws):
+            state = _run(receive_bind_fio(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "999")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_FORM_KEY].last_action, "ask_fio")
+
+    def test_multiple_matches_fall_back_to_new_registration(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                self._row(fio="Иванов И.И."),
+                self._row(fio="иванов и.и."),
+            ]
+        )
+        ctx = self._start_in_bind_state(ws)
+
+        update = _make_update(text="Иванов И.И.")
+        with _patch_worksheet(ws):
+            state = _run(receive_bind_fio(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
 
 
 class CancelTests(unittest.TestCase):

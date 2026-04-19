@@ -170,3 +170,38 @@ python -m pytest tests/bot -q
 
 Тесты используют фейковый worksheet и моки Telegram/HTTP — сеть и реальный
 Service Account не нужны.
+
+### Симуляция регистрации (без Telegram)
+
+Скрипт [`tools/simulate_registration.py`](tools/simulate_registration.py)
+прогоняет ту же бизнес-логику бота (`models.py`, `validation.py`, расчёт
+`FillStatus`) поверх in-memory worksheet и сохраняет результат в `.xlsx`.
+Полезно для демонстрации и регрессии без живого Telegram.
+
+**Важно про `telegram_id` (см. п.6.2 ТЗ):** реальный Telegram ID можно получить
+**только** при живом обращении пользователя к боту (`/start` в личном чате).
+В симуляции `telegram_id` либо берётся из исходной таблицы, либо
+проставляется синтетически через `--fake-telegram-id-base`, либо остаётся
+пустым.
+
+Демонстрация на синтетических 5 магистрантах (CSV в репо):
+
+```powershell
+python -m tools.simulate_registration `
+  --input-csv tools/sample_students.csv `
+  --output-xlsx artifacts/simulated_registration.xlsx `
+  --fake-telegram-id-base 900000001
+```
+
+Прогон по первым N строкам уже существующей Google Sheets (использует ваш `.env`
+и Service Account):
+
+```powershell
+python -m tools.simulate_registration `
+  --from-sheet --limit 5 `
+  --output-xlsx artifacts/from_sheet.xlsx
+```
+
+По умолчанию реальный HTTP-запрос к ссылкам **не делается** — фиксируется
+только результат проверки формата URL (`report_url_valid`). Для боевой
+проверки добавьте `--check-links`.

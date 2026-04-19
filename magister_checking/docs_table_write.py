@@ -17,6 +17,39 @@ def find_first_table(document: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def table_column_count(table: dict[str, Any]) -> int:
+    rows = table.get("tableRows", [])
+    if not rows:
+        return 0
+    return len(rows[0].get("tableCells", []))
+
+
+def table_row_count(table: dict[str, Any]) -> int:
+    return len(table.get("tableRows", []))
+
+
+def find_best_summary_table(document: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Среди таблиц верхнего уровня body — та, у которой больше всего колонок
+    (сводная 7×… должна победить узкую 3×…, если обе есть в документе).
+    При равенстве колонок берётся таблица с большим числом строк.
+    """
+    best: dict[str, Any] | None = None
+    best_cols = -1
+    best_rows = -1
+    for el in document.get("body", {}).get("content", []):
+        if "table" not in el:
+            continue
+        t = el["table"]
+        nc = table_column_count(t)
+        nr = table_row_count(t)
+        if nc > best_cols or (nc == best_cols and nr > best_rows):
+            best_cols = nc
+            best_rows = nr
+            best = t
+    return best
+
+
 def _cell_text_run_span(cell: dict[str, Any]) -> tuple[int, int] | None:
     """Диапазон [start, end) по всем textRun в ячейке (безопаснее для batchUpdate)."""
     mins: int | None = None
@@ -148,7 +181,7 @@ def fill_first_table_data_row_from_document(
     Возвращает обновлённый document (последний get после batch) для отладки.
     """
     doc = docs_service.documents().get(documentId=document_id).execute()
-    tbl = find_first_table(doc)
+    tbl = find_best_summary_table(doc)
     if not tbl:
         raise ValueError("В документе не найдена таблица.")
     fill_table_row(

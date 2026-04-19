@@ -48,6 +48,13 @@ def _append_text_from_content(content: list[dict[str, Any]], parts: list[str]) -
 
 def _append_paragraph_plain_text(paragraph: dict[str, Any], parts: list[str]) -> None:
     for pe in paragraph.get("elements", []):
+        # Smart chip / rich link: include its title so plain text contains something meaningful.
+        if "richLink" in pe:
+            props = (pe.get("richLink") or {}).get("richLinkProperties") or {}
+            title = props.get("title")
+            if title:
+                parts.append(str(title))
+            continue
         tr = pe.get("textRun")
         if tr and "content" in tr:
             parts.append(tr["content"])
@@ -73,6 +80,14 @@ def _iter_paragraph_hyperlinks(
     paragraph: dict[str, Any], path: str
 ) -> Iterator[HyperlinkRecord]:
     for pe in paragraph.get("elements", []):
+        # Smart chip / rich link.
+        if "richLink" in pe:
+            props = (pe.get("richLink") or {}).get("richLinkProperties") or {}
+            uri = props.get("uri")
+            title = props.get("title") or ""
+            if uri:
+                yield HyperlinkRecord(url=str(uri), anchor_text=str(title), context_path=path)
+            continue
         tr = pe.get("textRun")
         if not tr:
             continue

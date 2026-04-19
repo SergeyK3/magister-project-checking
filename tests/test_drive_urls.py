@@ -2,7 +2,11 @@
 
 import unittest
 
-from magister_checking.drive_urls import extract_google_file_id
+from magister_checking.drive_urls import (
+    extract_google_file_id,
+    extract_google_folder_id,
+    is_google_drive_folder_url,
+)
 
 
 class TestExtractGoogleFileId(unittest.TestCase):
@@ -20,6 +24,16 @@ class TestExtractGoogleFileId(unittest.TestCase):
     def test_drive_open(self) -> None:
         url = "https://drive.google.com/open?id=FILEID42"
         self.assertEqual(extract_google_file_id(url), "FILEID42")
+
+    def test_folder_url_and_id(self) -> None:
+        url = "https://drive.google.com/drive/folders/1AbCdEfGhIJkLmNoPqRsTuVwXyZ?usp=sharing"
+        self.assertTrue(is_google_drive_folder_url(url))
+        self.assertEqual(extract_google_folder_id(url), "1AbCdEfGhIJkLmNoPqRsTuVwXyZ")
+
+    def test_folder_url_with_u_segment(self) -> None:
+        url = "https://drive.google.com/drive/u/0/folders/ZZZfolderId42"
+        self.assertTrue(is_google_drive_folder_url(url))
+        self.assertEqual(extract_google_folder_id(url), "ZZZfolderId42")
 
 
 if __name__ == "__main__":

@@ -8,9 +8,14 @@ from typing import Any
 
 from magister_checking.docs_extract import HyperlinkRecord
 from magister_checking.docs_tables import TableCell, extract_tables
+from magister_checking.drive_urls import is_google_drive_folder_url
 
 _DOC_URL_IN_TEXT = re.compile(
     r"https://docs\.google\.com/document/d/([a-zA-Z0-9_-]+)(?:/[^\s\)\]\"]*)?",
+    re.IGNORECASE,
+)
+_FOLDER_URL_IN_TEXT = re.compile(
+    r"https://drive\.google\.com/drive/(?:u/\d+/)?folders/([a-zA-Z0-9_-]+)(?:\?[^\s\)\]\"]*)?",
     re.IGNORECASE,
 )
 
@@ -27,14 +32,27 @@ def _first_doc_link(links: list[HyperlinkRecord]) -> str | None:
     return None
 
 
+def _first_folder_link(links: list[HyperlinkRecord]) -> str | None:
+    for h in links:
+        if is_google_drive_folder_url(h.url):
+            return h.url
+    return None
+
+
 def _report_url_from_cell(cell: TableCell) -> str | None:
-    """Гиперссылка в ячейке или URL как обычный текст."""
+    """Гиперссылка в ячейке или URL как обычный текст (Doc или папка с отчётом)."""
     u = _first_doc_link(cell.links)
+    if u:
+        return u
+    u = _first_folder_link(cell.links)
     if u:
         return u
     m = _DOC_URL_IN_TEXT.search(cell.text)
     if m:
         return f"https://docs.google.com/document/d/{m.group(1)}/edit"
+    m = _FOLDER_URL_IN_TEXT.search(cell.text)
+    if m:
+        return f"https://drive.google.com/drive/folders/{m.group(1)}"
     return None
 
 

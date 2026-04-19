@@ -8,6 +8,7 @@ import io
 import json
 import sys
 from datetime import datetime, timezone
+from typing import Any
 
 from googleapiclient.discovery import build
 
@@ -17,7 +18,10 @@ from magister_checking.docs_extract import extract_plain_text, iter_hyperlinks
 from magister_checking.drive_urls import extract_google_file_id
 from magister_checking.summary_pipeline import (
     SUMMARY_HEADER,
+    build_detail_body_text,
     build_summary_rows,
+    run_fill_one_student_detail_doc,
+    run_fill_all_students_docs,
     run_test1_fill_summary_doc,
 )
 
@@ -87,8 +91,11 @@ def cmd_build_summary(ns: argparse.Namespace) -> int:
         return 2
 
     docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     summary = docs.documents().get(documentId=summary_id).execute()
-    result = build_summary_rows(summary_document=summary, docs_service=docs)
+    result = build_summary_rows(
+        summary_document=summary, docs_service=docs, drive_service=drive
+    )
     buf = io.StringIO()
     w = csv.writer(buf, delimiter="\t", lineterminator="\n")
     w.writerow(SUMMARY_HEADER)
@@ -100,39 +107,79 @@ def cmd_build_summary(ns: argparse.Namespace) -> int:
 
 
 def cmd_fill_docs_test1(ns: argparse.Namespace) -> int:
-    """Тест 1: первый магистрант из списка → строка 1 сводного Google Doc."""
+    """Тест 1: один магистрант → одна строка; при --all-students — все строки + детальный Doc."""
     creds = get_credentials(interactive=True)
     list_id = extract_google_file_id(ns.list_doc)
     out_sum = extract_google_file_id(ns.output_summary_doc)
+    out_detail = (
+        extract_google_file_id(ns.output_detail_doc) if ns.output_detail_doc else None
+    )
 
     if ns.dry_run:
         docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
         list_doc = docs.documents().get(documentId=list_id).execute()
         from magister_checking.summary_doc_parser import parse_summary_document
+        from magister_checking.summary_pipeline import build_one_summary_row
 
         students = parse_summary_document(list_doc)
         if not students:
             print("Список пуст.", file=sys.stderr)
             return 1
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        from magister_checking.summary_pipeline import build_one_summary_row
-
-        row = build_one_summary_row(index=1, st=students[0], docs_service=docs, ts=ts)
         buf = io.StringIO()
         w = csv.writer(buf, delimiter="\t", lineterminator="\n")
         w.writerow(SUMMARY_HEADER)
+        if ns.all_students:
+            built: list[tuple[Any, list[Any]]] = []  # (student, row) for stderr preview
+            for i, st in enumerate(students, start=1):
+                row, _ex = build_one_summary_row(
+                    index=i, st=st, docs_service=docs, ts=ts, drive_service=drive
+                )
+                w.writerow(row)
+                built.append((st, row))
+            sys.stdout.write(buf.getvalue())
+            if out_detail:
+                print("\n--- Детальный Doc (превью тел под H1) ---", file=sys.stderr)
+                for st, row in built:
+                    print(f"\n### {st.name or st} ###", file=sys.stderr)
+                    print(build_detail_body_text(st=st, summary_row=row), file=sys.stderr)
+            print("(dry-run: целевые Doc не изменены)", file=sys.stderr)
+            return 0
+
+        row, _ex = build_one_summary_row(
+            index=1, st=students[0], docs_service=docs, ts=ts, drive_service=drive
+        )
         w.writerow(row)
         sys.stdout.write(buf.getvalue())
         print("(dry-run: целевой Doc не изменён)", file=sys.stderr)
         return 0
 
     try:
-        pr, name = run_test1_fill_summary_doc(
-            list_doc_id=list_id,
-            output_summary_doc_id=out_sum,
-            creds=creds,
-            data_row_index=ns.data_row,
-        )
+        if ns.all_students:
+            pr, names = run_fill_all_students_docs(
+                list_doc_id=list_id,
+                output_summary_doc_id=out_sum,
+                output_detail_doc_id=out_detail,
+                creds=creds,
+                bootstrap_templates=ns.bootstrap_templates,
+            )
+            if ns.only_student_index and out_detail:
+                name = run_fill_one_student_detail_doc(
+                    list_doc_id=list_id,
+                    output_detail_doc_id=out_detail,
+                    creds=creds,
+                    student_index=ns.only_student_index,
+                )
+                print(f"Детальный Doc: заполнен только магистрант #{ns.only_student_index}: {name}")
+        else:
+            pr, name = run_test1_fill_summary_doc(
+                list_doc_id=list_id,
+                output_summary_doc_id=out_sum,
+                creds=creds,
+                data_row_index=ns.data_row,
+            )
+            names = [name] if name else []
     except Exception as e:  # noqa: BLE001
         print(f"Ошибка: {e}", file=sys.stderr)
         return 1
@@ -141,12 +188,25 @@ def cmd_fill_docs_test1(ns: argparse.Namespace) -> int:
         print("Нечего записывать (список пуст).", file=sys.stderr)
         return 1
 
-    print(f"Заполнена строка {ns.data_row} сводного Doc для: {name or '(без имени)'}")
-    if ns.output_detail_doc:
+    if ns.all_students:
         print(
-            "Внимание: детальная таблица пока не заполняется (только сводная).",
-            file=sys.stderr,
+            f"Сводная таблица: заполнено строк данных: {len(pr.rows)}. "
+            f"Магистранты: {', '.join(n or '(без имени)' for n in names)}"
         )
+        if out_detail:
+            print("Детальная таблица: обновлены заголовки H1 и тела первых N секций.")
+        elif ns.output_detail_doc is None:
+            print(
+                "Детальный Doc не указан (третий аргумент).",
+                file=sys.stderr,
+            )
+    else:
+        print(f"Заполнена строка {ns.data_row} сводного Doc для: {names[0] if names else '(без имени)'}")
+        if ns.output_detail_doc:
+            print(
+                "Для заполнения детальной таблицы используйте --all-students и третий аргумент.",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -227,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         "output_detail_doc",
         nargs="?",
         default=None,
-        help="URL/id детального Doc (пока не используется)",
+        help="URL/id детального Doc (заполняется при --all-students: H1 + текст)",
     )
     p_fd.add_argument(
         "--data-row",
@@ -237,9 +297,26 @@ def main(argv: list[str] | None = None) -> int:
         help="индекс строки таблицы для заполнения (1 = первая строка под заголовком)",
     )
     p_fd.add_argument(
+        "--all-students",
+        action="store_true",
+        help="все магистранты из списка: строки 1…N сводной таблицы и N секций H1 в детальном Doc",
+    )
+    p_fd.add_argument(
+        "--bootstrap-templates",
+        action="store_true",
+        help="если в сводном Doc нет таблицы — вставить 7×(1+N); если в детальном мало H1 — добавить в конец",
+    )
+    p_fd.add_argument(
+        "--only-student-index",
+        type=int,
+        default=0,
+        metavar="N",
+        help="только для детального Doc: заполнить одного магистранта (1-based индекс в списке). Работает с --all-students.",
+    )
+    p_fd.add_argument(
         "--dry-run",
         action="store_true",
-        help="не писать в Doc; вывести одну строку TSV",
+        help="не писать в Doc; TSV (одна или все строки); с --all-students и третьим URL — превью детализации в stderr",
     )
     p_fd.set_defaults(func=cmd_fill_docs_test1)
 

@@ -30,3 +30,7 @@ __pycache__/
 
 # Личные черновики рядом с документацией (не коммитить)
 docs/private/
+
+# key for Google Cloud API
+key/
+keys/

@@ -64,6 +64,23 @@ def _fill_paragraph(
     links: list[HyperlinkRecord],
 ) -> None:
     for pe in paragraph.get("elements", []):
+        # Smart chip / rich link (Google Docs "link cards") are not represented as textRun.link.url.
+        if "richLink" in pe:
+            rl = pe.get("richLink") or {}
+            props = rl.get("richLinkProperties") or {}
+            title = str(props.get("title") or "")
+            uri = props.get("uri")
+            if title:
+                parts.append(title)
+            if uri:
+                links.append(
+                    HyperlinkRecord(
+                        url=str(uri),
+                        anchor_text=title,
+                        context_path=path,
+                    )
+                )
+            continue
         tr = pe.get("textRun")
         if not tr:
             continue

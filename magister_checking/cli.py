@@ -32,6 +32,30 @@ def cmd_login(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bot(_: argparse.Namespace) -> int:
+    """Запускает Telegram-бота @magistrcheckbot (long polling).
+
+    Конфигурация читается из переменных окружения (см. .env.example).
+    """
+
+    from magister_checking.bot.app import run as run_bot
+    from magister_checking.bot.config import ConfigError, load_config
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации бота: {exc}", file=sys.stderr)
+        print(
+            "Заполните .env по шаблону .env.example "
+            "(TELEGRAM_BOT_TOKEN, SPREADSHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON).",
+            file=sys.stderr,
+        )
+        return 2
+
+    run_bot(config)
+    return 0
+
+
 def cmd_doc_info(ns: argparse.Namespace) -> int:
     creds = get_credentials(interactive=True)
     doc_id = extract_google_file_id(ns.url_or_id)
@@ -221,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p_login = sub.add_parser("login", help="OAuth: сохранить token.json (браузер)")
     p_login.set_defaults(func=cmd_login)
+
+    p_bot = sub.add_parser(
+        "bot",
+        help="Запустить Telegram-бота @magistrcheckbot (long polling). Конфиг — .env",
+    )
+    p_bot.set_defaults(func=cmd_bot)
 
     p_doc = sub.add_parser("doc-info", help="Прочитать метаданные Google Doc по ссылке или id")
     p_doc.add_argument("url_or_id", help="URL документа или его id")

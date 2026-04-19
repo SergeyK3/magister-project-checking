@@ -1,6 +1,12 @@
 # Magister Project Checking
 
-Проект для проверки магистерских работ. Автоматизация сбора сведений из Google Docs (отчёты, сводные таблицы внутри документов). Пилот — личный Google-аккаунт и OAuth.
+Проект для проверки магистерских работ. Состоит из двух частей:
+
+- **Telegram-бот `@magistrcheckbot`** — основной канал регистрации магистрантов и
+  первичной проверки ссылки на промежуточный отчёт (этапы 1–2 ТЗ v2). Пишет
+  данные в Google Sheets через Service Account.
+- **CLI-утилиты анализа Google Docs** — `doc-info`, `doc-extract`,
+  `build-summary`, `fill-docs-test1`. Используют OAuth (личный Google-аккаунт).
 
 **Репозиторий на GitHub:** [github.com/SergeyK3/magister-project-checking](https://github.com/SergeyK3/magister-project-checking)
 
@@ -10,6 +16,7 @@
 |------|------------|
 | [docs/tz_magister_checking_0d150b8f.plan.md](docs/tz_magister_checking_0d150b8f.plan.md) | Техническое задание (исходное) |
 | [docs/tz_amendment_2026-04-06_docs_output.md](docs/tz_amendment_2026-04-06_docs_output.md) | Изменение ТЗ: вывод в Google Doc вместо Sheets |
+| [docs/tz_tezis_v2.md](docs/tz_tezis_v2.md) | Тезисы ТЗ v2: Telegram-бот + Google Sheets |
 | [docs/google_cloud_console.md](docs/google_cloud_console.md) | Настройка Google Cloud Console |
 
 Личные черновики: `docs/private/` (в `.gitignore`).
@@ -95,3 +102,71 @@ python -m pip install -r requirements.txt
 ## Секреты
 
 См. [credentials/README.md](credentials/README.md).
+
+## Telegram-бот @magistrcheckbot (ТЗ v2, этапы 1–2)
+
+Бот собирает регистрационные данные магистранта через диалог `/start`, делает
+первичную проверку ссылки на промежуточный отчёт и записывает строку в Google
+Sheets. Логика разнесена по пакету `magister_checking.bot`
+(`config`, `models`, `validation`, `sheets_repo`, `handlers`, `app`).
+
+### Подготовка
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather), получите токен.
+2. Создайте Service Account в Google Cloud Console и скачайте JSON-ключ.
+   Положите его в `credentials/` (папка под `.gitignore`).
+3. Откройте целевую Google Sheets и **поделитесь ею с email сервисного аккаунта**
+   (поле `client_email` из JSON) с правом «Редактор».
+4. Скопируйте `.env.example` в `.env` и заполните:
+
+   ```env
+   TELEGRAM_BOT_TOKEN=123456:ABC...
+   SPREADSHEET_ID=16gpZSZgKBcbf8Z9LZvcYKT1lUPG-URuo9C6K9BRPDHU
+   WORKSHEET_NAME=Регистрация
+   GOOGLE_SERVICE_ACCOUNT_JSON=credentials/service_account.json
+   LOG_LEVEL=INFO
+   ```
+
+### Запуск
+
+```powershell
+python -m magister_checking bot
+```
+
+Бот стартует в режиме long polling. На листе автоматически создаётся (или
+перезаписывается) шапка из 16 столбцов п.8.1 ТЗ:
+
+```
+telegram_id, telegram_username, telegram_first_name, telegram_last_name,
+fio, group_name, workplace, position, phone, supervisor,
+report_url, report_url_valid, report_url_accessible, report_url_public_guess,
+fill_status, last_action
+```
+
+### Сценарий пользователя
+
+- `/start` — начать или продолжить регистрацию. Если запись уже есть, бот
+  спросит только незаполненные поля (см. п.5.4 ТЗ).
+- Любое поле можно пропустить, отправив `-` или команду `/skip`.
+- `/cancel` — выйти из диалога без сохранения.
+- В конце бот показывает сводку и просит подтвердить «да / нет». При «да»
+  выполняется upsert строки по `telegram_id`.
+
+### Статусы (`fill_status`, п.12 ТЗ)
+
+- `NEW` — ни одно обязательное поле не заполнено;
+- `PARTIAL` — часть полей заполнена;
+- `REGISTERED` — все 7 обязательных полей заполнены.
+
+`last_action` фиксирует имя последнего шага (`ask_<field>`, `answered_<field>`,
+`skipped_<field>`, `confirmed_save`, `cancelled_save`, `cancelled`) — это
+помогает оператору видеть, где магистрант остановился.
+
+### Тесты
+
+```powershell
+python -m pytest tests/bot -q
+```
+
+Тесты используют фейковый worksheet и моки Telegram/HTTP — сеть и реальный
+Service Account не нужны.

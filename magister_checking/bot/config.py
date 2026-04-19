@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,6 +74,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     token = _read_env("TELEGRAM_BOT_TOKEN")
     spreadsheet_id = _read_env("SPREADSHEET_ID")
     sa_path_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    sa_content_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
     worksheet_name = _read_env("WORKSHEET_NAME", DEFAULT_WORKSHEET_NAME) or DEFAULT_WORKSHEET_NAME
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
 
@@ -80,20 +83,17 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         for name, value in (
             ("TELEGRAM_BOT_TOKEN", token),
             ("SPREADSHEET_ID", spreadsheet_id),
-            ("GOOGLE_SERVICE_ACCOUNT_JSON", sa_path_raw),
         )
         if not value
     ]
+    if not sa_path_raw and not sa_content_raw:
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON или GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
     if missing:
         raise ConfigError(
             "Не заданы обязательные переменные окружения: " + ", ".join(missing)
         )
 
-    sa_path = Path(sa_path_raw).expanduser()  # type: ignore[arg-type]
-    if not sa_path.is_file():
-        raise ConfigError(
-            f"Файл Service Account JSON не найден: {sa_path}"
-        )
+    sa_path = _resolve_service_account_path(sa_path_raw, sa_content_raw)
 
     return BotConfig(
         telegram_bot_token=token,  # type: ignore[arg-type]
@@ -102,3 +102,48 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         google_service_account_json=sa_path,
         log_level=_coerce_log_level(log_level_raw),
     )
+
+
+def _resolve_service_account_path(
+    sa_path_raw: Optional[str],
+    sa_content_raw: Optional[str],
+) -> Path:
+    """Возвращает путь к файлу JSON-ключа SA.
+
+    Поддерживает три варианта ввода (в порядке приоритета):
+    1. ``GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT`` — содержимое JSON, пишем во временный файл;
+    2. ``GOOGLE_SERVICE_ACCOUNT_JSON`` со значением, похожим на JSON
+       (начинается с ``{``) — также пишем во временный файл;
+    3. ``GOOGLE_SERVICE_ACCOUNT_JSON`` со значением-путём — используем как есть.
+    """
+
+    if sa_content_raw and sa_content_raw.lstrip().startswith("{"):
+        return _write_sa_json_to_tempfile(sa_content_raw)
+
+    assert sa_path_raw is not None  # гарантировано вызывающей стороной
+    if sa_path_raw.lstrip().startswith("{"):
+        return _write_sa_json_to_tempfile(sa_path_raw)
+
+    sa_path = Path(sa_path_raw).expanduser()
+    if not sa_path.is_file():
+        raise ConfigError(f"Файл Service Account JSON не найден: {sa_path}")
+    return sa_path
+
+
+def _write_sa_json_to_tempfile(raw_content: str) -> Path:
+    try:
+        json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            "Содержимое Service Account JSON некорректно: " + str(exc)
+        ) from exc
+
+    fd, name = tempfile.mkstemp(prefix="magistrcheckbot_sa_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(raw_content)
+    except Exception:
+        os.unlink(name)
+        raise
+    os.chmod(name, 0o600)
+    return Path(name)

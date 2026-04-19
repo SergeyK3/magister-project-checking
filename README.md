@@ -127,6 +127,11 @@ Sheets. Логика разнесена по пакету `magister_checking.bot
    LOG_LEVEL=INFO
    ```
 
+   В средах, где файл положить нельзя (Cursor Cloud Agent Secrets, GitHub
+   Actions и т.п.), вместо пути можно передать **содержимое** JSON-ключа в
+   `GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT` — оно будет записано во временный
+   файл с правами `600`.
+
 ### Запуск
 
 ```powershell

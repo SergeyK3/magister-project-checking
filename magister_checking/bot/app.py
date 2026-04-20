@@ -9,6 +9,8 @@ from telegram.ext import (
     CommandHandler,
     ConversationHandler,
     MessageHandler,
+    PersistenceInput,
+    PicklePersistence,
     filters,
 )
 
@@ -61,6 +63,26 @@ def configure_logging(level: int) -> None:
         logging.getLogger(name).setLevel(noisy_level)
 
 
+def _build_persistence(config: BotConfig) -> PicklePersistence:
+    """Готовит PicklePersistence: создаёт каталог и возвращает объект.
+
+    Сохраняем только ``user_data``/``chat_data``/``conversations`` — этого
+    достаточно, чтобы после перезапуска бот помнил, на каком шаге регистрации
+    каждый магистрант. ``bot_data`` не персистим, чтобы не тащить между
+    запусками устаревший ``BotConfig`` (мы всегда перезаписываем его в
+    ``build_application``).
+    """
+
+    persistence_path = config.persistence_file
+    persistence_path.parent.mkdir(parents=True, exist_ok=True)
+    return PicklePersistence(
+        filepath=persistence_path,
+        store_data=PersistenceInput(
+            bot_data=False, chat_data=True, user_data=True, callback_data=False
+        ),
+    )
+
+
 def build_application(config: BotConfig) -> Application:
     """Собирает Application с ConversationHandler регистрации.
 
@@ -68,7 +90,13 @@ def build_application(config: BotConfig) -> Application:
     через ``CONFIG_BOT_DATA_KEY``.
     """
 
-    application = Application.builder().token(config.telegram_bot_token).build()
+    persistence = _build_persistence(config)
+    application = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .persistence(persistence)
+        .build()
+    )
     application.bot_data[CONFIG_BOT_DATA_KEY] = config
 
     field_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, receive_field)
@@ -85,6 +113,8 @@ def build_application(config: BotConfig) -> Application:
     )
 
     conv_handler = ConversationHandler(
+        name="registration",
+        persistent=True,
         entry_points=[
             CommandHandler("start", start),
             CommandHandler("project_card", project_card_start),

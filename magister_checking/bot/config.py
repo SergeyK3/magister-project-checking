@@ -18,6 +18,13 @@ except ImportError:  # python-dotenv не обязателен в рантайм
 
 DEFAULT_WORKSHEET_NAME = "Регистрация"
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_PERSISTENCE_FILE = Path("state") / "magistrcheckbot_state.pickle"
+"""Путь по умолчанию к файлу PicklePersistence.
+
+Интерпретируется относительно текущей рабочей директории на момент запуска
+(обычно это корень репозитория — именно туда смотрят PowerShell-скрипты
+``scripts/bot_start.ps1`` / ``scripts/bot_stop.ps1``). Каталог ``state/``
+попадает под `.gitignore`, поэтому файл состояния не утечёт в Git."""
 
 
 class ConfigError(RuntimeError):
@@ -34,6 +41,7 @@ class BotConfig:
     project_card_output_folder_url: str
     google_service_account_json: Path
     log_level: int
+    persistence_file: Path
 
     @property
     def log_level_name(self) -> str:
@@ -79,6 +87,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     worksheet_name = _read_env("WORKSHEET_NAME", DEFAULT_WORKSHEET_NAME) or DEFAULT_WORKSHEET_NAME
     project_card_output_folder_url = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
+    persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
 
     missing = [
         name
@@ -96,6 +105,11 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         )
 
     sa_path = _resolve_service_account_path(sa_path_raw, sa_content_raw)
+    persistence_file = (
+        Path(persistence_file_raw).expanduser()
+        if persistence_file_raw
+        else DEFAULT_PERSISTENCE_FILE
+    )
 
     return BotConfig(
         telegram_bot_token=token,  # type: ignore[arg-type]
@@ -104,6 +118,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         project_card_output_folder_url=project_card_output_folder_url,
         google_service_account_json=sa_path,
         log_level=_coerce_log_level(log_level_raw),
+        persistence_file=persistence_file,
     )
 
 

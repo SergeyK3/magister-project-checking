@@ -9,7 +9,11 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from unittest.mock import patch
 
-from magister_checking.bot.config import ConfigError, load_config
+from magister_checking.bot.config import (
+    DEFAULT_PERSISTENCE_FILE,
+    ConfigError,
+    load_config,
+)
 
 
 _SAMPLE_JSON = {
@@ -48,6 +52,31 @@ class LoadConfigTests(unittest.TestCase):
                 cfg = load_config()
             self.assertEqual(str(cfg.google_service_account_json), sa_path)
             self.assertEqual(cfg.project_card_output_folder_url, "")
+            self.assertEqual(cfg.persistence_file, DEFAULT_PERSISTENCE_FILE)
+        finally:
+            os.unlink(sa_path)
+
+    def test_persistence_file_override(self) -> None:
+        """BOT_PERSISTENCE_FILE переопределяет путь по умолчанию."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with TemporaryDirectory() as tmp:
+                custom = Path(tmp) / "custom" / "state.pickle"
+                with patch.dict(
+                    os.environ,
+                    _base_env(
+                        {
+                            "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                            "BOT_PERSISTENCE_FILE": str(custom),
+                        }
+                    ),
+                    clear=True,
+                ):
+                    cfg = load_config()
+                self.assertEqual(cfg.persistence_file, custom)
         finally:
             os.unlink(sa_path)
 

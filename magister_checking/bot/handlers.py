@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import io
 import logging
 from typing import Awaitable, Callable, List, Optional
 
-from telegram import Update
+from telegram import InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from magister_checking.bot.config import BotConfig
@@ -19,23 +21,30 @@ from magister_checking.bot.models import (
     get_missing_field_keys,
     get_missing_fields,
 )
+from magister_checking.bot.report_enrichment import build_sheet_enrichment
 from magister_checking.bot.sheets_repo import (
+    ADMINS_WORKSHEET_NAME,
     attach_telegram_to_row,
     find_row_by_telegram_id,
     find_rows_by_fio,
     get_worksheet,
+    is_admin_telegram_id,
+    load_row_values,
     load_user,
+    sync_registration_dashboard,
     upsert_user,
+    upsert_user_with_extras,
 )
 from magister_checking.bot.validation import (
     SKIP_TOKEN,
     check_report_url,
     normalize_text,
 )
+from magister_checking.project_card_pipeline import generate_project_card_pdf
 
 logger = logging.getLogger("magistrcheckbot")
 
-ASK_FIELD, ASK_CONFIRM, BIND_ASK_FIO, BIND_CONFIRM = range(4)
+ASK_FIELD, ASK_CONFIRM, BIND_ASK_FIO, BIND_CONFIRM, PROJECT_CARD_ASK_TARGET = range(5)
 
 USER_DATA_FORM_KEY = "form_data"
 USER_DATA_PENDING_KEY = "pending_fields"
@@ -43,6 +52,7 @@ USER_DATA_CURRENT_KEY = "current_field"
 USER_DATA_BIND_ROW_KEY = "bind_candidate_row"
 
 CONFIG_BOT_DATA_KEY = "bot_config"
+ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 
 
 def _bot_config(context: ContextTypes.DEFAULT_TYPE) -> BotConfig:
@@ -60,6 +70,21 @@ def _get_user_form(context: ContextTypes.DEFAULT_TYPE) -> UserForm:
         form = UserForm()
         context.user_data[USER_DATA_FORM_KEY] = form
     return form
+
+
+def _admin_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[ADMIN_PROJECT_CARD_BUTTON]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    tg_user = update.effective_user
+    if tg_user is None:
+        return False
+    return is_admin_telegram_id(_bot_config(context), str(tg_user.id))
 
 
 def _set_telegram_identity(user_form: UserForm, update: Update) -> None:
@@ -115,13 +140,60 @@ def _summary_text(user_form: UserForm) -> str:
         "Первичная проверка ссылки:",
         f"- формат URL: {user_form.report_url_valid or '—'}",
         f"- доступность: {user_form.report_url_accessible or '—'}",
-        f"- предположительно открыт доступ: {user_form.report_url_public_guess or '—'}",
         "",
         f"Статус заполнения: {user_form.fill_status or '—'}",
         "",
         "Подтвердите сохранение: да / нет",
     ]
     return "\n".join(lines)
+
+
+def _review_prompt_text() -> str:
+    return (
+        "Сейчас я покажу данные, которые будут сохранены в таблицу.\n\n"
+        "Пожалуйста, внимательно проверьте их.\n"
+        "Если всё верно, напишите: Да.\n"
+        f"Если есть ошибка, пройдём вопросы заново: для верных ответов отправляйте {SKIP_TOKEN}, "
+        "а неверный ответ перепишите."
+    )
+
+
+def _registration_timestamp() -> str:
+    now = datetime.now()
+    return f"{now.day:02d}.{now.month:02d}.{now.year} {now.hour}:{now.minute:02d}:{now.second:02d}"
+
+
+def _is_skip_text(raw: str) -> bool:
+    stripped = (raw or "").strip()
+    return stripped in {SKIP_TOKEN, "/skip"}
+
+
+def _resolve_project_card_target_row(
+    worksheet,
+    raw_target: str,
+) -> tuple[int | None, str | None]:
+    target = normalize_text(raw_target)
+    if not target:
+        return None, "Введите номер строки или ФИО магистранта."
+
+    if target.isdigit():
+        row_number = int(target)
+        if row_number < 2:
+            return None, "Укажите номер строки данных, начиная со 2-й."
+        row = load_row_values(worksheet, row_number)
+        if not any(str(value).strip() for value in row):
+            return None, f"Строка {row_number} пуста или не найдена."
+        return row_number, None
+
+    matches = find_rows_by_fio(worksheet, target)
+    if not matches:
+        return None, "Не нашёл магистранта с таким ФИО. Введите ФИО точнее или номер строки."
+    if len(matches) > 1:
+        return None, (
+            "Нашёл несколько строк с таким ФИО. "
+            f"Уточните номер строки: {', '.join(str(row) for row in matches)}"
+        )
+    return matches[0], None
 
 
 async def _prompt_next(
@@ -135,6 +207,7 @@ async def _prompt_next(
     if next_field is None:
         _refresh_status(user_form)
         _record_action(user_form, "show_summary")
+        await update.message.reply_text(_review_prompt_text())
         await update.message.reply_text(_summary_text(user_form))
         return ASK_CONFIRM
 
@@ -158,7 +231,7 @@ async def _start_new_registration(
         "Я последовательно задам вопросы и сохраню данные в таблицу.\n\n"
         f"Если какое-то поле хотите заполнить позже, отправьте {SKIP_TOKEN} или /skip."
     )
-    _set_pending_fields(context, list(REQUIRED_FIELDS))
+    _set_pending_fields(context, get_missing_field_keys(user_form))
     return await _prompt_next(update, context)
 
 
@@ -238,6 +311,90 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return BIND_ASK_FIO
 
 
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показывает администратору кнопку запуска формирования карточки."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Панель администратора.\n\n"
+        "Нажмите кнопку ниже или используйте /project_card, чтобы сформировать PDF-карточку проекта.",
+        reply_markup=_admin_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def project_card_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запускает сценарий формирования карточки проекта для администратора."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Введите номер строки листа `Регистрация` или ФИО магистранта.\n\n"
+        "Я обновлю данные по отчету и диссертации, сформирую PDF-карточку и пришлю файл.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return PROJECT_CARD_ASK_TARGET
+
+
+async def project_card_receive_target(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Обрабатывает цель для формирования PDF-карточки проекта."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    cfg = _bot_config(context)
+    worksheet = get_worksheet(cfg)
+    target = update.message.text or ""
+    row_number, error_message = _resolve_project_card_target_row(worksheet, target)
+    if error_message:
+        await update.message.reply_text(error_message)
+        return PROJECT_CARD_ASK_TARGET
+
+    assert row_number is not None
+    await update.message.reply_text(
+        f"Формирую карточку проекта для строки {row_number}. Это может занять до минуты."
+    )
+    try:
+        result = generate_project_card_pdf(config=cfg, row_number=row_number)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось сформировать карточку проекта для строки %s", row_number)
+        await update.message.reply_text(
+            "Не удалось сформировать карточку проекта.\n\n"
+            f"Причина: {exc}",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_document(
+        document=InputFile(io.BytesIO(result.pdf_bytes), filename=result.pdf_name),
+        caption=(
+            "Карточка проекта сформирована.\n\n"
+            f"Строка: {result.row_number}\n"
+            f"Файл: {result.pdf_name}"
+        ),
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
 async def skip_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Команда /skip на этапе привязки — сразу запускает новую регистрацию."""
 
@@ -260,6 +417,7 @@ async def receive_bind_fio(
     if not fio:
         return await _start_new_registration(update, context)
 
+    user_form.fio = fio
     matches = find_rows_by_fio(worksheet, fio)
     if not matches:
         await update.message.reply_text(
@@ -351,19 +509,22 @@ async def receive_field(
 
     user_form = _get_user_form(context)
     raw = update.message.text or ""
-    value = normalize_text(raw)
-    setattr(user_form, field_key, value)
+    if _is_skip_text(raw):
+        value = getattr(user_form, field_key)
+    else:
+        value = normalize_text(raw)
+        setattr(user_form, field_key, value)
 
     if field_key == "report_url":
-        if value:
-            valid, accessible, public_guess = check_report_url(value)
+        if _is_skip_text(raw) and getattr(user_form, field_key):
+            pass
+        elif value:
+            valid, accessible = check_report_url(value)
             user_form.report_url_valid = valid
             user_form.report_url_accessible = accessible
-            user_form.report_url_public_guess = public_guess
         else:
             user_form.report_url_valid = ""
             user_form.report_url_accessible = ""
-            user_form.report_url_public_guess = ""
 
     _refresh_status(user_form)
     _record_action(user_form, f"answered_{field_key}")
@@ -383,11 +544,10 @@ async def skip_field(
         return ConversationHandler.END
 
     user_form = _get_user_form(context)
-    setattr(user_form, field_key, "")
     if field_key == "report_url":
-        user_form.report_url_valid = ""
-        user_form.report_url_accessible = ""
-        user_form.report_url_public_guess = ""
+        if not getattr(user_form, field_key):
+            user_form.report_url_valid = ""
+            user_form.report_url_accessible = ""
 
     _refresh_status(user_form)
     _record_action(user_form, f"skipped_{field_key}")
@@ -407,18 +567,45 @@ async def ask_confirm(
         return ASK_CONFIRM
 
     if answer in {"нет", "no"}:
-        _record_action(user_form, "cancelled_save")
+        _record_action(user_form, "requested_correction")
         await update.message.reply_text(
-            "Сохранение отменено. Нажмите /start, чтобы начать заново."
+            "Хорошо, давайте исправим данные.\n\n"
+            f"Сейчас я пройду все поля заново. Для верных значений отправляйте {SKIP_TOKEN}, "
+            "а неверный ответ перепишите."
         )
-        return ConversationHandler.END
+        _set_pending_fields(context, list(REQUIRED_FIELDS))
+        return await _prompt_next(update, context)
 
     cfg = _bot_config(context)
     worksheet = get_worksheet(cfg)
+    existing_row = find_row_by_telegram_id(worksheet, user_form.telegram_id)
 
     _refresh_status(user_form)
     _record_action(user_form, "confirmed_save")
-    row_num = upsert_user(worksheet, user_form)
+    extra_values: dict[str, str] = {}
+    if not existing_row:
+        extra_values["timestamp"] = _registration_timestamp()
+    if user_form.report_url:
+        try:
+            extra_values.update(build_sheet_enrichment(cfg, user_form))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Не удалось обогатить строку отчёта для telegram_id=%s",
+                user_form.telegram_id or "?",
+            )
+
+    row_num = (
+        upsert_user_with_extras(worksheet, user_form, extra_values=extra_values)
+        if extra_values
+        else upsert_user(worksheet, user_form)
+    )
+    try:
+        sync_registration_dashboard(cfg)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось обновить Dashboard для spreadsheet_id=%s",
+            cfg.spreadsheet_id,
+        )
 
     missing = get_missing_fields(user_form)
     if missing:
@@ -427,6 +614,7 @@ async def ask_confirm(
             f"Строка в таблице: {row_num}\n"
             f"Статус: {user_form.fill_status}\n"
             f"Ещё не заполнено: {', '.join(missing)}\n\n"
+            "Спасибо. Регистрация сохранена.\n"
             "Позже вы можете снова нажать /start и продолжить."
         )
     else:
@@ -434,7 +622,7 @@ async def ask_confirm(
             "Данные сохранены.\n\n"
             f"Строка в таблице: {row_num}\n"
             f"Статус: {user_form.fill_status}\n"
-            "Регистрация завершена."
+            "Спасибо. Регистрация завершена."
         )
 
     return ConversationHandler.END
@@ -452,18 +640,23 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 __all__ = [
+    "ADMIN_PROJECT_CARD_BUTTON",
     "ASK_FIELD",
     "ASK_CONFIRM",
     "BIND_ASK_FIO",
     "BIND_CONFIRM",
     "CONFIG_BOT_DATA_KEY",
+    "PROJECT_CARD_ASK_TARGET",
     "USER_DATA_BIND_ROW_KEY",
     "USER_DATA_FORM_KEY",
     "USER_DATA_PENDING_KEY",
     "USER_DATA_CURRENT_KEY",
+    "admin_menu",
     "ask_confirm",
     "cancel",
     "confirm_bind",
+    "project_card_receive_target",
+    "project_card_start",
     "receive_bind_fio",
     "receive_field",
     "skip_bind",

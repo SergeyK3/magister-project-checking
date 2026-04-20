@@ -27,6 +27,7 @@ def _base_env(overrides: dict) -> dict:
         "TELEGRAM_BOT_TOKEN": "stub",
         "SPREADSHEET_ID": "sheet123",
         "WORKSHEET_NAME": "Регистрация",
+        "PROJECT_CARD_OUTPUT_FOLDER_URL": "",
         "LOG_LEVEL": "INFO",
     }
     env.update(overrides)
@@ -46,6 +47,30 @@ class LoadConfigTests(unittest.TestCase):
             ):
                 cfg = load_config()
             self.assertEqual(str(cfg.google_service_account_json), sa_path)
+            self.assertEqual(cfg.project_card_output_folder_url, "")
+        finally:
+            os.unlink(sa_path)
+
+    def test_project_card_output_folder_url(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_CARD_OUTPUT_FOLDER_URL": "https://drive.google.com/drive/folders/abc123",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config()
+            self.assertEqual(
+                cfg.project_card_output_folder_url,
+                "https://drive.google.com/drive/folders/abc123",
+            )
         finally:
             os.unlink(sa_path)
 
@@ -80,7 +105,7 @@ class LoadConfigTests(unittest.TestCase):
     def test_missing_required_vars(self) -> None:
         with patch.dict(os.environ, {"WORKSHEET_NAME": "x"}, clear=True):
             with self.assertRaises(ConfigError) as ctx:
-                load_config()
+                load_config(dotenv_path=Path("__missing_test_env__.env"))
         msg = str(ctx.exception)
         self.assertIn("TELEGRAM_BOT_TOKEN", msg)
         self.assertIn("SPREADSHEET_ID", msg)

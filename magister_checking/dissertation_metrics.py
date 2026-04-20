@@ -1,4 +1,4 @@
-"""Метрики по документу диссертации (заголовки, грубая оценка страниц и списка литературы)."""
+"""Метрики по документу диссертации (страницы, источники, оформление)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from googleapiclient.http import MediaIoBaseDownload
 from docx import Document  # type: ignore[import-untyped]
+from docx.enum.text import WD_LINE_SPACING  # type: ignore[import-untyped]
 
 from magister_checking.docs_extract import extract_plain_text
 
@@ -35,6 +36,10 @@ class DissertationMetrics:
     has_literature_review: bool
     has_results: bool
     has_discussion: bool
+    formatting_compliance: bool | None
+    font_size_14_ratio: float | None
+    times_new_roman_ratio: float | None
+    single_spacing_ratio: float | None
     headings_found: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -70,6 +75,257 @@ def _paragraph_text(paragraph: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _iter_paragraphs_in_content(content: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    for element in content:
+        if "paragraph" in element:
+            yield element["paragraph"]
+        elif "table" in element:
+            for row in element["table"].get("tableRows", []):
+                for cell in row.get("tableCells", []):
+                    yield from _iter_paragraphs_in_content(cell.get("content", []))
+
+
+def iter_paragraphs(document: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Итерирует все paragraph-элементы документа, включая таблицы."""
+
+    content = document.get("body", {}).get("content", [])
+    yield from _iter_paragraphs_in_content(content)
+
+
+def _count_styled_chars(text: str) -> int:
+    return sum(1 for ch in text if not ch.isspace())
+
+
+def _normalize_font_family(name: str | None) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+
+def _is_times_new_roman(name: str | None) -> bool:
+    return _normalize_font_family(name) == "times new roman"
+
+
+def _is_14_pt(magnitude: float | int | None, unit: str | None = None) -> bool:
+    if magnitude is None:
+        return False
+    if unit and str(unit).upper() not in {"PT", ""}:
+        return False
+    return abs(float(magnitude) - 14.0) <= 0.1
+
+
+def _is_single_spacing_percent(value: float | int | None) -> bool:
+    if value is None:
+        return True
+    return abs(float(value) - 100.0) <= 0.5
+
+
+def _safe_ratio(part: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return part / total
+
+
+def _formatting_compliance(
+    *,
+    font_size_ratio: float | None,
+    font_family_ratio: float | None,
+    line_spacing_ratio: float | None,
+) -> bool | None:
+    ratios = (font_size_ratio, font_family_ratio, line_spacing_ratio)
+    if any(r is None for r in ratios):
+        return None
+    return all((r or 0.0) > 0.95 for r in ratios)
+
+
+def _google_named_styles(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    styles = (document.get("namedStyles") or {}).get("styles", [])
+    out: dict[str, dict[str, Any]] = {}
+    for style in styles:
+        name = str(style.get("namedStyleType") or "").strip()
+        if name:
+            out[name] = style
+    return out
+
+
+def _google_effective_text_style(
+    *,
+    named_styles: dict[str, dict[str, Any]],
+    paragraph: dict[str, Any],
+    run_style: dict[str, Any] | None,
+) -> dict[str, Any]:
+    paragraph_style = paragraph.get("paragraphStyle") or {}
+    named_style = str(paragraph_style.get("namedStyleType") or "NORMAL_TEXT")
+    base = dict((named_styles.get(named_style) or {}).get("textStyle") or {})
+    if run_style:
+        base.update(run_style)
+    return base
+
+
+def _google_effective_paragraph_style(
+    *,
+    named_styles: dict[str, dict[str, Any]],
+    paragraph: dict[str, Any],
+) -> dict[str, Any]:
+    paragraph_style = paragraph.get("paragraphStyle") or {}
+    named_style = str(paragraph_style.get("namedStyleType") or "NORMAL_TEXT")
+    base = dict((named_styles.get(named_style) or {}).get("paragraphStyle") or {})
+    base.update(paragraph_style)
+    return base
+
+
+def _analyze_google_doc_formatting(document: dict[str, Any]) -> tuple[bool | None, float | None, float | None, float | None]:
+    named_styles = _google_named_styles(document)
+    total_chars = 0
+    font_size_chars = 0
+    font_family_chars = 0
+    total_paragraphs = 0
+    single_spacing_paragraphs = 0
+
+    for paragraph in iter_paragraphs(document):
+        text = _paragraph_text(paragraph)
+        if text.strip():
+            total_paragraphs += 1
+            paragraph_style = _google_effective_paragraph_style(
+                named_styles=named_styles,
+                paragraph=paragraph,
+            )
+            if _is_single_spacing_percent(paragraph_style.get("lineSpacing")):
+                single_spacing_paragraphs += 1
+
+        for element in paragraph.get("elements", []):
+            text_run = element.get("textRun") or {}
+            content = str(text_run.get("content") or "")
+            chars = _count_styled_chars(content)
+            if chars <= 0:
+                continue
+            style = _google_effective_text_style(
+                named_styles=named_styles,
+                paragraph=paragraph,
+                run_style=text_run.get("textStyle") or {},
+            )
+            total_chars += chars
+            font_size = style.get("fontSize") or {}
+            if _is_14_pt(font_size.get("magnitude"), font_size.get("unit")):
+                font_size_chars += chars
+            family = (style.get("weightedFontFamily") or {}).get("fontFamily") or style.get("fontFamily")
+            if _is_times_new_roman(family):
+                font_family_chars += chars
+
+    font_size_ratio = _safe_ratio(font_size_chars, total_chars)
+    font_family_ratio = _safe_ratio(font_family_chars, total_chars)
+    line_spacing_ratio = _safe_ratio(single_spacing_paragraphs, total_paragraphs)
+    return (
+        _formatting_compliance(
+            font_size_ratio=font_size_ratio,
+            font_family_ratio=font_family_ratio,
+            line_spacing_ratio=line_spacing_ratio,
+        ),
+        font_size_ratio,
+        font_family_ratio,
+        line_spacing_ratio,
+    )
+
+
+def _iter_docx_paragraphs(container: Any) -> Iterator[Any]:
+    for paragraph in getattr(container, "paragraphs", []):
+        yield paragraph
+    for table in getattr(container, "tables", []):
+        for row in table.rows:
+            for cell in row.cells:
+                yield from _iter_docx_paragraphs(cell)
+
+
+def _docx_font_size_pt(run: Any, paragraph: Any, document: Any) -> float | None:
+    normal_style = document.styles["Normal"] if "Normal" in document.styles else None
+    candidates = [
+        getattr(getattr(run, "font", None), "size", None),
+        getattr(getattr(getattr(run, "style", None), "font", None), "size", None),
+        getattr(getattr(getattr(paragraph, "style", None), "font", None), "size", None),
+        getattr(getattr(normal_style, "font", None), "size", None),
+    ]
+    for value in candidates:
+        if value is not None:
+            try:
+                return float(value.pt)
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _docx_font_name(run: Any, paragraph: Any, document: Any) -> str | None:
+    normal_style = document.styles["Normal"] if "Normal" in document.styles else None
+    candidates = [
+        getattr(getattr(run, "font", None), "name", None),
+        getattr(getattr(getattr(run, "style", None), "font", None), "name", None),
+        getattr(getattr(getattr(paragraph, "style", None), "font", None), "name", None),
+        getattr(getattr(normal_style, "font", None), "name", None),
+    ]
+    for value in candidates:
+        if value:
+            return str(value)
+    return None
+
+
+def _docx_is_single_spacing(paragraph: Any, document: Any) -> bool:
+    normal_style = document.styles["Normal"] if "Normal" in document.styles else None
+    fmt_candidates = [
+        getattr(paragraph, "paragraph_format", None),
+        getattr(getattr(paragraph, "style", None), "paragraph_format", None),
+        getattr(normal_style, "paragraph_format", None),
+    ]
+    for fmt in fmt_candidates:
+        if fmt is None:
+            continue
+        rule = getattr(fmt, "line_spacing_rule", None)
+        if rule == WD_LINE_SPACING.SINGLE:
+            return True
+        value = getattr(fmt, "line_spacing", None)
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            return abs(float(value) - 1.0) <= 0.05
+        return False
+    return True
+
+
+def _analyze_docx_formatting(document: Any) -> tuple[bool | None, float | None, float | None, float | None]:
+    total_chars = 0
+    font_size_chars = 0
+    font_family_chars = 0
+    total_paragraphs = 0
+    single_spacing_paragraphs = 0
+
+    for paragraph in _iter_docx_paragraphs(document):
+        if (paragraph.text or "").strip():
+            total_paragraphs += 1
+            if _docx_is_single_spacing(paragraph, document):
+                single_spacing_paragraphs += 1
+
+        for run in getattr(paragraph, "runs", []):
+            text = str(getattr(run, "text", "") or "")
+            chars = _count_styled_chars(text)
+            if chars <= 0:
+                continue
+            total_chars += chars
+            if _is_14_pt(_docx_font_size_pt(run, paragraph, document)):
+                font_size_chars += chars
+            if _is_times_new_roman(_docx_font_name(run, paragraph, document)):
+                font_family_chars += chars
+
+    font_size_ratio = _safe_ratio(font_size_chars, total_chars)
+    font_family_ratio = _safe_ratio(font_family_chars, total_chars)
+    line_spacing_ratio = _safe_ratio(single_spacing_paragraphs, total_paragraphs)
+    return (
+        _formatting_compliance(
+            font_size_ratio=font_size_ratio,
+            font_family_ratio=font_family_ratio,
+            line_spacing_ratio=line_spacing_ratio,
+        ),
+        font_size_ratio,
+        font_family_ratio,
+        line_spacing_ratio,
+    )
+
+
 def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     plain = extract_plain_text(document)
     headings = list(iter_heading_texts(document))
@@ -86,10 +342,15 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     sources = _estimate_sources_count(plain)
     review_pages, review_sources = _estimate_review_metrics(plain)
     pages = max(1, len(plain) // _CHARS_PER_PAGE_RU)
+    formatting_compliance, font_size_ratio, font_family_ratio, line_spacing_ratio = (
+        _analyze_google_doc_formatting(document)
+    )
 
     notes: list[str] = []
     if sources is None:
         notes.append("Число источников не оценено (маркер списка не найден).")
+    if formatting_compliance is None:
+        notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
     return DissertationMetrics(
         approx_pages=pages,
@@ -100,6 +361,10 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
         has_literature_review=has_review,
         has_results=has_results,
         has_discussion=has_discussion,
+        formatting_compliance=formatting_compliance,
+        font_size_14_ratio=font_size_ratio,
+        times_new_roman_ratio=font_family_ratio,
+        single_spacing_ratio=line_spacing_ratio,
         headings_found=headings[:30],
         notes=notes,
     )
@@ -218,6 +483,9 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
     has_discussion = any("обсуждение" in h or "вывод" in h for h in low_heads)
 
     sources = _estimate_sources_count(plain)
+    formatting_compliance, font_size_ratio, font_family_ratio, line_spacing_ratio = (
+        _analyze_docx_formatting(doc)
+    )
 
     # pages_total
     pages_total = _docx_page_count(docx_bytes)
@@ -262,6 +530,8 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         notes.append("Страницы в docx не найдены (docProps/app.xml).")
     if review_text and review_sources is None:
         notes.append("Источники в обзоре не оценены (не найден шаблон нумерации).")
+    if formatting_compliance is None:
+        notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
     return DissertationMetrics(
         approx_pages=approx_pages,
@@ -272,6 +542,10 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         has_literature_review=has_review,
         has_results=has_results,
         has_discussion=has_discussion,
+        formatting_compliance=formatting_compliance,
+        font_size_14_ratio=font_size_ratio,
+        times_new_roman_ratio=font_family_ratio,
+        single_spacing_ratio=line_spacing_ratio,
         headings_found=headings[:30],
         notes=notes,
     )

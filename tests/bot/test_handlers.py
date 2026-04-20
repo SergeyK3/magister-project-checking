@@ -11,13 +11,18 @@ from telegram.ext import ConversationHandler
 
 from magister_checking.bot import handlers
 from magister_checking.bot.handlers import (
+    ADMIN_PROJECT_CARD_BUTTON,
     ASK_CONFIRM,
     ASK_FIELD,
     BIND_ASK_FIO,
     BIND_CONFIRM,
+    PROJECT_CARD_ASK_TARGET,
+    admin_menu,
     ask_confirm,
     cancel,
     confirm_bind,
+    project_card_receive_target,
+    project_card_start,
     receive_bind_fio,
     receive_field,
     skip_bind,
@@ -52,6 +57,7 @@ def _make_update(
     update.effective_user.last_name = last_name
     update.message.text = text
     update.message.reply_text = AsyncMock()
+    update.message.reply_document = AsyncMock()
     return update
 
 
@@ -64,6 +70,14 @@ def _patch_worksheet(worksheet: FakeWorksheet):
         "magister_checking.bot.handlers.get_worksheet",
         return_value=worksheet,
     )
+
+
+def _patch_dashboard_sync():
+    return patch("magister_checking.bot.handlers.sync_registration_dashboard")
+
+
+def _patch_admin_check(value: bool):
+    return patch("magister_checking.bot.handlers.is_admin_telegram_id", return_value=value)
 
 
 class StartHandlerTests(unittest.TestCase):
@@ -159,7 +173,7 @@ class ReceiveFieldTests(unittest.TestCase):
         update = _make_update(text="https://docs.google.com/document/d/abc/edit")
         with patch(
             "magister_checking.bot.handlers.check_report_url",
-            return_value=("yes", "yes", "yes"),
+            return_value=("yes", "yes"),
         ) as mock_check, _patch_worksheet(ws):
             state = _run(receive_field(update, ctx))
 
@@ -168,12 +182,32 @@ class ReceiveFieldTests(unittest.TestCase):
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.report_url_valid, "yes")
         self.assertEqual(form.report_url_accessible, "yes")
-        self.assertEqual(form.report_url_public_guess, "yes")
         self.assertEqual(form.fill_status, "REGISTERED")
+        sent_texts = [call.args[0] for call in update.message.reply_text.await_args_list]
+        self.assertIn("Сейчас я покажу данные", sent_texts[0])
+
+    def test_skip_token_keeps_existing_value_during_recheck(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(
+            telegram_id="111",
+            fio="Иванов И.И.",
+        )
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = ["workplace"]
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "fio"
+
+        update = _make_update(text="-")
+        with _patch_worksheet(ws):
+            state = _run(receive_field(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.fio, "Иванов И.И.")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "workplace")
 
 
 class SkipFieldTests(unittest.TestCase):
-    def test_skip_clears_field_and_advances(self) -> None:
+    def test_skip_keeps_existing_field_and_advances(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
         ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(telegram_id="111", fio="Old")
@@ -186,7 +220,7 @@ class SkipFieldTests(unittest.TestCase):
 
         self.assertEqual(state, ASK_FIELD)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
-        self.assertEqual(form.fio, "")
+        self.assertEqual(form.fio, "Old")
         self.assertEqual(form.last_action, "ask_group_name")
         self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
 
@@ -212,7 +246,6 @@ class AskConfirmTests(unittest.TestCase):
             report_url="https://docs.google.com/document/d/abc/edit",
             report_url_valid="yes",
             report_url_accessible="yes",
-            report_url_public_guess="yes",
             fill_status="REGISTERED",
         )
         ctx.user_data[handlers.USER_DATA_FORM_KEY] = form
@@ -224,7 +257,13 @@ class AskConfirmTests(unittest.TestCase):
         self._prepare_form(ctx)
 
         update = _make_update(text="да")
-        with _patch_worksheet(ws):
+        with patch(
+            "magister_checking.bot.handlers.build_sheet_enrichment",
+            return_value={},
+        ), patch(
+            "magister_checking.bot.handlers._registration_timestamp",
+            return_value="20.04.2026 9:15:00",
+        ), _patch_dashboard_sync() as mock_dashboard, _patch_worksheet(ws):
             state = _run(ask_confirm(update, ctx))
 
         self.assertEqual(state, ConversationHandler.END)
@@ -232,8 +271,80 @@ class AskConfirmTests(unittest.TestCase):
         self.assertEqual(ws.rows[1][0], "111")
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.last_action, "confirmed_save")
+        mock_dashboard.assert_called_once()
 
-    def test_no_cancels(self) -> None:
+    def test_yes_saves_with_report_enrichment_when_available(self) -> None:
+        ws = FakeWorksheet(
+            [
+                [
+                    "Отметка времени",
+                    "ФИО",
+                    "Группа",
+                    "Ссылка на промежуточный отчет",
+                    "Проверка ссылки",
+                    "Доступ открыт",
+                    "Ссылка на ЛКБ",
+                    "Число страниц",
+                ]
+            ]
+        )
+        ctx = _FakeContext(ws)
+        self._prepare_form(ctx)
+
+        update = _make_update(text="да")
+        with patch(
+            "magister_checking.bot.handlers.build_sheet_enrichment",
+            return_value={"lkb_url": "https://drive.google.com/file/d/lkb/view", "pages_total": "87"},
+        ), patch(
+            "magister_checking.bot.handlers._registration_timestamp",
+            return_value="20.04.2026 9:15:00",
+        ) as mock_enrich, _patch_dashboard_sync(), _patch_worksheet(ws):
+            state = _run(ask_confirm(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        mock_enrich.assert_called_once()
+        self.assertEqual(ws.rows[1][0], "20.04.2026 9:15:00")
+        self.assertEqual(ws.rows[1][1], "Иванов")
+        self.assertEqual(ws.rows[1][6], "https://drive.google.com/file/d/lkb/view")
+        self.assertEqual(ws.rows[1][7], "87")
+
+    def test_yes_saves_with_report_enrichment_placeholders(self) -> None:
+        ws = FakeWorksheet(
+            [
+                [
+                    "Отметка времени",
+                    "ФИО",
+                    "Группа",
+                    "Ссылка на папку 1",
+                    "Ссылка на ЛКБ",
+                    "Ссылка на диссер",
+                ]
+            ]
+        )
+        ctx = _FakeContext(ws)
+        self._prepare_form(ctx)
+
+        update = _make_update(text="да")
+        with patch(
+            "magister_checking.bot.handlers.build_sheet_enrichment",
+            return_value={
+                "project_folder_url": "url отсутствует",
+                "lkb_url": "url отсутствует",
+                "dissertation_url": "url недоступен",
+            },
+        ), patch(
+            "magister_checking.bot.handlers._registration_timestamp",
+            return_value="20.04.2026 9:15:00",
+        ), _patch_dashboard_sync(), _patch_worksheet(ws):
+            state = _run(ask_confirm(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        self.assertEqual(ws.rows[1][0], "20.04.2026 9:15:00")
+        self.assertEqual(ws.rows[1][3], "url отсутствует")
+        self.assertEqual(ws.rows[1][4], "url отсутствует")
+        self.assertEqual(ws.rows[1][5], "url недоступен")
+
+    def test_no_requests_correction(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
         self._prepare_form(ctx)
@@ -242,10 +353,11 @@ class AskConfirmTests(unittest.TestCase):
         with _patch_worksheet(ws):
             state = _run(ask_confirm(update, ctx))
 
-        self.assertEqual(state, ConversationHandler.END)
+        self.assertEqual(state, ASK_FIELD)
         self.assertEqual(len(ws.rows), 1)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
-        self.assertEqual(form.last_action, "cancelled_save")
+        self.assertEqual(form.last_action, "ask_fio")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
 
     def test_invalid_answer_keeps_state(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -293,7 +405,8 @@ class BindFlowTests(unittest.TestCase):
             state = _run(receive_bind_fio(update, ctx))
 
         self.assertEqual(state, ASK_FIELD)
-        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_FORM_KEY].fio, "Неизвестный И.И.")
 
     def test_single_match_asks_for_confirmation(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.", group="М-101")])
@@ -339,6 +452,7 @@ class BindFlowTests(unittest.TestCase):
         self.assertEqual(state, ASK_FIELD)
         self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "")
         self.assertEqual(ctx.user_data[handlers.USER_DATA_BIND_ROW_KEY], None)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
 
     def test_already_bound_to_other_user_falls_back(self) -> None:
         ws = FakeWorksheet(
@@ -355,7 +469,7 @@ class BindFlowTests(unittest.TestCase):
 
         self.assertEqual(state, ASK_FIELD)
         self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "999")
-        self.assertEqual(ctx.user_data[handlers.USER_DATA_FORM_KEY].last_action, "ask_fio")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_FORM_KEY].last_action, "ask_group_name")
 
     def test_multiple_matches_fall_back_to_new_registration(self) -> None:
         ws = FakeWorksheet(
@@ -372,6 +486,7 @@ class BindFlowTests(unittest.TestCase):
             state = _run(receive_bind_fio(update, ctx))
 
         self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
 
 
 class CancelTests(unittest.TestCase):
@@ -386,6 +501,91 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(state, ConversationHandler.END)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.last_action, "cancelled")
+
+
+class AdminProjectCardTests(unittest.TestCase):
+    def test_admin_menu_shows_button_for_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/admin")
+
+        with _patch_admin_check(True):
+            state = _run(admin_menu(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        sent_text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Панель администратора", sent_text)
+        reply_markup = update.message.reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(reply_markup.keyboard[0][0].text, ADMIN_PROJECT_CARD_BUTTON)
+
+    def test_project_card_start_denies_non_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/project_card")
+
+        with _patch_admin_check(False):
+            state = _run(project_card_start(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        self.assertIn("только администраторам", update.message.reply_text.await_args.args[0])
+
+    def test_project_card_start_prompts_target_for_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/project_card")
+
+        with _patch_admin_check(True):
+            state = _run(project_card_start(update, ctx))
+
+        self.assertEqual(state, PROJECT_CARD_ASK_TARGET)
+        self.assertIn("Введите номер строки", update.message.reply_text.await_args.args[0])
+
+    def test_project_card_receive_target_by_row_generates_pdf(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                ["111", "ivanov", "Иван", "Иванов", "Иванов И.И.", "М-101", "", "", "", "", "https://docs.google.com/document/d/abc/edit", "yes", "yes", "REGISTERED", "confirmed_save"],
+            ]
+        )
+        ctx = _FakeContext(ws)
+        update = _make_update(text="2")
+
+        with _patch_admin_check(True), _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.generate_project_card_pdf",
+            return_value=MagicMock(
+                row_number=2,
+                pdf_name="Карточка проекта - Иванов И.И..pdf",
+                pdf_bytes=b"%PDF-1.4 test",
+            ),
+        ) as mock_generate:
+            state = _run(project_card_receive_target(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        mock_generate.assert_called_once()
+        sent_messages = [call.args[0] for call in update.message.reply_text.await_args_list]
+        self.assertIn("Формирую карточку проекта", sent_messages[0])
+        self.assertEqual(update.message.reply_document.await_count, 1)
+        self.assertIn(
+            "Карточка проекта сформирована",
+            update.message.reply_document.await_args.kwargs["caption"],
+        )
+
+    def test_project_card_receive_target_requests_clarification_on_duplicate_fio(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                ["111", "", "", "", "Иванов И.И."] + [""] * 10,
+                ["222", "", "", "", "иванов  и.и."] + [""] * 10,
+            ]
+        )
+        ctx = _FakeContext(ws)
+        update = _make_update(text="Иванов И.И.")
+
+        with _patch_admin_check(True), _patch_worksheet(ws):
+            state = _run(project_card_receive_target(update, ctx))
+
+        self.assertEqual(state, PROJECT_CARD_ASK_TARGET)
+        self.assertIn("несколько строк", update.message.reply_text.await_args.args[0])
 
 
 if __name__ == "__main__":

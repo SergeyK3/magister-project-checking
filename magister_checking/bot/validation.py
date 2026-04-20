@@ -36,51 +36,18 @@ def is_valid_url(url: str) -> bool:
     return bool(_URL_PATTERN.match(url.strip()))
 
 
-def is_probably_public_google_doc_response(text: str) -> str:
-    """Очень грубая эвристика по HTML-ответу: открыт ли документ публично.
-
-    Возвращает ``"yes"``, ``"no"`` или ``"unknown"``. Это не финальная проверка
-    прав доступа — она нужна только для первичной отметки в Sheets (п.7.3 ТЗ).
-    """
-
-    lowered = (text or "").lower()
-
-    deny_markers = (
-        "you need access",
-        "нужен доступ",
-        "request access",
-        "запросить доступ",
-        "sign in",
-        "войти",
-    )
-    for marker in deny_markers:
-        if marker in lowered:
-            return "no"
-
-    ok_markers = (
-        "docs.google.com",
-        "google docs",
-        "google drive",
-    )
-    for marker in ok_markers:
-        if marker in lowered:
-            return "yes"
-
-    return "unknown"
-
-
-def check_report_url(url: str) -> Tuple[str, str, str]:
+def check_report_url(url: str) -> Tuple[str, str]:
     """Первичная проверка ссылки на отчёт.
 
-    Возвращает кортеж ``(valid, accessible, public_guess)`` со значениями
-    ``"yes" / "no" / "unknown" / ""``. Пустая строка — поле не заполнено.
+    Возвращает кортеж ``(valid, accessible)`` со значениями
+    ``"yes" / "no" / ""``. Пустая строка — поле не заполнено.
     """
 
     if not url:
-        return "", "", ""
+        return "", ""
 
     if not is_valid_url(url):
-        return "no", "no", "no"
+        return "no", "no"
 
     try:
         response = requests.get(
@@ -90,8 +57,7 @@ def check_report_url(url: str) -> Tuple[str, str, str]:
             headers={"User-Agent": _USER_AGENT},
         )
     except requests.RequestException:
-        return "yes", "no", "unknown"
+        return "yes", "no"
 
     accessible = "yes" if response.status_code < 400 else "no"
-    public_guess = is_probably_public_google_doc_response(response.text or "")
-    return "yes", accessible, public_guess
+    return "yes", accessible

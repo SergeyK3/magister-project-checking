@@ -179,20 +179,17 @@ def _row_to_form(
             if field_key == "report_url":
                 form.report_url_valid = ""
                 form.report_url_accessible = ""
-                form.report_url_public_guess = ""
             continue
         setattr(form, field_key, value)
         last_action = f"answered_{field_key}"
         if field_key == "report_url":
             if check_links:
-                valid, accessible, public = check_report_url(value)
+                valid, accessible = check_report_url(value)
             else:
                 valid = "yes" if is_valid_url(value) else "no"
                 accessible = ""
-                public = ""
             form.report_url_valid = valid
             form.report_url_accessible = accessible
-            form.report_url_public_guess = public
 
     form.fill_status = compute_fill_status(form).value
     if get_missing_field_keys(form):

@@ -31,6 +31,7 @@ class BotConfig:
     telegram_bot_token: str
     spreadsheet_id: str
     worksheet_name: str
+    project_card_output_folder_url: str
     google_service_account_json: Path
     log_level: int
 
@@ -76,6 +77,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     sa_path_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON")
     sa_content_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
     worksheet_name = _read_env("WORKSHEET_NAME", DEFAULT_WORKSHEET_NAME) or DEFAULT_WORKSHEET_NAME
+    project_card_output_folder_url = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
 
     missing = [
@@ -99,6 +101,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         telegram_bot_token=token,  # type: ignore[arg-type]
         spreadsheet_id=spreadsheet_id,  # type: ignore[arg-type]
         worksheet_name=worksheet_name,
+        project_card_output_folder_url=project_card_output_folder_url,
         google_service_account_json=sa_path,
         log_level=_coerce_log_level(log_level_raw),
     )

@@ -14,14 +14,19 @@ from telegram.ext import (
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.handlers import (
+    ADMIN_PROJECT_CARD_BUTTON,
     ASK_CONFIRM,
     ASK_FIELD,
     BIND_ASK_FIO,
     BIND_CONFIRM,
     CONFIG_BOT_DATA_KEY,
+    PROJECT_CARD_ASK_TARGET,
+    admin_menu,
     ask_confirm,
     cancel,
     confirm_bind,
+    project_card_receive_target,
+    project_card_start,
     receive_bind_fio,
     receive_field,
     skip_bind,
@@ -62,9 +67,20 @@ def build_application(config: BotConfig) -> Application:
     bind_confirm_message_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND, confirm_bind
     )
+    project_card_target_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        project_card_receive_target,
+    )
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler("project_card", project_card_start),
+            MessageHandler(
+                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
+                project_card_start,
+            ),
+        ],
         states={
             BIND_ASK_FIO: [
                 CommandHandler("skip", skip_bind),
@@ -76,15 +92,23 @@ def build_application(config: BotConfig) -> Application:
                 field_message_handler,
             ],
             ASK_CONFIRM: [confirm_message_handler],
+            PROJECT_CARD_ASK_TARGET: [project_card_target_handler],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("start", start),
+            CommandHandler("project_card", project_card_start),
+            MessageHandler(
+                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
+                project_card_start,
+            ),
         ],
         allow_reentry=True,
     )
 
     application.add_handler(conv_handler)
+
+    application.add_handler(CommandHandler("admin", admin_menu))
     return application
 
 

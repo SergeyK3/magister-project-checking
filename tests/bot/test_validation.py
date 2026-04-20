@@ -10,7 +10,6 @@ import requests
 from magister_checking.bot.validation import (
     SKIP_TOKEN,
     check_report_url,
-    is_probably_public_google_doc_response,
     is_valid_url,
     normalize_text,
 )
@@ -48,42 +47,14 @@ class IsValidUrlTests(unittest.TestCase):
         self.assertFalse(is_valid_url("ftp://example.com/file"))
 
 
-class PublicGuessTests(unittest.TestCase):
-    def test_deny_marker_returns_no(self) -> None:
-        self.assertEqual(
-            is_probably_public_google_doc_response("Please request access"),
-            "no",
-        )
-
-    def test_ok_marker_returns_yes(self) -> None:
-        self.assertEqual(
-            is_probably_public_google_doc_response("Welcome to Google Docs"),
-            "yes",
-        )
-
-    def test_unknown(self) -> None:
-        self.assertEqual(
-            is_probably_public_google_doc_response("Some other html"),
-            "unknown",
-        )
-
-    def test_deny_takes_priority_over_ok(self) -> None:
-        self.assertEqual(
-            is_probably_public_google_doc_response(
-                "google docs, but you need access"
-            ),
-            "no",
-        )
-
-
 class CheckReportUrlTests(unittest.TestCase):
     def test_empty_url_returns_empty_tuple(self) -> None:
-        self.assertEqual(check_report_url(""), ("", "", ""))
+        self.assertEqual(check_report_url(""), ("", ""))
 
     def test_invalid_url_marks_no(self) -> None:
         self.assertEqual(
             check_report_url("not-a-url"),
-            ("no", "no", "no"),
+            ("no", "no"),
         )
 
     @patch("magister_checking.bot.validation.requests.get")
@@ -93,10 +64,10 @@ class CheckReportUrlTests(unittest.TestCase):
         response.text = "google docs page"
         mock_get.return_value = response
 
-        valid, accessible, public = check_report_url(
+        valid, accessible = check_report_url(
             "https://docs.google.com/document/d/X/edit"
         )
-        self.assertEqual((valid, accessible, public), ("yes", "yes", "yes"))
+        self.assertEqual((valid, accessible), ("yes", "yes"))
 
     @patch("magister_checking.bot.validation.requests.get")
     def test_403_response(self, mock_get: MagicMock) -> None:
@@ -105,18 +76,18 @@ class CheckReportUrlTests(unittest.TestCase):
         response.text = "you need access"
         mock_get.return_value = response
 
-        valid, accessible, public = check_report_url(
+        valid, accessible = check_report_url(
             "https://docs.google.com/document/d/X/edit"
         )
-        self.assertEqual((valid, accessible, public), ("yes", "no", "no"))
+        self.assertEqual((valid, accessible), ("yes", "no"))
 
     @patch("magister_checking.bot.validation.requests.get")
     def test_request_exception(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = requests.ConnectionError("boom")
-        valid, accessible, public = check_report_url(
+        valid, accessible = check_report_url(
             "https://docs.google.com/document/d/X/edit"
         )
-        self.assertEqual((valid, accessible, public), ("yes", "no", "unknown"))
+        self.assertEqual((valid, accessible), ("yes", "no"))
 
 
 if __name__ == "__main__":

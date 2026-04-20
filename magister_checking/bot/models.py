@@ -19,7 +19,7 @@ class FillStatus(str, Enum):
 class UserForm:
     """Регистрационная анкета магистранта.
 
-    Порядок полей жёстко соответствует 16 столбцам Google Sheets из п.8.1 ТЗ.
+    Порядок полей жёстко соответствует рабочим столбцам Google Sheets.
     """
 
     telegram_id: str = ""
@@ -35,13 +35,12 @@ class UserForm:
     report_url: str = ""
     report_url_valid: str = ""
     report_url_accessible: str = ""
-    report_url_public_guess: str = ""
     fill_status: str = ""
     last_action: str = ""
 
 
 SHEET_HEADER: List[str] = [f.name for f in fields(UserForm)]
-"""Шапка таблицы Google Sheets (16 столбцов п.8.1 ТЗ)."""
+"""Шапка таблицы Google Sheets."""
 
 
 REQUIRED_FIELDS: Tuple[str, ...] = (

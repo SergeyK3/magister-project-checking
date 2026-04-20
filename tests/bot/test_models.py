@@ -30,7 +30,7 @@ def _full_form() -> UserForm:
 
 
 class SheetHeaderTests(unittest.TestCase):
-    def test_header_contains_16_columns_in_tz_order(self) -> None:
+    def test_header_contains_15_columns_in_expected_order(self) -> None:
         expected = [
             "telegram_id",
             "telegram_username",
@@ -45,12 +45,11 @@ class SheetHeaderTests(unittest.TestCase):
             "report_url",
             "report_url_valid",
             "report_url_accessible",
-            "report_url_public_guess",
             "fill_status",
             "last_action",
         ]
         self.assertEqual(SHEET_HEADER, expected)
-        self.assertEqual(len(SHEET_HEADER), 16)
+        self.assertEqual(len(SHEET_HEADER), 15)
 
 
 class FillStatusTests(unittest.TestCase):

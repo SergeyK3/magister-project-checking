@@ -37,6 +37,14 @@ from magister_checking.bot.handlers import (
 logger = logging.getLogger("magistrcheckbot")
 
 
+_NOISY_LOGGERS_WITH_TOKEN = ("httpx", "httpcore", "telegram.ext.Updater", "telegram.bot")
+"""Логгеры, которые на INFO печатают URL с секретным TELEGRAM_BOT_TOKEN.
+
+Чтобы исключить утечку токена в stdout/файлы логов, их уровень поднимается
+минимум до WARNING — независимо от выбранного LOG_LEVEL бота.
+"""
+
+
 def configure_logging(level: int) -> None:
     """Настраивает корневое логирование, если оно ещё не настроено."""
 
@@ -47,6 +55,10 @@ def configure_logging(level: int) -> None:
         )
     else:
         logging.getLogger().setLevel(level)
+
+    noisy_level = max(level, logging.WARNING)
+    for name in _NOISY_LOGGERS_WITH_TOKEN:
+        logging.getLogger(name).setLevel(noisy_level)
 
 
 def build_application(config: BotConfig) -> Application:

@@ -438,6 +438,25 @@ class BindFlowTests(unittest.TestCase):
         self.assertEqual(form.group_name, "М-101")
         self.assertEqual(form.last_action, "ask_workplace")
 
+    def test_confirm_yes_does_not_overwrite_row_taken_during_confirmation(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.", group="М-101")])
+        ctx = self._start_in_bind_state(ws)
+
+        with _patch_worksheet(ws):
+            _run(receive_bind_fio(_make_update(text="Иванов И.И."), ctx))
+
+        ws.rows[1][SHEET_HEADER.index("telegram_id")] = "999"
+
+        update = _make_update(text="да")
+        with _patch_worksheet(ws):
+            state = _run(confirm_bind(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ws.rows[1][SHEET_HEADER.index("telegram_id")], "999")
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
+        sent_messages = [call.args[0] for call in update.message.reply_text.await_args_list]
+        self.assertIn("эта строка уже была занята", sent_messages[0])
+
     def test_confirm_no_starts_new_registration(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER), self._row(fio="Иванов И.И.")])
         ctx = self._start_in_bind_state(ws)

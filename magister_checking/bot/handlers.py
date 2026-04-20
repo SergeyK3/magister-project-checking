@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import io
 import logging
@@ -43,6 +44,7 @@ from magister_checking.bot.validation import (
 from magister_checking.project_card_pipeline import generate_project_card_pdf
 
 logger = logging.getLogger("magistrcheckbot")
+_REGISTRATION_SHEETS_LOCK = asyncio.Lock()
 
 ASK_FIELD, ASK_CONFIRM, BIND_ASK_FIO, BIND_CONFIRM, PROJECT_CARD_ASK_TARGET = range(5)
 
@@ -163,6 +165,12 @@ def _registration_timestamp() -> str:
     return f"{now.day:02d}.{now.month:02d}.{now.year} {now.hour}:{now.minute:02d}:{now.second:02d}"
 
 
+async def _call_blocking(func, /, *args, **kwargs):
+    """Выполняет блокирующий I/O в рабочем потоке, не стопоря event loop."""
+
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def _is_skip_text(raw: str) -> bool:
     stripped = (raw or "").strip()
     return stripped in {SKIP_TOKEN, "/skip"}
@@ -245,9 +253,8 @@ async def _resume_registration_from_row(
     """Переключает диалог в режим продолжения регистрации по существующей строке."""
 
     cfg = _bot_config(context)
-    worksheet = get_worksheet(cfg)
-
-    loaded = load_user(worksheet, row_number)
+    worksheet = await _call_blocking(get_worksheet, cfg)
+    loaded = await _call_blocking(load_user, worksheet, row_number)
     context.user_data[USER_DATA_FORM_KEY] = loaded
     _set_telegram_identity(loaded, update)
     _record_action(loaded, action)
@@ -286,12 +293,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Команда /start: ищет запись по Telegram ID или предлагает привязку по ФИО."""
 
     cfg = _bot_config(context)
-    worksheet = get_worksheet(cfg)
+    worksheet = await _call_blocking(get_worksheet, cfg)
 
     user_form = _get_user_form(context)
     _set_telegram_identity(user_form, update)
 
-    existing_row = find_row_by_telegram_id(worksheet, user_form.telegram_id)
+    existing_row = await _call_blocking(
+        find_row_by_telegram_id, worksheet, user_form.telegram_id
+    )
     if existing_row:
         await update.message.reply_text("Вы уже есть в таблице.")
         return await _resume_registration_from_row(
@@ -409,7 +418,7 @@ async def receive_bind_fio(
     """Обрабатывает ответ пользователя с ФИО для попытки привязки."""
 
     cfg = _bot_config(context)
-    worksheet = get_worksheet(cfg)
+    worksheet = await _call_blocking(get_worksheet, cfg)
     user_form = _get_user_form(context)
 
     raw = update.message.text or ""
@@ -418,7 +427,7 @@ async def receive_bind_fio(
         return await _start_new_registration(update, context)
 
     user_form.fio = fio
-    matches = find_rows_by_fio(worksheet, fio)
+    matches = await _call_blocking(find_rows_by_fio, worksheet, fio)
     if not matches:
         await update.message.reply_text(
             "Не нашёл записи с таким ФИО. Пройдём регистрацию с нуля."
@@ -434,7 +443,7 @@ async def receive_bind_fio(
         return await _start_new_registration(update, context)
 
     row_number = matches[0]
-    candidate = load_user(worksheet, row_number)
+    candidate = await _call_blocking(load_user, worksheet, row_number)
 
     if candidate.telegram_id and candidate.telegram_id != user_form.telegram_id:
         _record_action(user_form, "bind_already_taken")
@@ -473,15 +482,28 @@ async def confirm_bind(
         return await _start_new_registration(update, context)
 
     cfg = _bot_config(context)
-    worksheet = get_worksheet(cfg)
-    attach_telegram_to_row(
-        worksheet,
-        row_number,
-        telegram_id=user_form.telegram_id,
-        telegram_username=user_form.telegram_username,
-        telegram_first_name=user_form.telegram_first_name,
-        telegram_last_name=user_form.telegram_last_name,
-    )
+    async with _REGISTRATION_SHEETS_LOCK:
+        worksheet = await _call_blocking(get_worksheet, cfg)
+        candidate = await _call_blocking(load_user, worksheet, row_number)
+        current_telegram_id = (candidate.telegram_id or "").strip()
+        requested_telegram_id = (user_form.telegram_id or "").strip()
+        if current_telegram_id and current_telegram_id != requested_telegram_id:
+            context.user_data[USER_DATA_BIND_ROW_KEY] = None
+            await update.message.reply_text(
+                "Пока вы подтверждали привязку, эта строка уже была занята другим Telegram-аккаунтом.\n\n"
+                "Чтобы не повредить запись, запускаю обычную регистрацию с нуля."
+            )
+            return await _start_new_registration(update, context)
+
+        await _call_blocking(
+            attach_telegram_to_row,
+            worksheet,
+            row_number,
+            telegram_id=user_form.telegram_id,
+            telegram_username=user_form.telegram_username,
+            telegram_first_name=user_form.telegram_first_name,
+            telegram_last_name=user_form.telegram_last_name,
+        )
     context.user_data[USER_DATA_BIND_ROW_KEY] = None
 
     await update.message.reply_text(
@@ -577,14 +599,9 @@ async def ask_confirm(
         return await _prompt_next(update, context)
 
     cfg = _bot_config(context)
-    worksheet = get_worksheet(cfg)
-    existing_row = find_row_by_telegram_id(worksheet, user_form.telegram_id)
-
     _refresh_status(user_form)
     _record_action(user_form, "confirmed_save")
     extra_values: dict[str, str] = {}
-    if not existing_row:
-        extra_values["timestamp"] = _registration_timestamp()
     if user_form.report_url:
         try:
             extra_values.update(build_sheet_enrichment(cfg, user_form))
@@ -594,18 +611,31 @@ async def ask_confirm(
                 user_form.telegram_id or "?",
             )
 
-    row_num = (
-        upsert_user_with_extras(worksheet, user_form, extra_values=extra_values)
-        if extra_values
-        else upsert_user(worksheet, user_form)
-    )
-    try:
-        sync_registration_dashboard(cfg)
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "Не удалось обновить Dashboard для spreadsheet_id=%s",
-            cfg.spreadsheet_id,
+    async with _REGISTRATION_SHEETS_LOCK:
+        worksheet = await _call_blocking(get_worksheet, cfg)
+        existing_row = await _call_blocking(
+            find_row_by_telegram_id, worksheet, user_form.telegram_id
         )
+        save_extra_values = dict(extra_values)
+        if not existing_row:
+            save_extra_values["timestamp"] = _registration_timestamp()
+
+        if save_extra_values:
+            row_num = await _call_blocking(
+                upsert_user_with_extras,
+                worksheet,
+                user_form,
+                extra_values=save_extra_values,
+            )
+        else:
+            row_num = await _call_blocking(upsert_user, worksheet, user_form)
+        try:
+            await _call_blocking(sync_registration_dashboard, cfg)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Не удалось обновить Dashboard для spreadsheet_id=%s",
+                cfg.spreadsheet_id,
+            )
 
     missing = get_missing_fields(user_form)
     if missing:

@@ -17,6 +17,31 @@ from google.oauth2.service_account import Credentials
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import SHEET_HEADER, UserForm, compute_fill_status
 
+_SHEETS_VALUE_INPUT_OPTION = "RAW"
+"""Режим записи в Google Sheets.
+
+RAW гарантирует, что введённые магистрантом строки вида ``=IMPORTRANGE(...)``,
+``=HYPERLINK(...)``, ``=IMAGE(...)`` и т.п. сохраняются как текст и не
+исполняются как формулы. Это защита от CSV/formula-injection в листе
+регистрации, не завязанная на версию gspread.
+"""
+
+
+def _safe_update(worksheet: "gspread.Worksheet", range_a1: str, values) -> None:
+    """Обёртка над ``worksheet.update`` с явным RAW-режимом.
+
+    Если конкретная реализация worksheet (в т.ч. тестовая) не поддерживает
+    ``value_input_option``, молча откатываемся к позиционному вызову — это
+    не ослабляет защиту, потому что в production используется gspread,
+    где kwarg поддержан.
+    """
+
+    try:
+        worksheet.update(range_a1, values, value_input_option=_SHEETS_VALUE_INPUT_OPTION)
+    except TypeError:
+        worksheet.update(range_a1, values)
+
+
 _FIO_COLUMN_INDEX = SHEET_HEADER.index("fio")
 _TELEGRAM_ID_COLUMN_INDEX = SHEET_HEADER.index("telegram_id")
 _TELEGRAM_USERNAME_COLUMN_INDEX = SHEET_HEADER.index("telegram_username")
@@ -224,7 +249,7 @@ def ensure_header(worksheet: gspread.Worksheet) -> None:
     if any(str(value).strip() for value in current):
         return
     range_a1 = f"A1:{_LAST_COLUMN_LETTER}1"
-    worksheet.update(range_a1, [SHEET_HEADER])
+    _safe_update(worksheet, range_a1, [SHEET_HEADER])
 
 
 def find_row_by_telegram_id(
@@ -324,7 +349,7 @@ def attach_telegram_to_row(
         while len(row) <= col_idx:
             row.append("")
         row[col_idx] = str(value or "")
-    worksheet.update(_range_for_row(row_number, len(row)), [row])
+    _safe_update(worksheet, _range_for_row(row_number, len(row)), [row])
 
 
 def _user_to_row(user: UserForm) -> List[str]:
@@ -417,7 +442,7 @@ def save_user_to_row_with_extras(
         extra_values=extra_values,
     )
     range_a1 = _range_for_row(row_number, max(len(header), len(built_row)))
-    worksheet.update(range_a1, [built_row])
+    _safe_update(worksheet, range_a1, [built_row])
     return row_number
 
 
@@ -471,7 +496,7 @@ def sync_registration_dashboard(config: BotConfig) -> None:
         cols=2,
     )
     dashboard_rows = build_dashboard_rows(registration_worksheet)
-    dashboard_worksheet.update(_DASHBOARD_RANGE, dashboard_rows)
+    _safe_update(dashboard_worksheet, _DASHBOARD_RANGE, dashboard_rows)
 
 
 def _bool_cell(value: str) -> bool:
@@ -555,7 +580,7 @@ def upsert_user_with_extras(
             extra_values=extra_values,
         )
         range_a1 = _range_for_row(existing_row, max(len(header), len(built_row)))
-        worksheet.update(range_a1, [built_row])
+        _safe_update(worksheet, range_a1, [built_row])
         return existing_row
 
     target_row = _find_first_free_data_row(worksheet)
@@ -566,5 +591,5 @@ def upsert_user_with_extras(
         extra_values=extra_values,
     )
     range_a1 = _range_for_row(target_row, max(len(header), len(built_row)))
-    worksheet.update(range_a1, [built_row])
+    _safe_update(worksheet, range_a1, [built_row])
     return target_row

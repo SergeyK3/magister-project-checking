@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import logging.handlers
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -55,16 +58,51 @@ _NOISY_LOGGERS_WITH_TOKEN = ("httpx", "httpcore", "telegram.ext.Updater", "teleg
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
+LOG_FILE_BACKUP_COUNT = 30
+"""Сколько ротированных дневных файлов лога хранить.
+
+При ``when='midnight'`` ``TimedRotatingFileHandler`` оставляет последние
+N архивов (``bot.log.YYYY-MM-DD``) и удаляет более старые. Месяц истории
+выбран как разумный баланс «достаточно для post-mortem за прошлый
+инцидент» vs «не пухнет на диске». Поменять — править здесь и в тесте."""
+
+
+class _JsonLogFormatter(logging.Formatter):
+    """JSON-форматтер для файла: одна строка = один JSON-объект.
+
+    Поля: ``ts`` (ISO-8601, UTC), ``level``, ``logger``, ``module``,
+    ``func``, ``lineno``, ``message``. При ``logger.exception(...)`` или
+    ``exc_info=True`` добавляется поле ``exc_info`` с отформатированным
+    traceback. Не использует ``logging.Formatter.format`` для ``message``,
+    чтобы не дублировать level/name в строку (структурное поле уже их
+    несёт). ``ensure_ascii=False`` — кириллица сохраняется как есть."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "module": record.module,
+            "func": record.funcName,
+            "lineno": record.lineno,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
 
 def configure_logging(level: int, log_file: Optional[Path] = None) -> None:
     """Настраивает корневое логирование, если оно ещё не настроено.
 
-    Если задан ``log_file`` — дополнительно прикрепляется ``FileHandler``,
-    пишущий те же записи в указанный файл (UTF-8). Это нужно headless-запуску
-    через Task Scheduler: бот сам пишет лог в ``state/logs/bot.log`` через
-    стандартный Python logging, без хрупкого PowerShell-пайпа
-    ``2>&1 | Out-File`` (см. комментарий к ``BotConfig.log_file``).
-    """
+    StreamHandler остаётся текстовым (``_LOG_FORMAT``) — удобно читать в
+    консоли при foreground-запуске. Если задан ``log_file`` — добавляется
+    ``TimedRotatingFileHandler`` (``when='midnight'``,
+    ``backupCount=LOG_FILE_BACKUP_COUNT``) с JSON-форматтером, чтобы
+    headless-запуск через Task Scheduler писал структурированный лог в
+    файл; ротация по локальной полночи, истории — месяц
+    (``bot.log.YYYY-MM-DD``). Без ``log_file`` файл не пишется (см.
+    комментарий к ``BotConfig.log_file``)."""
 
     root = logging.getLogger()
     if not root.handlers:
@@ -82,9 +120,18 @@ def configure_logging(level: int, log_file: Optional[Path] = None) -> None:
             for h in root.handlers
         )
         if not already_attached:
-            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            # utc=False: ротация по локальной полуночи, suffix
+            # YYYY-MM-DD совпадает с местным календарным днём.
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                log_path,
+                when="midnight",
+                interval=1,
+                backupCount=LOG_FILE_BACKUP_COUNT,
+                encoding="utf-8",
+                utc=False,
+            )
             file_handler.setLevel(level)
-            file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+            file_handler.setFormatter(_JsonLogFormatter())
             root.addHandler(file_handler)
 
     noisy_level = max(level, logging.WARNING)

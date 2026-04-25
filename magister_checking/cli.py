@@ -100,7 +100,10 @@ def cmd_broadcast(ns: argparse.Namespace) -> int:
 
     message_path = ns.message_file
     try:
-        message = message_path.read_text(encoding="utf-8").rstrip("\n")
+        # utf-8-sig: спокойно проглотит BOM, который PowerShell ``Out-File``
+        # на Windows добавляет в файлы с -Encoding utf8 — иначе сообщение
+        # уйдёт в Telegram с невидимым ``\ufeff`` в начале первой строки.
+        message = message_path.read_text(encoding="utf-8-sig").rstrip("\n")
     except OSError as exc:
         print(f"Не удалось прочитать --message-file {message_path}: {exc}", file=sys.stderr)
         return 2

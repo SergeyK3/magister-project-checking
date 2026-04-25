@@ -168,10 +168,10 @@ def cmd_broadcast(ns: argparse.Namespace) -> int:
 
 
 def cmd_check_row(ns: argparse.Namespace) -> int:
-    """Построчная проверка магистранта (этапы 1-3 ТЗ).
+    """Построчная проверка магистранта (пайплайн листа «Регистрация»).
 
-    Печатает «справку» в stdout; лист не изменяется (sheet writes — в
-    отдельной фазе).
+    Печатает «справку» в stdout. Запись в лист — только при ``--apply``
+    (Stage 2/3/4); без флага dry-run.
     """
 
     from magister_checking.bot.config import ConfigError, load_config
@@ -469,8 +469,9 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument(
         "--apply",
         action="store_true",
-        help="записать результаты Stage 2/Stage 3 в лист (J/K/L/M/N/O + "
-        "strikethrough для недоступных Stage 3 ссылок). По умолчанию dry-run.",
+        help="записать в лист результаты Stage 2/3/4 (J:R и т.д., в т.ч. "
+        "pages_total, sources_count, compliance; см. apply_row_check_updates). "
+        "По умолчанию dry-run — лист не меняется.",
     )
     p_check.add_argument(
         "--only-if-changed",

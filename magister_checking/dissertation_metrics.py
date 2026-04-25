@@ -17,17 +17,21 @@ from magister_checking.docs_extract import extract_plain_text
 # Порядок важен: более длинные фразы раньше (подстрочные совпадения в lower()).
 # В т.ч. типичные заголовки: «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» (Гизатова),
 # «ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР» (қазақша).
+# Без отдельного «литература» / «references» как подстрок: их rfind() цепляется
+# к «в литературе…» / «…references…»; отдельная строка — в _rfind_bib_heading_line.
 _BIB_MARKERS = (
     "список использованных источников",
     "пайдаланылған әдебиеттер",
     "список литературы",
     "использованная литература",
     "библиографический список",
-    "литература",
-    "references",
 )
 
 _CHARS_PER_PAGE_RU = 2200
+
+# Номер пункта «1. / 1) / [1]» в библиографии; больше — id/фрагменты URL в plain.
+# 1000 с запасом выше реальных магистерских списков; отсекает 1591, 27116051 и т.п.
+_MAX_PLAUSIBLE_BIBLIO_INDEX = 1000
 
 
 @dataclass
@@ -377,14 +381,53 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     )
 
 
+def _rfind_bib_heading_line(plain: str) -> int:
+    """Самая поздняя позиция, где «Литература» / «References» — отдельная строка (заголовок)."""
+
+    best = -1
+    for m in re.finditer(r"(?im)^\s*литература\s*$", plain):
+        best = max(best, m.start())
+    for m in re.finditer(r"(?im)^\s*references\s*$", plain):
+        best = max(best, m.start())
+    return best
+
+
+def _clip_tail_before_appendices(tail: str) -> str:
+    """Обрезает хвост после библиографии, чтобы «Приложения…» / annex не портил счёт."""
+
+    if len(tail) < 32:
+        return tail
+    low = tail.lower()
+    cut = None
+    for key in (
+        "приложен",
+        "annex",
+        "annexes",
+    ):
+        p = low.find(key, 16)
+        if p != -1 and (cut is None or p < cut):
+            cut = p
+    if cut is not None and cut > 0:
+        return tail[:cut]
+    return tail
+
+
+def _plausible_citation_index(n: int) -> bool:
+    return 1 <= n <= _MAX_PLAUSIBLE_BIBLIO_INDEX
+
+
 def _citation_index_numbers_in_text(tail: str) -> list[int]:
     """Номера, стоящие в начале строки: ``1. …``, ``1) …``, ``[1] …`` (многострочный текст)."""
 
     nums: list[int] = []
     for m in re.finditer(r"(?m)^\s*(\d+)[\.\)]\s*\S", tail):
-        nums.append(int(m.group(1)))
+        n = int(m.group(1))
+        if _plausible_citation_index(n):
+            nums.append(n)
     for m in re.finditer(r"(?m)^\s*\[(\d+)\]\s*\S", tail):
-        nums.append(int(m.group(1)))
+        n = int(m.group(1))
+        if _plausible_citation_index(n):
+            nums.append(n)
     return nums
 
 
@@ -400,22 +443,48 @@ def _citation_index_numbers_glued(tail: str) -> list[int]:
         n = int(m.group(1))
         if 1900 <= n <= 2100:
             continue
+        if not _plausible_citation_index(n):
+            continue
         nums.append(n)
     for m in re.finditer(r"\[(\d+)\]\s*\S", tail):
         n = int(m.group(1))
         if 1900 <= n <= 2100:
             continue
+        if not _plausible_citation_index(n):
+            continue
         nums.append(n)
     return nums
 
 
+def _tame_outlier_citation_max(nums: list[int]) -> int:
+    """Если max — выброс относительно «основного» хвоста (1…63 и 485), берём второй max.
+
+    Условие ``sechi >= 5``: иначе короткие списки (1, 2, 25) не ломаются.
+    """
+
+    s = sorted({n for n in nums if _plausible_citation_index(n)})
+    if not s:
+        return 0
+    if len(s) < 2:
+        return s[-1]
+    hi, sechi = s[-1], s[-2]
+    if sechi >= 5 and hi > 5 * sechi:
+        return sechi
+    return hi
+
+
 def _max_citation_index_in_text_chunk(text: str) -> int | None:
-    """Максимальный индекс нумерованного пункта (последний «номер в списке»)."""
+    """Макс. индекс; сначала строки, начинающиеся с ``n.``; иначе glued. Выбросы режем."""
 
     nums = _citation_index_numbers_in_text(text)
+    if nums:
+        m = _tame_outlier_citation_max(nums)
+        return m or None
+    nums = _citation_index_numbers_glued(text)
     if not nums:
-        nums = _citation_index_numbers_glued(text)
-    return max(nums) if nums else None
+        return None
+    m = _tame_outlier_citation_max(nums)
+    return m or None
 
 
 def _estimate_sources_count(plain: str) -> int | None:
@@ -430,9 +499,12 @@ def _estimate_sources_count(plain: str) -> int | None:
         pos = lower.rfind(m)
         if pos > best:
             best = pos
+    head_line = _rfind_bib_heading_line(plain)
+    if head_line > best:
+        best = head_line
     if best < 0:
         return None
-    tail = plain[best:]
+    tail = _clip_tail_before_appendices(plain[best:])
     return _max_citation_index_in_text_chunk(tail)
 
 

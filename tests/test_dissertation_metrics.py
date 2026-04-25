@@ -90,6 +90,37 @@ class DissertationMetricsTests(unittest.TestCase):
         )
         self.assertEqual(analyze_dissertation(kz).sources_count, 5)
 
+    def test_maradzhapova_bibliography_glued_block_and_parenthesis_index(self) -> None:
+        """Мараджапова: как в макете отчёта (см. test_maradzhapova_layout_publication_on_next_line) —
+        плотная вёрстка; плюс нумерация `1) …` в отдельных абзацах.
+
+        1) Один длинный параграф: после «СПИСОК ЛИТЕРАТУРЫ» без перевода абзаца сразу
+        идут «1. … 2. …» — в API это одна склейка; счётчик = max (после glued).
+        2) Заголовок «Использованная литература» + пункты 1)…25) — max = 25.
+        """
+        # Склейка: нет `\\n` между заголовком раздела и первым пунктом (всё в одном textRun-потоке).
+        glued = _document(
+            [
+                _paragraph("Введение и основной текст…\n"),
+                _paragraph(
+                    "СПИСОК ЛИТЕРАТУРЫ 1. Первоисточник 2. Второй 40. "
+                    "Сороковой 42. Последний в списке\n"
+                ),
+            ]
+        )
+        self.assertEqual(analyze_dissertation(glued).sources_count, 42)
+
+        paren_numbered = _document(
+            [
+                _paragraph("…\n"),
+                _paragraph("Использованная литература\n"),
+                _paragraph("1) Книга первая\n"),
+                _paragraph("2) Книга вторая\n"),
+                _paragraph("25) Книга двадцать пятая\n"),
+            ]
+        )
+        self.assertEqual(analyze_dissertation(paren_numbered).sources_count, 25)
+
     def test_google_doc_metrics_fail_when_font_and_spacing_do_not_meet_threshold(self) -> None:
         doc = _document(
             [

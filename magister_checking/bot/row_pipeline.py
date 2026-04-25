@@ -13,6 +13,7 @@ from typing import Any
 
 from magister_checking.bot.models import UserForm
 from magister_checking.bot.stage_checks import run_stage1_checks
+from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.drive_urls import DriveUrlKind, classify_drive_url
 from magister_checking.report_parser import ParsedReport
 
@@ -21,6 +22,11 @@ LINK_MISSING_VALUE = "нет"
 
 PDF_MIME = "application/pdf"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# Тексты для колонки «Соответствие оформлению» (см. handoff §8.4: ru_full).
+COMPLIANCE_TEXT_YES = "соответствует"
+COMPLIANCE_TEXT_NO = "не соответствует"
+COMPLIANCE_TEXT_UNKNOWN = "—"
 
 
 @dataclass(frozen=True)
@@ -123,8 +129,50 @@ class Stage3CellUpdate:
 
 
 @dataclass
+class Stage4CellUpdate:
+    """Значение для колонок Stage 4 (pages_total / sources_count / compliance).
+
+    В отличие от Stage3CellUpdate флага strikethrough нет: согласовано с
+    пользователем (handoff §8.3 — warning only, без зачёркивания).
+    Конкретная буква столбца (O/P/Q/...) определяется заголовком листа
+    через ``_HEADER_ALIASES`` в ``sheets_repo``.
+    """
+
+    column_key: str
+    value: str
+
+
+@dataclass
+class Stage4Result:
+    """Содержательный разбор диссертации (п.9.4 ТЗ).
+
+    Контракт согласован в handoff §8 (новый чат):
+
+    - Порогов на ``pages_total`` и ``sources_count`` нет — числа просто
+      пишутся в лист, в ``issues`` не попадают (§8.2).
+    - При ``compliance is False`` — добавляется одно сообщение в
+      ``issues`` с короткой фразой и деталями в скобках; ``passed``
+      всё равно остаётся ``True`` (warning-модель, §8.3 / §8.5).
+    - При ``executed=False`` (Stage 3 не пройдена / метрики не получены)
+      — ``skipped_reason`` объясняет причину, в лист по Stage 4 ничего
+      не пишется.
+    - ``compliance is None`` означает «оформление оценить не удалось»
+      (например, не хватило стилей) — в лист пишем «—», без issue.
+    """
+
+    name: str = "stage4"
+    executed: bool = False
+    passed: bool = False
+    issues: list[str] = field(default_factory=list)
+    pages_total: int | None = None
+    sources_count: int | None = None
+    compliance: bool | None = None
+    skipped_reason: str | None = None
+
+
+@dataclass
 class RowCheckReport:
-    """Итог прогонки одной строки по этапам 1-3."""
+    """Итог прогонки одной строки по этапам 1-4."""
 
     fio: str
     row_number: int | None = None
@@ -132,10 +180,17 @@ class RowCheckReport:
     stage2: StageResult = field(default_factory=lambda: StageResult("stage2"))
     stage3: StageResult = field(default_factory=lambda: StageResult("stage3"))
     stage3_cells: list[Stage3CellUpdate] = field(default_factory=list)
+    stage4: Stage4Result = field(default_factory=Stage4Result)
+    stage4_cells: list[Stage4CellUpdate] = field(default_factory=list)
     stopped_at: str | None = None
 
     def all_issues(self) -> list[str]:
-        return [*self.stage1.issues, *self.stage2.issues, *self.stage3.issues]
+        return [
+            *self.stage1.issues,
+            *self.stage2.issues,
+            *self.stage3.issues,
+            *self.stage4.issues,
+        ]
 
     def spravka_lines(self) -> list[str]:
         """Человеко-читаемая сводка для «справки» магистранту."""
@@ -331,6 +386,122 @@ def run_stage3(
     return result, cells
 
 
+def compliance_to_text(value: bool | None) -> str:
+    """Текст для колонки «Соответствие оформлению» (handoff §8.4 — ru_full)."""
+
+    if value is True:
+        return COMPLIANCE_TEXT_YES
+    if value is False:
+        return COMPLIANCE_TEXT_NO
+    return COMPLIANCE_TEXT_UNKNOWN
+
+
+def _format_compliance_issue(metrics: DissertationMetrics) -> str:
+    """Сообщение для issues при ``formatting_compliance is False``.
+
+    Форма «короткая фраза + детали в скобках» — handoff §8.5 (option both).
+    """
+
+    parts: list[str] = []
+    if metrics.times_new_roman_ratio is not None:
+        parts.append(f"TNR {round(metrics.times_new_roman_ratio * 100)}%")
+    if metrics.font_size_14_ratio is not None:
+        parts.append(f"14pt {round(metrics.font_size_14_ratio * 100)}%")
+    if metrics.single_spacing_ratio is not None:
+        parts.append(f"single {round(metrics.single_spacing_ratio * 100)}%")
+    suffix = f" ({', '.join(parts)})" if parts else ""
+    return f"оформление не соответствует требованиям{suffix}"
+
+
+def _resolve_pages_total(metrics: DissertationMetrics) -> int | None:
+    """Главный показатель страниц для листа.
+
+    Приоритет:
+      1) ``pdf_pages`` — наиболее точный счётчик (Drive export → PDF
+         /Type /Page heuristic). Может быть ``None``: либо файл не
+         Google Doc и export не вызывался, либо вызвавшая сторона его
+         вообще не считала.
+      2) ``approx_pages`` — для .docx это число из ``docProps/app.xml``,
+         для Google Doc — оценка по символам (``len(plain)//2200``).
+         У .docx часто это и есть «настоящее» число страниц.
+      3) ``None`` если оба None.
+    """
+
+    if metrics.pdf_pages and metrics.pdf_pages > 0:
+        return metrics.pdf_pages
+    if metrics.approx_pages and metrics.approx_pages > 0:
+        return metrics.approx_pages
+    return None
+
+
+def run_stage4(
+    *,
+    dissertation_metrics: DissertationMetrics | None,
+) -> Stage4Result:
+    """Содержательный разбор диссертации (п.9.4 ТЗ, handoff §3-§4).
+
+    Чистая функция: caller передаёт уже посчитанные метрики (Google Doc
+    через ``analyze_dissertation``, .docx через ``analyze_docx_bytes``).
+
+    Поведение по handoff §8:
+      - ``dissertation_metrics is None`` → ``executed=False``,
+        ``passed=False``, ``skipped_reason`` объясняет причину; ничего
+        не пишем в лист.
+      - метрики получены → ``executed=True``, ``passed=True`` (warning-
+        модель), значения ``pages_total/sources_count/compliance``
+        переносятся в результат как есть; для ``compliance is False``
+        в ``issues`` добавляется одно сообщение с деталями.
+
+    Caller обязан вызывать этот этап только после успешной Stage 3
+    (диссертация — Google Doc или .docx и доступна). Пайплайн делает
+    это автоматически в ``run_row_pipeline``.
+    """
+
+    result = Stage4Result()
+    if dissertation_metrics is None:
+        result.executed = False
+        result.passed = False
+        result.skipped_reason = "не удалось получить метрики диссертации"
+        return result
+
+    result.executed = True
+    result.pages_total = _resolve_pages_total(dissertation_metrics)
+    result.sources_count = dissertation_metrics.sources_count
+    result.compliance = dissertation_metrics.formatting_compliance
+
+    if dissertation_metrics.formatting_compliance is False:
+        result.issues.append(_format_compliance_issue(dissertation_metrics))
+
+    # Warning-модель (handoff §8.3): сам факт получения метрик == passed.
+    # Несоответствие оформлению — это warning, а не блокер.
+    result.passed = True
+    return result
+
+
+def build_stage4_cells(stage4: Stage4Result) -> list[Stage4CellUpdate]:
+    """Готовит значения для записи в pages_total / sources_count / compliance.
+
+    Если Stage 4 не выполнялся (skip из-за неуспешной Stage 3 или из-за
+    отсутствия метрик), список пустой — лист по Stage 4 не трогаем.
+    """
+
+    if not stage4.executed:
+        return []
+    pages_value = (
+        str(stage4.pages_total) if stage4.pages_total is not None else ""
+    )
+    sources_value = (
+        str(stage4.sources_count) if stage4.sources_count is not None else ""
+    )
+    return [
+        Stage4CellUpdate(column_key="pages_total", value=pages_value),
+        Stage4CellUpdate(column_key="sources_count", value=sources_value),
+        Stage4CellUpdate(
+            column_key="compliance", value=compliance_to_text(stage4.compliance)
+        ),
+    ]
+
+
 def run_row_pipeline(
     user_form: UserForm,
     *,
@@ -339,18 +510,25 @@ def run_row_pipeline(
     parsed_report: ParsedReport | None = None,
     link_accessibility: dict[str, bool] | None = None,
     link_mime_types: dict[str, str] | None = None,
+    dissertation_metrics: DissertationMetrics | None = None,
     row_number: int | None = None,
 ) -> RowCheckReport:
-    """Пропускает строку через этапы 1-3.
+    """Пропускает строку через этапы 1-4.
 
     Остановки:
     - Stage 1: если передан ``report_document`` и в нём нет маркера
       «Промежуточный отчёт», дальнейшие этапы не запускаются.
     - Stage 2: если ссылка не открыта, Stage 3 не запускается.
-    - Stage 3: пайплайн завершается в любом случае; ``stage3.passed``
-      сигнализирует, имеет ли смысл Stage 4 (не реализован в этой фазе).
+    - Stage 3: если ``stage3.passed=False`` (диссертация не Doc/.docx
+      или недоступна), пайплайн помечает ``stopped_at='stage3'`` и
+      Stage 4 не запускается. Иначе пайплайн продолжает.
+    - Stage 4: warning-модель, ``stopped_at`` не меняет — несоответствие
+      оформлению или отсутствие метрик не блокируют последующие этапы
+      (b/c в плане handoff §2).
 
-    Все IO выполняет caller. Пайплайн принимает уже готовые артефакты.
+    Все IO выполняет caller. Пайплайн принимает уже готовые артефакты,
+    включая ``dissertation_metrics`` (см. ``analyze_dissertation`` /
+    ``analyze_docx_bytes`` в ``magister_checking.dissertation_metrics``).
     """
 
     report = RowCheckReport(fio=user_form.fio or "", row_number=row_number)
@@ -384,4 +562,8 @@ def run_row_pipeline(
     report.stage3_cells = cells
     if not report.stage3.passed:
         report.stopped_at = "stage3"
+        return report
+
+    report.stage4 = run_stage4(dissertation_metrics=dissertation_metrics)
+    report.stage4_cells = build_stage4_cells(report.stage4)
     return report

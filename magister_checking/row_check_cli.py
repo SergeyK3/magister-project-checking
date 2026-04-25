@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from typing import Any
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import UserForm
@@ -20,6 +22,7 @@ from magister_checking.bot.row_pipeline import (
     RowCheckReport,
     _LINK_FIELDS,
     _extract_link,
+    compliance_to_text,
     run_row_pipeline,
 )
 from magister_checking.bot.sheets_repo import (
@@ -33,6 +36,11 @@ from magister_checking.bot.validation import (
     REPORT_URL_WRONG_TARGET_MESSAGE,
     check_report_url,
 )
+from magister_checking.dissertation_metrics import (
+    DissertationMetrics,
+    analyze_dissertation,
+    analyze_docx_bytes,
+)
 from magister_checking.drive_docx import google_doc_from_drive_file
 from magister_checking.drive_urls import (
     classify_drive_url,
@@ -43,6 +51,13 @@ from magister_checking.summary_pipeline import resolve_report_google_doc_id
 
 
 _REGISTRATION_WORKSHEET_NAME = "Регистрация"
+
+# MIME-тип .docx-диссертации; дублирует значение из bot.row_pipeline.DOCX_MIME,
+# но импортировать его сюда не имеет смысла (избегаем лишней зависимости
+# CLI ↔ pipeline). Стандартизованный OOXML mime, не меняется.
+_DOCX_MIME_FOR_DISSERTATION = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 
 
 @dataclass
@@ -139,6 +154,99 @@ def _build_accessibility_map(urls: list[str]) -> dict[str, bool]:
     return accessibility
 
 
+def _download_drive_file_bytes_all_drives(
+    *, drive_service: Any, file_id: str
+) -> bytes | None:
+    """Скачивает файл с Drive (alt=media) с поддержкой Shared Drive.
+
+    Отличие от ``magister_checking.dissertation_metrics.download_drive_file_bytes``
+    — явный ``supportsAllDrives=True`` на ``files().get_media``. Это
+    нужно для .docx-диссертаций, лежащих в Shared Drive магистрантов
+    (см. handoff §7). Legacy-хелпер в ``dissertation_metrics`` оставлен
+    как есть, чтобы не сломать ``summary_pipeline``.
+
+    Возвращает ``None`` при любой ошибке (отсутствие доступа, сеть,
+    пустой ответ).
+    """
+
+    try:
+        req = drive_service.files().get_media(
+            fileId=file_id, supportsAllDrives=True
+        )
+    except TypeError:
+        # Очень старый клиент без supportsAllDrives — фолбэк без него.
+        # Для файлов в обычном My Drive это всё равно работает.
+        req = drive_service.files().get_media(fileId=file_id)
+    try:
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _status, done = downloader.next_chunk()
+        data = fh.getvalue()
+        return data if data else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _try_load_dissertation_metrics(
+    *,
+    dissertation_url: str,
+    docs_service: Any,
+    drive_service: Any,
+) -> DissertationMetrics | None:
+    """IO для Stage 4: загружает диссертацию и считает метрики.
+
+    - ``classify_drive_url == "google_doc"`` → Docs API
+      ``documents().get`` → ``analyze_dissertation`` (формат — дерево
+      Docs v1).
+    - ``classify_drive_url == "drive_file"`` → Drive API
+      ``files().get_media`` (с ``supportsAllDrives=True``) →
+      ``analyze_docx_bytes`` (читает .docx через python-docx). Этот
+      путь не требует Shared Drive буфера и не делает копий: для
+      .docx-диссертации нам нужны только байты файла.
+    - Любая ошибка (нет доступа, неподдерживаемый формат, парсинг
+      docx упал и т.п.) → ``None``. Stage 4 в пайплайне отметит это
+      как ``skipped_reason='не удалось получить метрики диссертации'``.
+
+    Caller гарантирует, что ``dissertation_url`` уже прошёл Stage 3
+    (тип = google_doc или drive_file + DOCX), поэтому здесь нет
+    дополнительной валидации формата.
+    """
+
+    if not dissertation_url:
+        return None
+
+    kind = classify_drive_url(dissertation_url)
+    try:
+        file_id = extract_google_file_id(dissertation_url)
+    except ValueError:
+        return None
+
+    if kind == "google_doc":
+        try:
+            doc = docs_service.documents().get(documentId=file_id).execute()
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            return analyze_dissertation(doc)
+        except Exception:  # noqa: BLE001
+            return None
+
+    if kind == "drive_file":
+        data = _download_drive_file_bytes_all_drives(
+            drive_service=drive_service, file_id=file_id
+        )
+        if not data:
+            return None
+        try:
+            return analyze_docx_bytes(data)
+        except Exception:  # noqa: BLE001
+            return None
+
+    return None
+
+
 def _prefetch_drive_file_mimes(
     *, urls: list[str], drive_service: Any
 ) -> dict[str, str]:
@@ -230,6 +338,25 @@ def run_row_check(
             urls=stage3_urls, drive_service=drive_service
         )
 
+    # Stage 4 IO: метрики диссертации, если Stage 3 имеет шанс пройти.
+    # Запускаем загрузку только когда диссертация — google_doc или
+    # drive_file с DOCX (другие kinds Stage 3 hard-fail). Дешёвая
+    # проверка по URL без сети, чтобы не делать лишний Drive call.
+    dissertation_metrics: DissertationMetrics | None = None
+    if parsed_report is not None:
+        diss_url = (parsed_report.dissertation_url or "").strip()
+        diss_kind = classify_drive_url(diss_url) if diss_url else "other"
+        diss_mime_ok = True
+        if diss_kind == "drive_file":
+            mime = (link_mime_types or {}).get(diss_url, "")
+            diss_mime_ok = mime == _DOCX_MIME_FOR_DISSERTATION
+        if diss_url and diss_kind in {"google_doc", "drive_file"} and diss_mime_ok:
+            dissertation_metrics = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+
     pipeline_report = run_row_pipeline(
         user,
         report_document=report_document,
@@ -237,6 +364,7 @@ def run_row_check(
         parsed_report=parsed_report,
         link_accessibility=link_accessibility,
         link_mime_types=link_mime_types,
+        dissertation_metrics=dissertation_metrics,
         row_number=row_number,
     )
 
@@ -264,6 +392,7 @@ def run_row_check(
             report_url_valid=report_url_valid,
             report_url_accessible=report_url_accessible,
             stage3_cells=pipeline_report.stage3_cells,
+            stage4_cells=pipeline_report.stage4_cells,
         )
 
     return pipeline_report
@@ -272,7 +401,7 @@ def run_row_check(
 def format_report(report: RowCheckReport, *, applied: bool = False) -> str:
     """Форматирует отчёт в многострочный текст «справки».
 
-    ``applied=True`` дописывает пометку о том, что результаты Stage 2/Stage 3
+    ``applied=True`` дописывает пометку о том, что результаты этапов 2-4
     записаны в лист; иначе выводит пометку dry-run.
     """
 
@@ -283,9 +412,24 @@ def format_report(report: RowCheckReport, *, applied: bool = False) -> str:
         for cell in report.stage3_cells:
             mark = " [зачёркнута]" if cell.strikethrough else ""
             lines.append(f"  {cell.column_key}: {cell.value}{mark}")
+    if report.stage4.executed:
+        lines.append("")
+        lines.append("Содержательный разбор диссертации (Stage 4):")
+        pages = report.stage4.pages_total
+        sources = report.stage4.sources_count
+        lines.append(f"  страниц всего: {pages if pages is not None else '—'}")
+        lines.append(f"  источников: {sources if sources is not None else '—'}")
+        lines.append(
+            f"  оформление: {compliance_to_text(report.stage4.compliance)}"
+        )
+    elif report.stage4.skipped_reason:
+        lines.append("")
+        lines.append(
+            f"Stage 4 пропущен: {report.stage4.skipped_reason}"
+        )
     lines.append("")
     if applied:
-        lines.append("(запись в лист выполнена: J/K/L/M/N/O)")
+        lines.append("(запись в лист выполнена: J/K/L/M/N/O + Stage 4)")
     else:
         lines.append("(dry-run: лист не изменён — добавьте --apply для записи)")
     return "\n".join(lines)

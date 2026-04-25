@@ -16,7 +16,7 @@ from google.oauth2.service_account import Credentials
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import SHEET_HEADER, UserForm, compute_fill_status
-from magister_checking.bot.row_pipeline import Stage3CellUpdate
+from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
 
 _SHEETS_VALUE_INPUT_OPTION = "RAW"
 """Режим записи в Google Sheets.
@@ -589,6 +589,7 @@ def apply_row_check_updates(
     report_url_valid: str | None = None,
     report_url_accessible: str | None = None,
     stage3_cells: list[Stage3CellUpdate] | None = None,
+    stage4_cells: list[Stage4CellUpdate] | None = None,
 ) -> None:
     """Записывает результаты прогона одной строки листа «Регистрация».
 
@@ -598,12 +599,17 @@ def apply_row_check_updates(
     - Stage 3 пишет значения колонок ``project_folder_url`` / ``lkb_url`` /
       ``dissertation_url`` / ``publication_url`` и формат ``textFormat``
       ``strikethrough`` (True/False) для каждой из этих ячеек.
+    - Stage 4 пишет ``pages_total`` / ``sources_count`` / ``compliance``
+      без strikethrough (handoff §8.3 — warning-модель). Если Stage 4 не
+      выполнялся, ``stage4_cells`` пуст и ничего не пишется.
 
-    Значения отправляются одним ``worksheet.batch_update`` (RAW), форматы —
-    одним ``spreadsheet.batch_update`` с ``repeatCell`` запросами.
+    Значения по всем этапам отправляются одним ``worksheet.batch_update``
+    (RAW), форматы Stage 3 — одним ``spreadsheet.batch_update`` с
+    ``repeatCell`` запросами. Никаких repeatCell для Stage 4 не делаем.
     """
 
     stage3_cells = list(stage3_cells or [])
+    stage4_cells = list(stage4_cells or [])
     field_map = _field_to_column_map(worksheet)
 
     batch_values: list[dict] = []
@@ -647,6 +653,9 @@ def apply_row_check_updates(
                 }
             }
         )
+
+    for cell in stage4_cells:
+        _schedule_value(cell.column_key, cell.value)
 
     _safe_batch_update_values(worksheet, batch_values)
 

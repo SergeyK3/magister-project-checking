@@ -92,6 +92,18 @@ def classify_drive_url(url: str) -> DriveUrlKind:
     # docs.google.com — сначала, чтобы /document не путался с /file/d.
     if netloc.endswith("docs.google.com"):
         if _DOC_RE.search(path):
+            # Особый случай: docs.google.com/document/.../edit?rtpof=true&sd=true
+            # — это Drive viewer URL для загруженного .docx, а не нативный
+            # Google Doc. Файл лежит в Drive с MIME .docx, Docs API на него
+            # отвечает HTTP 400 «This operation is not supported for this
+            # document». Параметры rtpof=true/sd=true — стабильный маркер
+            # такого случая (rtpof = retain text/picture original format).
+            # Проброс в drive_file отправляет caller-а (Stage 3 mime check
+            # и Stage 4 _try_load_dissertation_metrics) по правильной ветке.
+            qs = parse_qs(parsed.query)
+            rtpof_values = qs.get("rtpof") or []
+            if rtpof_values and rtpof_values[0].strip().lower() == "true":
+                return "drive_file"
             return "google_doc"
         if _SHEETS_RE.search(path):
             return "google_sheet"

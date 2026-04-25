@@ -232,7 +232,23 @@ def _try_load_dissertation_metrics(
         try:
             doc = docs_service.documents().get(documentId=file_id).execute()
         except Exception:  # noqa: BLE001
-            return None
+            # Fallback: классификация по URL может ошибиться, если Drive
+            # viewer URL .docx-файла прошёл в эту ветку без маркера rtpof
+            # (например, магистрант руками выкинул query-параметры). Docs
+            # API на .docx отвечает HTTP 400 «not supported for this
+            # document» — пробуем тот же путь, что и для drive_file:
+            # download bytes → analyze_docx_bytes. Если файл всё-таки
+            # нативный Google Doc — get_media вернёт ошибку и мы вернём
+            # None так же, как и без fallback.
+            data = _download_drive_file_bytes_all_drives(
+                drive_service=drive_service, file_id=file_id
+            )
+            if not data:
+                return None
+            try:
+                return analyze_docx_bytes(data)
+            except Exception:  # noqa: BLE001
+                return None
         try:
             return analyze_dissertation(doc)
         except Exception:  # noqa: BLE001

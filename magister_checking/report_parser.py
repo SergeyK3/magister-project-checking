@@ -73,6 +73,10 @@ class ParsedReport:
     review_article_note: str
     results_article_url: str | None
     project_folder_url: str | None = None
+    publication_url: str | None = None
+    """Ссылка на публикацию (PDF/Drive). Шапка в отчёте обычно «Публикации:»
+    или «PDF публикации:»; ссылка может стоять на той же строке, что и
+    заголовок, либо в следующем непустом параграфе."""
     workplace: str = ""
     job_title: str = ""
     supervisor: str = ""
@@ -109,6 +113,14 @@ _LINE_LKB = re.compile(
 )
 _LINE_REVIEW_ART = re.compile(r"(?im)^\s*стать\w*.*обзор\w*.*\s*[:\-–—]\s*(.*)\s*$")
 _LINE_RESULTS_ART = re.compile(r"(?im)^\s*(подготовлен\w*\s+стать\w*.*результат\w*|стать\w*.*результат\w*)\s*[:\-–—]\s*(.*)\s*$")
+_LINE_PROJECT_FOLDER = re.compile(
+    r"(?im)^\s*папк\w*\s+[«\"”\u201c\u201e]?магистерск\w+\s+проект",
+    # Заголовок вида «Папка "Магистерский проект": ...»
+)
+_LINE_PUBLICATION = re.compile(
+    r"(?im)^\s*(?:pdf\s+)?публикац\w*\b",
+    # Заголовок «Публикации:», «PDF публикации:», «Публикация...».
+)
 _LINE_PAGES_TOTAL = re.compile(
     r"(?im)^\s*в\s*т\.?\s*ч\.?\s*всег\w*\s+страниц\w*.*[:\-–—]\s*(\d+)\s*[,.;]?\s*$"
 )
@@ -120,6 +132,13 @@ _LINE_SOURCES_REVIEW = re.compile(
 )
 _DRIVE_URL = re.compile(r"https?://drive\.google\.com/[^\s\)\]\"]+", re.IGNORECASE)
 _DRIVE_FOLDER_URL = re.compile(r"https?://drive\.google\.com/drive/folders/[a-zA-Z0-9_-]+", re.IGNORECASE)
+# _ANY_URL — для извлечения ссылок после ключевых заголовков отчёта без
+# фильтрации по типу (Drive-folder / Doc / file). Семантическая проверка
+# типа выполняется отдельно в Stage 3 через validation.classify_drive_url.
+# Это нужно, чтобы парсер мог различать «магистрант ссылку не указал»
+# (поле остаётся None) и «магистрант указал ссылку, но не того типа»
+# (поле заполнено, Stage 3 пометит warning + strikethrough).
+_ANY_URL = re.compile(r"https?://[^\s\)\]\"]+", re.IGNORECASE)
 
 
 def _fill_from_plain_text(out: ParsedReport, document: dict[str, Any]) -> None:
@@ -190,44 +209,48 @@ def _fill_from_plain_text(out: ParsedReport, document: dict[str, Any]) -> None:
                     out.declared_formatting_ok = False
                 break
 
-    # Ссылки и «да/нет» по ключевым строкам (часто это абзацы, не таблицы)
+    # Ссылки и «да/нет» по ключевым строкам (часто это абзацы, не таблицы).
+    # Извлекаем ЛЮБУЮ http(s)-ссылку после ключевого заголовка — типизация
+    # (folder vs Doc vs file/PDF) делается в Stage 3 (см. _FIELD_POLICIES
+    # в bot/row_pipeline.py и validation.classify_drive_url). Если бы парсер
+    # фильтровал по типу здесь, Stage 3 не смог бы отличить «нет ссылки» от
+    # «ссылка есть, но не того типа» — оба случая выглядели бы как None.
     plain_full = "\n".join(lines)
     if not out.dissertation_url:
-        # более точечно: строка «Диссертация: ...»
         for ln in lines:
             if _LINE_DISS.match(ln):
-                mm = _DOC_URL_IN_ROW.search(ln)
+                mm = _ANY_URL.search(ln)
                 if mm:
                     out.dissertation_url = mm.group(0).rstrip(".,;)")
                     break
 
     if out.lkb_url is None:
         # В реальных отчётах строка может выглядеть как:
-        # "Наличие заключение ЛКБ (локальной комиссии по биоэтике): https://drive.google.com/file/..."
-        # Поэтому делаем максимально надёжно: если в строке есть (лкб/биоэтик) и drive-ссылка — берём её,
-        # иначе fallback на старую эвристику по _LINE_LKB.
+        # "Наличие заключение ЛКБ (локальной комиссии по биоэтике): https://..."
+        # Берём первую URL из строки, где упомянут «лкб»/«биоэтик».
         for i, ln in enumerate(lines):
             low = ln.lower()
-            urlm = _DRIVE_URL.search(ln)
+            urlm = _ANY_URL.search(ln)
             if urlm and ("лкб" in low or "биоэтик" in low):
                 out.lkb_url = urlm.group(0).rstrip(".,;)")
                 break
 
-    # Папка проекта (иногда там лежит файл статьи по обзору)
     if out.project_folder_url is None:
-        for ln in lines:
-            if "папк" in ln.lower():
-                fm = _DRIVE_FOLDER_URL.search(ln)
+        # Используем _LINE_PROJECT_FOLDER (а не широкое «папк»), чтобы
+        # не цеплять URL из строк типа «папка диссертации» / «папка с
+        # публикациями» — иначе с _ANY_URL легко поймать чужой URL.
+        for i, ln in enumerate(lines):
+            if _LINE_PROJECT_FOLDER.search(ln):
+                fm = _ANY_URL.search(ln)
                 if fm:
-                    out.project_folder_url = fm.group(0)
+                    out.project_folder_url = fm.group(0).rstrip(".,;)")
                     break
             m = _LINE_LKB.match(ln)
             if not m:
                 continue
-            # Ссылка может быть на этой же строке или на следующей.
-            urlm = _DRIVE_URL.search(ln)
+            urlm = _ANY_URL.search(ln)
             if not urlm and i + 1 < len(lines):
-                urlm = _DRIVE_URL.search(lines[i + 1])
+                urlm = _ANY_URL.search(lines[i + 1])
             if urlm:
                 out.lkb_url = urlm.group(0).rstrip(".,;)")
                 break
@@ -252,6 +275,55 @@ def _fill_from_plain_text(out: ParsedReport, document: dict[str, Any]) -> None:
                 if mm:
                     out.results_article_url = mm.group(0).rstrip(".,;)")
                 break
+
+    # Универсальный «следующая строка» fallback для разметки, где заголовок
+    # и ссылка стоят в соседних абзацах (встречалось в реальных отчётах:
+    # параграф «Папка "Магистерский проект":» / «Наличие заключений ЛКБ ...:» /
+    # «PDF публикации:» — а сам URL в следующем непустом параграфе).
+    # Применяется только к ещё незаполненным полям и не трогает same-line
+    # ветви выше — иначе можно было бы ловить «не ту» ссылку из соседнего
+    # блока.
+    def _url_for_heading(
+        heading_pattern: re.Pattern[str], url_pattern: re.Pattern[str]
+    ) -> str | None:
+        for i, ln in enumerate(lines):
+            if not heading_pattern.search(ln):
+                continue
+            same = url_pattern.search(ln)
+            if same:
+                return same.group(0).rstrip(".,;)")
+            if i + 1 < len(lines):
+                nxt = url_pattern.search(lines[i + 1])
+                if nxt:
+                    return nxt.group(0).rstrip(".,;)")
+        return None
+
+    if out.project_folder_url is None:
+        v = _url_for_heading(_LINE_PROJECT_FOLDER, _ANY_URL)
+        if v:
+            out.project_folder_url = v
+
+    if out.lkb_url is None:
+        v = _url_for_heading(_LINE_LKB, _ANY_URL)
+        if v:
+            out.lkb_url = v
+
+    if out.publication_url is None:
+        v = _url_for_heading(_LINE_PUBLICATION, _ANY_URL)
+        if v:
+            out.publication_url = v
+
+    # У части магистрантов (например, Тананова А.А.) ссылка на диссертацию
+    # стоит в отдельном абзаце под заголовком «Диссертация:» — same-line
+    # ветка выше её не ловит, потому что URL.search(ln) на пустой строке
+    # заголовка ничего не находит.
+    if out.dissertation_url is None:
+        v = _url_for_heading(_LINE_DISS, _ANY_URL)
+        if v:
+            out.dissertation_url = v
+
+    if out.lkb_status == "?" and out.lkb_url:
+        out.lkb_status = "да"
 
 
 def parse_intermediate_report(document: dict[str, Any]) -> ParsedReport:

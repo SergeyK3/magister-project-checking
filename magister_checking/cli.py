@@ -56,6 +56,42 @@ def cmd_bot(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_row(ns: argparse.Namespace) -> int:
+    """Построчная проверка магистранта (этапы 1-3 ТЗ).
+
+    Печатает «справку» в stdout; лист не изменяется (sheet writes — в
+    отдельной фазе).
+    """
+
+    from magister_checking.bot.config import ConfigError, load_config
+    from magister_checking.row_check_cli import (
+        RowLocator,
+        format_report,
+        run_row_check,
+    )
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+
+    locator = RowLocator(row_number=ns.row, fio=ns.fio)
+    try:
+        report = run_row_check(
+            config,
+            locator,
+            skip_http=ns.skip_http,
+            apply=ns.apply,
+        )
+    except ValueError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_report(report, applied=ns.apply))
+    return 0
+
+
 def cmd_doc_info(ns: argparse.Namespace) -> int:
     creds = get_credentials(interactive=True)
     doc_id = extract_google_file_id(ns.url_or_id)
@@ -251,6 +287,37 @@ def main(argv: list[str] | None = None) -> int:
         help="Запустить Telegram-бота @magistrcheckbot (long polling). Конфиг — .env",
     )
     p_bot.set_defaults(func=cmd_bot)
+
+    p_check = sub.add_parser(
+        "check-row",
+        help="Прогнать одну строку листа «Регистрация» через этапы 1-3 (справка в stdout)",
+    )
+    row_group = p_check.add_mutually_exclusive_group(required=True)
+    row_group.add_argument(
+        "--row",
+        type=int,
+        default=None,
+        metavar="N",
+        help="номер строки листа «Регистрация» (1 = заголовок, 2 = первый магистрант)",
+    )
+    row_group.add_argument(
+        "--fio",
+        default=None,
+        metavar="ФИО",
+        help="ФИО магистранта (должно однозначно совпадать с одной строкой)",
+    )
+    p_check.add_argument(
+        "--skip-http",
+        action="store_true",
+        help="не делать сетевых проверок URL (быстрый сухой прогон без HTTP)",
+    )
+    p_check.add_argument(
+        "--apply",
+        action="store_true",
+        help="записать результаты Stage 2/Stage 3 в лист (J/K/L/M/N/O + "
+        "strikethrough для недоступных Stage 3 ссылок). По умолчанию dry-run.",
+    )
+    p_check.set_defaults(func=cmd_check_row)
 
     p_doc = sub.add_parser("doc-info", help="Прочитать метаданные Google Doc по ссылке или id")
     p_doc.add_argument("url_or_id", help="URL документа или его id")

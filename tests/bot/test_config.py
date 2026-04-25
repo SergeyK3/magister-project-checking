@@ -80,6 +80,134 @@ class LoadConfigTests(unittest.TestCase):
         finally:
             os.unlink(sa_path)
 
+    def test_docx_conversion_folder_from_url(self) -> None:
+        """DOCX_CONVERSION_FOLDER_URL (legacy) принимает URL Drive и сохраняет только id."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "DOCX_CONVERSION_FOLDER_URL": "https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "FOLDER_ID")
+        finally:
+            os.unlink(sa_path)
+
+    def test_docx_conversion_folder_from_raw_id(self) -> None:
+        """DOCX_CONVERSION_FOLDER_ID (legacy) принимает чистый id без URL."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "DOCX_CONVERSION_FOLDER_ID": "abc123",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "abc123")
+        finally:
+            os.unlink(sa_path)
+
+    def test_docx_conversion_folder_absent(self) -> None:
+        """Если переменные не заданы, поле пустое (фича отключена)."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_from_url(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_URL — основной источник, принимает URL."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_URL": "https://drive.google.com/drive/folders/BUF_ID?usp=sharing",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "BUF_ID")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_from_raw_id(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_ID принимает чистый id."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_ID": "raw_buf_id",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "raw_buf_id")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_priority_over_legacy(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_* имеет приоритет над DOCX_CONVERSION_FOLDER_*."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_ID": "new_id",
+                        "DOCX_CONVERSION_FOLDER_ID": "legacy_id",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "new_id")
+        finally:
+            os.unlink(sa_path)
+
     def test_project_card_output_folder_url(self) -> None:
         with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             fh.write(json.dumps(_SAMPLE_JSON))

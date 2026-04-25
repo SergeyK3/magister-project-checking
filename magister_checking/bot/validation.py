@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
-from typing import Tuple
+from typing import Any, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -15,6 +15,19 @@ SKIP_TOKEN = "-"
 """Если магистрант ввёл этот токен — поле считаем пропущенным."""
 
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
+
+FIO_INVALID_MESSAGE = "В поле «ФИО» введена фраза, не похожая на имя"
+PHONE_INVALID_MESSAGE = "В поле «Телефон» введён неверный номер"
+REPORT_URL_WRONG_TARGET_MESSAGE = "Ссылка на промежуточный отчёт неверна"
+
+_CYRILLIC_CLASS = r"А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі"
+_CYRILLIC_UPPER_CLASS = r"А-ЯЁӘҒҚҢӨҰҮҺІ"
+_CYRILLIC_NAME_WORD = re.compile(
+    rf"^[{_CYRILLIC_CLASS}]{{2,}}(?:[-’'][{_CYRILLIC_CLASS}]{{2,}})*\.?$"
+)
+_CYRILLIC_INITIALS = re.compile(rf"^(?:[{_CYRILLIC_UPPER_CLASS}]\.){{1,3}}$")
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+_INTERIM_REPORT_MARKER = re.compile(r"промежуточн\w*\s+отчет", re.IGNORECASE)
 
 _REQUEST_TIMEOUT_SECONDS = 15
 _USER_AGENT = "Mozilla/5.0 (compatible; magistrcheckbot/1.0)"
@@ -39,6 +52,111 @@ def is_valid_url(url: str) -> bool:
     if not url:
         return False
     return bool(_URL_PATTERN.match(url.strip()))
+
+
+def validate_fio_shape(value: str) -> str | None:
+    """Возвращает сообщение об ошибке или None, если ФИО похоже на имя.
+
+    Правила:
+    - минимум два слова, разделённых пробелом;
+    - каждое слово — кириллица (включая казахские буквы), длиной ≥ 2,
+      допускаются дефис и апостроф между частями (Петров-Водкин);
+    - недопустимы латинские буквы. «ТОО Viamedis Kosshy» отсекается.
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return FIO_INVALID_MESSAGE
+    if _LATIN_LETTER.search(text):
+        return FIO_INVALID_MESSAGE
+    words = [w for w in text.split() if w]
+    if len(words) < 2:
+        return FIO_INVALID_MESSAGE
+    for word in words:
+        if _CYRILLIC_NAME_WORD.match(word):
+            continue
+        if _CYRILLIC_INITIALS.match(word):
+            continue
+        return FIO_INVALID_MESSAGE
+    return None
+
+
+def validate_phone_shape(value: str) -> str | None:
+    """Проверяет формат телефонного номера.
+
+    Принимаем международные/местные форматы: оставляем только цифры
+    (и разрешаем ведущий «+»); требуем 10–15 цифр. Примеры валидных:
+    ``+77052107246``, ``87052107246``, ``+7 (705) 210-72-46``.
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return PHONE_INVALID_MESSAGE
+    digits = re.sub(r"\D", "", text)
+    if not 10 <= len(digits) <= 15:
+        return PHONE_INVALID_MESSAGE
+    return None
+
+
+def _document_plain_text(document: Any) -> str:
+    """Выдёргивает первые ~2000 символов текста Google-Doc без импорта docs_extract.
+
+    Используется для лёгкой проверки содержимого (например, что документ —
+    именно «Промежуточный отчёт»). На чужих/неожиданных структурах
+    возвращает пустую строку, чтобы не ронять пайплайн.
+    """
+
+    if not isinstance(document, dict):
+        return ""
+    parts: list[str] = []
+    total = 0
+    stack: list[Any] = [document.get("body", {}).get("content", [])]
+    while stack:
+        node = stack.pop()
+        if total >= 2000:
+            break
+        if isinstance(node, list):
+            for item in reversed(node):
+                stack.append(item)
+            continue
+        if not isinstance(node, dict):
+            continue
+        paragraph = node.get("paragraph")
+        if isinstance(paragraph, dict):
+            for element in paragraph.get("elements", []) or []:
+                text_run = (element or {}).get("textRun") or {}
+                content = text_run.get("content") or ""
+                if content:
+                    parts.append(content)
+                    total += len(content)
+                    if total >= 2000:
+                        break
+            continue
+        table = node.get("table")
+        if isinstance(table, dict):
+            for row in table.get("tableRows", []) or []:
+                for cell in row.get("tableCells", []) or []:
+                    stack.append(cell.get("content", []))
+            continue
+    return "".join(parts)
+
+
+def is_interim_report_document(document: Any) -> bool:
+    """True, если тело документа содержит фразу «Промежуточный отчёт»."""
+
+    plain = _document_plain_text(document).replace("ё", "е")
+    return bool(_INTERIM_REPORT_MARKER.search(plain))
+
+
+def check_report_document_marker(document: Any) -> str | None:
+    """Возвращает сообщение об ошибке, если документ — не «Промежуточный отчёт».
+
+    None означает, что документ прошёл проверку типа.
+    """
+
+    if is_interim_report_document(document):
+        return None
+    return REPORT_URL_WRONG_TARGET_MESSAGE
 
 
 def _is_dangerous_ip(ip: ipaddress._BaseAddress) -> bool:

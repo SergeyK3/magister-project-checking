@@ -16,6 +16,7 @@ from google.oauth2.service_account import Credentials
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import SHEET_HEADER, UserForm, compute_fill_status
+from magister_checking.bot.row_pipeline import Stage3CellUpdate
 
 _SHEETS_VALUE_INPUT_OPTION = "RAW"
 """Режим записи в Google Sheets.
@@ -78,6 +79,7 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "report_url_accessible": ("report_url_accessible", "доступ открыт"),
     "project_folder_url": (
         "project_folder_url",
+        "ссылка на магистерский проект",
         "ссылка на папку",
         "ссылка на папку 1",
         "ссылка на папку 1с",
@@ -85,9 +87,21 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "lkb_url": ("lkb_url", "ссылка на лкб"),
     "dissertation_url": ("dissertation_url", "ссылка на диссер", "ссылка на диссертацию"),
+    "publication_url": (
+        "publication_url",
+        "ссылка на публикацию",
+        "ссылка на публик",
+    ),
     "pages_total": ("pages_total", "число страниц", "всего страниц"),
     "sources_count": ("sources_count", "число источников", "источников"),
-    "compliance": ("compliance", "соответствие", "соответствие оформлению"),
+    "compliance": (
+        "compliance",
+        "соответствие",
+        "соответствие оформлению",
+        "соответствие офо",
+    ),
+    "dissertation_title": ("dissertation_title", "название диссертации"),
+    "dissertation_language": ("dissertation_language", "язык диссертации"),
     "fill_status": ("fill_status", "статус заполнения"),
     "last_action": ("last_action", "последнее действие"),
 }
@@ -546,6 +560,100 @@ def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
             return True
         return _bool_cell(row[active_col])
     return False
+
+
+def _safe_batch_update_values(
+    worksheet: gspread.Worksheet,
+    batch_values: list[dict],
+) -> None:
+    """Применяет ``worksheet.batch_update`` в RAW-режиме с безопасным откатом.
+
+    Нужен для пакетной записи отдельных ячеек строки без сбивания соседей:
+    ``worksheet.update`` по одной ячейке прошёл бы N раз, ``batch_update`` —
+    один HTTP-вызов. RAW-режим удерживается по тем же причинам, что и в
+    ``_safe_update`` (защита от случайного исполнения «формул» из данных).
+    """
+
+    if not batch_values:
+        return
+    try:
+        worksheet.batch_update(batch_values, value_input_option=_SHEETS_VALUE_INPUT_OPTION)
+    except TypeError:
+        worksheet.batch_update(batch_values)
+
+
+def apply_row_check_updates(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+    *,
+    report_url_valid: str | None = None,
+    report_url_accessible: str | None = None,
+    stage3_cells: list[Stage3CellUpdate] | None = None,
+) -> None:
+    """Записывает результаты прогона одной строки листа «Регистрация».
+
+    - Колонки «Проверка ссылки» (``report_url_valid``) и «Доступ открыт»
+      (``report_url_accessible``) обновляются, если соответствующее значение
+      передано (``None`` — значит Stage 2 не выполнялся, пропускаем).
+    - Stage 3 пишет значения колонок ``project_folder_url`` / ``lkb_url`` /
+      ``dissertation_url`` / ``publication_url`` и формат ``textFormat``
+      ``strikethrough`` (True/False) для каждой из этих ячеек.
+
+    Значения отправляются одним ``worksheet.batch_update`` (RAW), форматы —
+    одним ``spreadsheet.batch_update`` с ``repeatCell`` запросами.
+    """
+
+    stage3_cells = list(stage3_cells or [])
+    field_map = _field_to_column_map(worksheet)
+
+    batch_values: list[dict] = []
+
+    def _schedule_value(field_name: str, value: str) -> int | None:
+        col_idx = field_map.get(field_name)
+        if col_idx is None:
+            return None
+        letter = _column_letter(col_idx)
+        batch_values.append({"range": f"{letter}{row_number}", "values": [[value]]})
+        return col_idx
+
+    if report_url_valid is not None:
+        _schedule_value("report_url_valid", report_url_valid)
+    if report_url_accessible is not None:
+        _schedule_value("report_url_accessible", report_url_accessible)
+
+    sheet_id = getattr(worksheet, "id", None)
+    format_requests: list[dict] = []
+
+    for cell in stage3_cells:
+        col_idx = _schedule_value(cell.column_key, cell.value)
+        if col_idx is None or sheet_id is None:
+            continue
+        format_requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row_number - 1,
+                        "endRowIndex": row_number,
+                        "startColumnIndex": col_idx,
+                        "endColumnIndex": col_idx + 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {"strikethrough": bool(cell.strikethrough)}
+                        }
+                    },
+                    "fields": "userEnteredFormat.textFormat.strikethrough",
+                }
+            }
+        )
+
+    _safe_batch_update_values(worksheet, batch_values)
+
+    if format_requests:
+        spreadsheet = getattr(worksheet, "spreadsheet", None)
+        if spreadsheet is not None and hasattr(spreadsheet, "batch_update"):
+            spreadsheet.batch_update({"requests": format_requests})
 
 
 def upsert_user(worksheet: gspread.Worksheet, user: UserForm) -> int:

@@ -95,9 +95,12 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
             "project_folder_url": URL_MISSING,
             "lkb_url": URL_MISSING,
             "dissertation_url": URL_MISSING,
+            "publication_url": URL_MISSING,
             "pages_total": "",
             "sources_count": "",
             "compliance": "",
+            "dissertation_title": "",
+            "dissertation_language": "",
         }
 
     creds = _service_account_credentials(config)
@@ -113,14 +116,18 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
             "project_folder_url": URL_UNAVAILABLE,
             "lkb_url": URL_UNAVAILABLE,
             "dissertation_url": URL_UNAVAILABLE,
+            "publication_url": URL_UNAVAILABLE,
             "pages_total": "",
             "sources_count": "",
             "compliance": "",
+            "dissertation_title": "",
+            "dissertation_language": "",
         }
 
     project_folder_url = parsed.project_folder_url or (
         report_url if is_google_drive_folder_url(report_url) else ""
     )
+    publication_url = parsed.results_article_url or parsed.review_article_url or ""
     pages_total, sources_count, compliance = _analyze_dissertation_fields(
         docs_service=docs_service,
         drive_service=drive_service,
@@ -132,7 +139,10 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
         "project_folder_url": _link_value(project_folder_url),
         "lkb_url": _link_value(parsed.lkb_url),
         "dissertation_url": _link_value(parsed.dissertation_url),
+        "publication_url": _link_value(publication_url),
         "pages_total": pages_total,
         "sources_count": sources_count,
         "compliance": compliance,
+        "dissertation_title": "",
+        "dissertation_language": "",
     }

@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from magister_checking.bot.models import UserForm
-from magister_checking.bot.report_enrichment import build_sheet_enrichment
+from magister_checking.bot.report_enrichment import (
+    URL_MISSING,
+    URL_UNAVAILABLE,
+    build_sheet_enrichment,
+)
 from magister_checking.report_parser import ParsedReport
 
 
@@ -108,6 +112,109 @@ class BuildSheetEnrichmentTests(unittest.TestCase):
         self.assertEqual(result["pages_total"], "87")
         self.assertEqual(result["sources_count"], "2")
         self.assertEqual(result["compliance"], "Соответствует")
+        self.assertEqual(result["publication_url"], URL_MISSING)
+        self.assertEqual(result["dissertation_title"], "")
+        self.assertEqual(result["dissertation_language"], "")
+
+
+def _run_enrichment_with_parsed(
+    parsed: ParsedReport,
+    *,
+    report_url: str = "https://docs.google.com/document/d/report/edit",
+) -> dict[str, str]:
+    config = MagicMock()
+    user_form = UserForm(report_url=report_url)
+
+    docs_service = MagicMock()
+    report_req = MagicMock()
+    report_req.execute.return_value = {"body": {"content": []}}
+    docs_service.documents.return_value.get.return_value = report_req
+    drive_service = MagicMock()
+
+    with patch(
+        "magister_checking.bot.report_enrichment._service_account_credentials",
+        return_value=MagicMock(),
+    ), patch(
+        "magister_checking.bot.report_enrichment.build",
+        side_effect=[docs_service, drive_service],
+    ), patch(
+        "magister_checking.bot.report_enrichment.resolve_report_google_doc_id",
+        return_value="report-id",
+    ), patch(
+        "magister_checking.bot.report_enrichment.parse_intermediate_report",
+        return_value=parsed,
+    ):
+        return build_sheet_enrichment(config, user_form)
+
+
+def _parsed(**overrides: object) -> ParsedReport:
+    defaults: dict[str, object] = {
+        "lkb_status": "да",
+        "lkb_url": None,
+        "dissertation_url": None,
+        "review_article_url": None,
+        "review_article_note": "",
+        "results_article_url": None,
+    }
+    defaults.update(overrides)
+    return ParsedReport(**defaults)  # type: ignore[arg-type]
+
+
+class PublicationUrlTests(unittest.TestCase):
+    def test_prefers_results_article_url(self) -> None:
+        parsed = _parsed(
+            results_article_url="https://docs.google.com/document/d/results/edit",
+            review_article_url="https://docs.google.com/document/d/review/edit",
+        )
+        result = _run_enrichment_with_parsed(parsed)
+        self.assertEqual(
+            result["publication_url"], "https://docs.google.com/document/d/results/edit"
+        )
+
+    def test_falls_back_to_review_article_url(self) -> None:
+        parsed = _parsed(
+            results_article_url=None,
+            review_article_url="https://docs.google.com/document/d/review/edit",
+        )
+        result = _run_enrichment_with_parsed(parsed)
+        self.assertEqual(
+            result["publication_url"], "https://docs.google.com/document/d/review/edit"
+        )
+
+    def test_missing_when_no_article_urls(self) -> None:
+        parsed = _parsed(results_article_url=None, review_article_url=None)
+        result = _run_enrichment_with_parsed(parsed)
+        self.assertEqual(result["publication_url"], URL_MISSING)
+
+
+class PlaceholderColumnsTests(unittest.TestCase):
+    """Заглушки для колонок, которые наполняются в более поздних фазах."""
+
+    def test_empty_report_url_returns_placeholders(self) -> None:
+        config = MagicMock()
+        user_form = UserForm(report_url="")
+        result = build_sheet_enrichment(config, user_form)
+        self.assertEqual(result["publication_url"], URL_MISSING)
+        self.assertEqual(result["dissertation_title"], "")
+        self.assertEqual(result["dissertation_language"], "")
+
+    def test_report_fetch_failure_returns_unavailable(self) -> None:
+        config = MagicMock()
+        user_form = UserForm(report_url="https://docs.google.com/document/d/report/edit")
+        with patch(
+            "magister_checking.bot.report_enrichment._service_account_credentials",
+            return_value=MagicMock(),
+        ), patch(
+            "magister_checking.bot.report_enrichment.build",
+            side_effect=[MagicMock(), MagicMock()],
+        ), patch(
+            "magister_checking.bot.report_enrichment.resolve_report_google_doc_id",
+            side_effect=RuntimeError("no access"),
+        ):
+            result = build_sheet_enrichment(config, user_form)
+        self.assertEqual(result["publication_url"], URL_UNAVAILABLE)
+        self.assertEqual(result["dissertation_title"], "")
+        self.assertEqual(result["dissertation_language"], "")
 
 
 if __name__ == "__main__":

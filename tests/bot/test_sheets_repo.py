@@ -9,9 +9,11 @@ from unittest.mock import MagicMock, patch
 import gspread
 
 from magister_checking.bot.models import SHEET_HEADER, UserForm
+from magister_checking.bot.row_pipeline import Stage3CellUpdate
 from magister_checking.bot.sheets_repo import (
     ADMINS_WORKSHEET_NAME,
     _column_letter,
+    apply_row_check_updates,
     attach_telegram_to_row,
     build_dashboard_rows,
     DASHBOARD_WORKSHEET_NAME,
@@ -32,9 +34,18 @@ from magister_checking.bot.sheets_repo import (
 class FakeWorksheet:
     """Минимальная замена gspread.Worksheet для тестов."""
 
-    def __init__(self, rows: List[List[str]] | None = None) -> None:
+    def __init__(
+        self,
+        rows: List[List[str]] | None = None,
+        *,
+        sheet_id: int = 0,
+        spreadsheet: "FakeSpreadsheet | None" = None,
+    ) -> None:
         self.rows: List[List[str]] = [list(r) for r in (rows or [])]
         self.update_calls: List[tuple] = []
+        self.batch_update_calls: List[tuple] = []
+        self.id = sheet_id
+        self.spreadsheet = spreadsheet
 
     def _ensure_width(self, width: int) -> None:
         for row in self.rows:
@@ -82,10 +93,25 @@ class FakeWorksheet:
         for value_row in values:
             self.rows.append(list(value_row))
 
+    def batch_update(
+        self,
+        data: List[dict],
+        value_input_option: str = "RAW",
+    ) -> None:
+        self.batch_update_calls.append((list(data), value_input_option))
+        for entry in data:
+            range_a1 = entry["range"]
+            values = entry["values"]
+            self.update(range_a1, values)
+
 
 class FakeSpreadsheet:
     def __init__(self, worksheets: dict[str, FakeWorksheet] | None = None) -> None:
         self.worksheets = dict(worksheets or {})
+        self.batch_update_calls: List[dict] = []
+
+    def batch_update(self, body: dict) -> None:
+        self.batch_update_calls.append(body)
 
     def worksheet(self, title: str) -> FakeWorksheet:
         if title not in self.worksheets:
@@ -362,6 +388,73 @@ class UpsertUserTests(unittest.TestCase):
         self.assertEqual(ws.rows[1][7], "13")
         self.assertEqual(ws.rows[1][8], "Соответствует")
 
+    def test_insert_with_new_schema_headers_maps_all_analytic_columns(self) -> None:
+        rows = [
+            [
+                "Отметка времени",
+                "ФИО",
+                "Группа",
+                "Место работы",
+                "Должность",
+                "Телефон",
+                "Научный руководитель",
+                "Ссылка на промежуточный отчет",
+                "Проверка ссылки",
+                "Доступ открыт",
+                "Ссылка на Магистерский проект",
+                "Ссылка на ЛКБ",
+                "Ссылка на диссер",
+                "Ссылка на публикацию",
+                "Число страниц",
+                "Число источников",
+                "Соответствие офо",
+                "Название диссертации",
+                "Язык диссертации",
+            ]
+        ]
+        ws = FakeWorksheet(rows)
+        form = UserForm(
+            telegram_id="222",
+            fio="Камзебаева А.Д.",
+            group_name="Оз-11",
+            report_url="https://docs.google.com/document/d/report/edit",
+            report_url_valid="yes",
+            report_url_accessible="yes",
+        )
+
+        row = upsert_user_with_extras(
+            ws,
+            form,
+            extra_values={
+                "project_folder_url": "https://drive.google.com/drive/folders/proj",
+                "lkb_url": "https://drive.google.com/file/d/lkb/view",
+                "dissertation_url": "https://docs.google.com/document/d/diss/edit",
+                "publication_url": "https://docs.google.com/document/d/pub/edit",
+                "pages_total": "87",
+                "sources_count": "42",
+                "compliance": "Соответствует",
+                "dissertation_title": "",
+                "dissertation_language": "",
+            },
+        )
+
+        self.assertEqual(row, 2)
+        saved = ws.rows[1]
+        self.assertEqual(saved[1], "Камзебаева А.Д.")
+        self.assertEqual(saved[2], "Оз-11")
+        self.assertEqual(saved[7], "https://docs.google.com/document/d/report/edit")
+        self.assertEqual(saved[8], "yes")
+        self.assertEqual(saved[9], "yes")
+        self.assertEqual(saved[10], "https://drive.google.com/drive/folders/proj")
+        self.assertEqual(saved[11], "https://drive.google.com/file/d/lkb/view")
+        self.assertEqual(saved[12], "https://docs.google.com/document/d/diss/edit")
+        self.assertEqual(saved[13], "https://docs.google.com/document/d/pub/edit")
+        self.assertEqual(saved[14], "87")
+        self.assertEqual(saved[15], "42")
+        self.assertEqual(saved[16], "Соответствует")
+        self.assertEqual(saved[17], "")
+        self.assertEqual(saved[18], "")
+
 
 class LoadUserTests(unittest.TestCase):
     def test_pads_short_row(self) -> None:
@@ -537,6 +630,234 @@ class AdminSheetTests(unittest.TestCase):
             self.assertTrue(is_admin_telegram_id(cfg, "300398364"))
             self.assertFalse(is_admin_telegram_id(cfg, "999"))
             self.assertFalse(is_admin_telegram_id(cfg, "123"))
+
+
+class ApplyRowCheckUpdatesTests(unittest.TestCase):
+    """Тесты записи результатов Stage 2 / Stage 3 в лист «Регистрация»."""
+
+    _HEADER_PHASE_A = [
+        "Отметка времени",
+        "ФИО",
+        "Группа",
+        "Место работы",
+        "Должность",
+        "Телефон",
+        "Научный руководитель",
+        "Ссылка на промежуточный отчет",
+        "Проверка ссылки",
+        "Доступ открыт",
+        "Ссылка на Магистерский проект",
+        "Ссылка на ЛКБ",
+        "Ссылка на диссер",
+        "Ссылка на публикацию",
+        "Число страниц",
+        "Число источников",
+        "Соответствие офо",
+        "Название диссертации",
+        "Язык диссертации",
+    ]
+
+    def _fresh_sheet(self) -> tuple["FakeSpreadsheet", FakeWorksheet]:
+        spreadsheet = FakeSpreadsheet()
+        ws = FakeWorksheet(
+            [list(self._HEADER_PHASE_A), [""] * len(self._HEADER_PHASE_A)],
+            sheet_id=42,
+            spreadsheet=spreadsheet,
+        )
+        spreadsheet.worksheets["Регистрация"] = ws
+        return spreadsheet, ws
+
+    def test_writes_stage2_and_stage3_values(self) -> None:
+        spreadsheet, ws = self._fresh_sheet()
+
+        stage3_cells = [
+            Stage3CellUpdate(
+                column_key="project_folder_url",
+                value="https://drive.google.com/drive/folders/proj",
+                strikethrough=False,
+            ),
+            Stage3CellUpdate(
+                column_key="lkb_url",
+                value="https://drive.google.com/file/d/lkb",
+                strikethrough=True,
+            ),
+            Stage3CellUpdate(
+                column_key="dissertation_url",
+                value="https://docs.google.com/document/d/diss",
+                strikethrough=False,
+            ),
+            Stage3CellUpdate(
+                column_key="publication_url",
+                value="нет",
+                strikethrough=False,
+            ),
+        ]
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=stage3_cells,
+        )
+
+        saved = ws.rows[1]
+        # Позиции в тестовом заголовке (индексы): Проверка ссылки=8, Доступ открыт=9,
+        # Магистерский проект=10, ЛКБ=11, диссер=12, публикация=13.
+        self.assertEqual(saved[8], "yes")
+        self.assertEqual(saved[9], "yes")
+        self.assertEqual(saved[10], "https://drive.google.com/drive/folders/proj")
+        self.assertEqual(saved[11], "https://drive.google.com/file/d/lkb")
+        self.assertEqual(saved[12], "https://docs.google.com/document/d/diss")
+        self.assertEqual(saved[13], "нет")
+
+    def test_batch_update_is_single_call_in_raw_mode(self) -> None:
+        _, ws = self._fresh_sheet()
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="no",
+            stage3_cells=[
+                Stage3CellUpdate(column_key="dissertation_url", value="нет"),
+            ],
+        )
+
+        self.assertEqual(len(ws.batch_update_calls), 1)
+        batch, value_input_option = ws.batch_update_calls[0]
+        self.assertEqual(value_input_option, "RAW")
+        ranges = [entry["range"] for entry in batch]
+        self.assertEqual(ranges, ["I2", "J2", "M2"])
+
+    def test_strikethrough_format_requests_match_cells(self) -> None:
+        spreadsheet, ws = self._fresh_sheet()
+
+        stage3_cells = [
+            Stage3CellUpdate(column_key="project_folder_url", value="нет"),
+            Stage3CellUpdate(
+                column_key="lkb_url",
+                value="https://drive.google.com/file/d/lkb",
+                strikethrough=True,
+            ),
+            Stage3CellUpdate(
+                column_key="dissertation_url",
+                value="https://docs.google.com/document/d/diss",
+                strikethrough=False,
+            ),
+            Stage3CellUpdate(column_key="publication_url", value="нет"),
+        ]
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=stage3_cells,
+        )
+
+        self.assertEqual(len(spreadsheet.batch_update_calls), 1)
+        body = spreadsheet.batch_update_calls[0]
+        requests = body["requests"]
+        self.assertEqual(len(requests), 4)
+
+        for request, expected in zip(
+            requests,
+            [
+                ("project_folder_url", 10, False),
+                ("lkb_url", 11, True),
+                ("dissertation_url", 12, False),
+                ("publication_url", 13, False),
+            ],
+        ):
+            _key, expected_col, expected_strike = expected
+            range_ = request["repeatCell"]["range"]
+            self.assertEqual(range_["sheetId"], 42)
+            self.assertEqual(range_["startRowIndex"], 1)
+            self.assertEqual(range_["endRowIndex"], 2)
+            self.assertEqual(range_["startColumnIndex"], expected_col)
+            self.assertEqual(range_["endColumnIndex"], expected_col + 1)
+            self.assertEqual(
+                request["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+                    "strikethrough"
+                ],
+                expected_strike,
+            )
+            self.assertEqual(
+                request["repeatCell"]["fields"],
+                "userEnteredFormat.textFormat.strikethrough",
+            )
+
+    def test_skips_stage2_when_probe_is_none(self) -> None:
+        spreadsheet, ws = self._fresh_sheet()
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid=None,
+            report_url_accessible=None,
+            stage3_cells=[
+                Stage3CellUpdate(column_key="dissertation_url", value="нет"),
+            ],
+        )
+
+        self.assertEqual(ws.rows[1][8], "")  # Проверка ссылки — не тронули
+        self.assertEqual(ws.rows[1][9], "")  # Доступ открыт — не тронули
+        ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
+        self.assertEqual(ranges, ["M2"])
+        self.assertEqual(len(spreadsheet.batch_update_calls), 1)
+
+    def test_skips_missing_columns_in_custom_header(self) -> None:
+        # Заголовок без «Ссылка на публикацию» — ячейка не записывается.
+        header = [
+            "Отметка времени",
+            "ФИО",
+            "Ссылка на промежуточный отчет",
+            "Проверка ссылки",
+            "Доступ открыт",
+            "Ссылка на Магистерский проект",
+            "Ссылка на ЛКБ",
+            "Ссылка на диссер",
+        ]
+        spreadsheet = FakeSpreadsheet()
+        ws = FakeWorksheet(
+            [list(header), [""] * len(header)],
+            sheet_id=7,
+            spreadsheet=spreadsheet,
+        )
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=[
+                Stage3CellUpdate(column_key="project_folder_url", value="url-L"),
+                Stage3CellUpdate(column_key="publication_url", value="нет"),
+            ],
+        )
+
+        ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
+        self.assertEqual(ranges, ["D2", "E2", "F2"])  # publication_url пропущен
+        requests = spreadsheet.batch_update_calls[0]["requests"]
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["repeatCell"]["range"]["startColumnIndex"], 5)
+
+    def test_no_format_call_when_no_stage3(self) -> None:
+        spreadsheet, ws = self._fresh_sheet()
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="no",
+            report_url_accessible="no",
+            stage3_cells=None,
+        )
+
+        self.assertEqual(spreadsheet.batch_update_calls, [])
+        self.assertEqual(len(ws.batch_update_calls), 1)
+        ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
+        self.assertEqual(ranges, ["I2", "J2"])
 
 
 if __name__ == "__main__":

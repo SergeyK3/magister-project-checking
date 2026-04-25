@@ -42,6 +42,16 @@ class BotConfig:
     google_service_account_json: Path
     log_level: int
     persistence_file: Path
+    docx_conversion_folder_id: str = ""
+    """ID папки Google Drive (буфер для конверсии), куда копируются .docx
+    отчёты с преобразованием в Google Doc перед чтением Docs API. Должна
+    лежать в Shared Drive, иначе Service Account упрётся в storageQuota = 0
+    при ``drive.files().copy(...)``. Пустая строка — конверсия отключена,
+    .docx-ссылки будут падать как неподдерживаемый формат.
+
+    Источники в порядке приоритета (см. ``load_config``):
+    ``GOOGLE_DRIVE_BUFFER_FOLDER_URL`` → ``GOOGLE_DRIVE_BUFFER_FOLDER_ID``
+    → ``DOCX_CONVERSION_FOLDER_URL`` → ``DOCX_CONVERSION_FOLDER_ID``."""
 
     @property
     def log_level_name(self) -> str:
@@ -88,6 +98,13 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     project_card_output_folder_url = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
     persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
+    docx_conv_raw = (
+        _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
+        or _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_ID")
+        or _read_env("DOCX_CONVERSION_FOLDER_URL")
+        or _read_env("DOCX_CONVERSION_FOLDER_ID")
+        or ""
+    )
 
     missing = [
         name
@@ -110,6 +127,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         if persistence_file_raw
         else DEFAULT_PERSISTENCE_FILE
     )
+    docx_conversion_folder_id = _resolve_docx_conversion_folder_id(docx_conv_raw)
 
     return BotConfig(
         telegram_bot_token=token,  # type: ignore[arg-type]
@@ -119,7 +137,33 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         google_service_account_json=sa_path,
         log_level=_coerce_log_level(log_level_raw),
         persistence_file=persistence_file,
+        docx_conversion_folder_id=docx_conversion_folder_id,
     )
+
+
+def _resolve_docx_conversion_folder_id(raw: str) -> str:
+    """Принимает либо чистый id, либо URL папки Drive, возвращает id.
+
+    Пустая строка → пустая строка (фича отключена). Некорректный URL не
+    роняет загрузку конфига: просто возвращаем ``""`` и логируем, чтобы
+    бот/CLI мог стартовать даже при опечатке в .env и выдавать понятное
+    сообщение в момент реальной конверсии.
+    """
+
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    from magister_checking.drive_urls import (
+        extract_google_folder_id,
+        is_google_drive_folder_url,
+    )
+
+    if is_google_drive_folder_url(s):
+        try:
+            return extract_google_folder_id(s)
+        except ValueError:
+            return ""
+    return s
 
 
 def _resolve_service_account_path(

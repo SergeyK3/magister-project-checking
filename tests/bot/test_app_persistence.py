@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, MagicMock
 
 from telegram.ext import ConversationHandler, PicklePersistence
 
-from magister_checking.bot.app import build_application
+from magister_checking.bot.app import _post_init, build_application
 from magister_checking.bot.config import BotConfig
 
 
@@ -59,6 +61,25 @@ class BuildApplicationPersistenceTests(unittest.TestCase):
                 getattr(app, "error_handlers", ()),
                 msg="PTB Application должен иметь error_handlers после B3",
             )
+
+    def test_help_handler_high_priority_group(self) -> None:
+        """C1: /help в group=-1, чтобы справка не терялась внутри диалога."""
+
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+            handlers_m1 = app.handlers.get(-1, [])
+            self.assertEqual(len(handlers_m1), 1)
+            self.assertIn("help", handlers_m1[0].commands)
+
+    def test_post_init_registers_bot_commands(self) -> None:
+        """C1: при старте вызывается set_my_commands."""
+
+        app = MagicMock()
+        app.bot.set_my_commands = AsyncMock()
+        asyncio.run(_post_init(app))
+        app.bot.set_my_commands.assert_awaited_once()
+        cmds = app.bot.set_my_commands.await_args.args[0]
+        self.assertTrue(any(getattr(c, "command", None) == "help" for c in cmds))
 
 
 if __name__ == "__main__":

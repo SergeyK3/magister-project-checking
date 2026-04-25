@@ -35,6 +35,8 @@ from magister_checking.bot.handlers import (
     ask_confirm,
     cancel,
     confirm_bind,
+    default_bot_commands,
+    help_command,
     project_card_receive_target,
     project_card_start,
     receive_bind_fio,
@@ -160,6 +162,12 @@ def _build_persistence(config: BotConfig) -> PicklePersistence:
     )
 
 
+async def _post_init(application: Application) -> None:
+    """Меню команд в клиенте Telegram (C1 polish)."""
+
+    await application.bot.set_my_commands(default_bot_commands())
+
+
 def build_application(config: BotConfig) -> Application:
     """Собирает Application с ConversationHandler регистрации.
 
@@ -172,9 +180,12 @@ def build_application(config: BotConfig) -> Application:
         Application.builder()
         .token(config.telegram_bot_token)
         .persistence(persistence)
+        .post_init(_post_init)
         .build()
     )
     application.bot_data[CONFIG_BOT_DATA_KEY] = config
+
+    application.add_handler(CommandHandler("help", help_command), group=-1)
 
     field_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, receive_field)
     confirm_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, ask_confirm)

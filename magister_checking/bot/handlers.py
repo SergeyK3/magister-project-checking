@@ -9,6 +9,7 @@ import logging
 from typing import Awaitable, Callable, List, Optional
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
@@ -68,6 +69,44 @@ USER_DATA_BIND_ROW_KEY = "bind_candidate_row"
 
 CONFIG_BOT_DATA_KEY = "bot_config"
 ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
+
+HELP_REPLY_TEXT = (
+    "Команды бота:\n\n"
+    "/start — регистрация, привязка к строке таблицы или продолжение анкеты\n"
+    "/recheck — повторить проверку отчёта (если вы уже в таблице)\n"
+    "/cancel — прервать текущий диалог\n"
+    "/admin — панель администратора (только для telegram_id из листа "
+    f"«{ADMINS_WORKSHEET_NAME}»)\n"
+    "/project_card — сформировать PDF-карточку проекта (только админы)\n\n"
+    f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n\n"
+    "Подсказка: меню команд (кнопка рядом с полем ввода) подтягивается "
+    "после перезапуска бота."
+)
+
+
+def default_bot_commands() -> list[BotCommand]:
+    """Команды для ``BotFather`` / меню Telegram (короткие описания ≤256 симв.)."""
+
+    return [
+        BotCommand("start", "Регистрация или продолжить анкету"),
+        BotCommand("help", "Список команд и подсказки"),
+        BotCommand("recheck", "Повторить проверку отчёта"),
+        BotCommand("cancel", "Прервать текущий диалог"),
+        BotCommand("admin", "Панель администратора"),
+        BotCommand("project_card", "PDF-карточка проекта (админы)"),
+    ]
+
+
+def _format_user_visible_exc(exc: BaseException, *, limit: int = 480) -> str:
+    """Одна короткая строка для пользователя без многострочного traceback."""
+
+    text = str(exc).strip()
+    if not text:
+        return type(exc).__name__
+    first = text.split("\n", 1)[0]
+    if len(first) > limit:
+        return first[: limit - 1] + "…"
+    return first
 
 
 def _bot_config(context: ContextTypes.DEFAULT_TYPE) -> BotConfig:
@@ -250,7 +289,8 @@ async def _start_new_registration(
         "Здравствуйте.\n\n"
         "Бот поможет зарегистрироваться для промежуточной аттестации магистрантов.\n"
         "Я последовательно задам вопросы и сохраню данные в таблицу.\n\n"
-        f"Если какое-то поле хотите заполнить позже, отправьте {SKIP_TOKEN} или /skip."
+        f"Если какое-то поле хотите заполнить позже, отправьте {SKIP_TOKEN} или /skip.\n\n"
+        "/help — список команд, /cancel — прервать диалог."
     )
     _set_pending_fields(context, get_missing_field_keys(user_form))
     return await _prompt_next(update, context)
@@ -327,7 +367,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Здравствуйте.\n\n"
         "Если вы уже отправляли промежуточный отчёт через форму или старосту, "
         "введите ФИО ровно так, как в форме — я найду вашу запись и привяжу к ней этот аккаунт.\n\n"
-        f"Если такой записи ещё нет, отправьте {SKIP_TOKEN} или /skip — пройдём регистрацию с нуля."
+        f"Если такой записи ещё нет, отправьте {SKIP_TOKEN} или /skip — пройдём регистрацию с нуля.\n\n"
+        "/help — список команд, /cancel — прервать диалог."
     )
     _record_action(user_form, "ask_bind_fio")
     return BIND_ASK_FIO
@@ -400,7 +441,8 @@ async def project_card_receive_target(
         logger.exception("Не удалось сформировать карточку проекта для строки %s", row_number)
         await update.message.reply_text(
             "Не удалось сформировать карточку проекта.\n\n"
-            f"Причина: {exc}",
+            f"Кратко: {_format_user_visible_exc(exc)}\n\n"
+            "Подробности — в логе бота (для администратора).",
             reply_markup=ReplyKeyboardRemove(),
         )
         return ConversationHandler.END
@@ -872,9 +914,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_form = _get_user_form(context)
     _record_action(user_form, "cancelled")
     await update.message.reply_text(
-        "Диалог остановлен. Для нового запуска используйте /start"
+        "Диалог остановлен.\n\n"
+        "Снова начать: /start. Справка по командам: /help."
     )
     return ConversationHandler.END
+
+
+async def help_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Команда /help: краткая справка (работает и вне диалога)."""
+
+    msg = update.effective_message
+    if msg is not None:
+        await msg.reply_text(HELP_REPLY_TEXT)
 
 
 __all__ = [
@@ -896,6 +949,8 @@ __all__ = [
     "build_recheck_keyboard",
     "cancel",
     "confirm_bind",
+    "default_bot_commands",
+    "help_command",
     "project_card_receive_target",
     "project_card_start",
     "receive_bind_fio",

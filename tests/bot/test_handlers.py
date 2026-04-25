@@ -27,6 +27,8 @@ from magister_checking.bot.handlers import (
     build_recheck_keyboard,
     cancel,
     confirm_bind,
+    default_bot_commands,
+    help_command,
     project_card_receive_target,
     project_card_start,
     receive_bind_fio,
@@ -537,6 +539,30 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(state, ConversationHandler.END)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.last_action, "cancelled")
+        cancel_text = update.message.reply_text.await_args.args[0]
+        self.assertIn("/help", cancel_text)
+        self.assertIn("/start", cancel_text)
+
+
+class HelpAndCommandsTests(unittest.TestCase):
+    def test_default_bot_commands_lists_core_slugs(self) -> None:
+        cmds = default_bot_commands()
+        slugs = [c.command for c in cmds]
+        self.assertEqual(
+            slugs,
+            ["start", "help", "recheck", "cancel", "admin", "project_card"],
+        )
+
+    def test_help_command_replies_with_text(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/help")
+        update.effective_message = update.message
+        _run(help_command(update, ctx))
+        update.message.reply_text.assert_awaited_once()
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("/start", text)
+        self.assertIn("/recheck", text)
 
 
 class AdminProjectCardTests(unittest.TestCase):
@@ -622,6 +648,33 @@ class AdminProjectCardTests(unittest.TestCase):
 
         self.assertEqual(state, PROJECT_CARD_ASK_TARGET)
         self.assertIn("несколько строк", update.message.reply_text.await_args.args[0])
+
+    def test_project_card_receive_target_user_message_on_generation_error(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                ["111", "ivanov", "Иван", "Иванов", "Иванов И.И.", "М-101", "", "", "", "", "https://docs.google.com/document/d/abc/edit", "yes", "yes", "REGISTERED", "confirmed_save"],
+            ]
+        )
+        ctx = _FakeContext(ws)
+        update = _make_update(text="2")
+
+        class Boom(Exception):
+            pass
+
+        boom = Boom("первая строка\nвторая строка не для пользователя")
+
+        with _patch_admin_check(True), _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.generate_project_card_pdf",
+            side_effect=boom,
+        ):
+            state = _run(project_card_receive_target(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        last = update.message.reply_text.await_args.args[0]
+        self.assertIn("Кратко:", last)
+        self.assertIn("первая строка", last)
+        self.assertNotIn("вторая строка", last)
 
 
 class RecheckHandlerTests(unittest.TestCase):

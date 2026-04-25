@@ -6,8 +6,37 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from magister_checking.bot.models import UserForm
+from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.report_parser import ParsedReport
-from magister_checking.row_check_cli import RowLocator, format_report, run_row_check
+from magister_checking.row_check_cli import (
+    RowLocator,
+    _try_load_dissertation_metrics,
+    format_report,
+    run_row_check,
+)
+
+
+def _make_metrics(
+    *,
+    approx_pages: int = 80,
+    sources_count: int | None = 35,
+    formatting_compliance: bool | None = True,
+    pdf_pages: int | None = None,
+) -> DissertationMetrics:
+    return DissertationMetrics(
+        approx_pages=approx_pages,
+        pdf_pages=pdf_pages,
+        sources_count=sources_count,
+        review_pages=None,
+        review_sources_count=None,
+        has_literature_review=True,
+        has_results=True,
+        has_discussion=True,
+        formatting_compliance=formatting_compliance,
+        font_size_14_ratio=1.0,
+        times_new_roman_ratio=1.0,
+        single_spacing_ratio=1.0,
+    )
 
 
 def _doc_with_text(text: str) -> dict:
@@ -223,6 +252,92 @@ class RunRowCheckTests(unittest.TestCase):
             report = run_row_check(config, RowLocator(fio="Иванов И.И."))
         self.assertEqual(report.row_number, 5)
 
+    def test_stage4_native_doc_metrics_passed_into_pipeline(self) -> None:
+        """Если диссертация — google_doc, в пайплайн идут метрики и пишутся в лист."""
+        report_url = "https://docs.google.com/document/d/report/edit"
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        user = UserForm(
+            fio="Гизатова И.В.",
+            phone="+77052107777",
+            report_url=report_url,
+        )
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        parsed = _parsed(dissertation_url=diss_url)
+        metrics = _make_metrics(
+            approx_pages=80,
+            sources_count=35,
+            formatting_compliance=True,
+        )
+        config = MagicMock()
+        with _install_io_mocks(
+            user=user,
+            document=good_doc,
+            parsed=parsed,
+            url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
+        ), patch(
+            "magister_checking.row_check_cli._try_load_dissertation_metrics",
+            return_value=metrics,
+        ) as load_metrics:
+            report = run_row_check(config, RowLocator(row_number=3), apply=False)
+
+        load_metrics.assert_called_once()
+        kwargs = load_metrics.call_args.kwargs
+        self.assertEqual(kwargs["dissertation_url"], diss_url)
+
+        self.assertTrue(report.stage4.executed)
+        self.assertEqual(report.stage4.pages_total, 80)
+        self.assertEqual(report.stage4.sources_count, 35)
+        self.assertIs(report.stage4.compliance, True)
+
+        cells = {c.column_key: c.value for c in report.stage4_cells}
+        self.assertEqual(cells["pages_total"], "80")
+        self.assertEqual(cells["sources_count"], "35")
+        self.assertEqual(cells["compliance"], "соответствует")
+
+    def test_stage4_skipped_when_metrics_load_returns_none(self) -> None:
+        """Загрузка не удалась → метрики None, Stage 4 skipped, в лист ничего."""
+        report_url = "https://docs.google.com/document/d/report/edit"
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        user = UserForm(fio="X Y", phone="+7", report_url=report_url)
+        parsed = _parsed(dissertation_url=diss_url)
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        config = MagicMock()
+        with _install_io_mocks(
+            user=user,
+            document=good_doc,
+            parsed=parsed,
+            url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
+        ), patch(
+            "magister_checking.row_check_cli._try_load_dissertation_metrics",
+            return_value=None,
+        ):
+            report = run_row_check(config, RowLocator(row_number=3))
+
+        self.assertFalse(report.stage4.executed)
+        self.assertEqual(report.stage4_cells, [])
+        self.assertIsNotNone(report.stage4.skipped_reason)
+
+    def test_stage4_not_invoked_when_dissertation_is_folder(self) -> None:
+        """Stage 3 hard-fail (диссертация-папка) → метрики не грузятся."""
+        report_url = "https://docs.google.com/document/d/report/edit"
+        diss_url = "https://drive.google.com/drive/folders/diss-folder"
+        user = UserForm(fio="Макишева", phone="+7", report_url=report_url)
+        parsed = _parsed(dissertation_url=diss_url)
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        config = MagicMock()
+        with _install_io_mocks(
+            user=user,
+            document=good_doc,
+            parsed=parsed,
+            url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
+        ), patch(
+            "magister_checking.row_check_cli._try_load_dissertation_metrics"
+        ) as load_metrics:
+            report = run_row_check(config, RowLocator(row_number=9))
+
+        load_metrics.assert_not_called()
+        self.assertFalse(report.stage4.executed)
+
     def test_format_report_includes_links_block(self) -> None:
         user = UserForm(
             fio="Гизатова Ирина Владимировна",
@@ -244,6 +359,126 @@ class RunRowCheckTests(unittest.TestCase):
         self.assertIn("Магистрант: Гизатова Ирина Владимировна", text)
         self.assertIn("Извлечённые ссылки", text)
         self.assertIn("dissertation_url: https://docs.google.com/document/d/diss", text)
+
+
+class TryLoadDissertationMetricsTests(unittest.TestCase):
+    """Прямые тесты IO-помощника Stage 4 (без всего остального пайплайна)."""
+
+    def _metrics(self) -> DissertationMetrics:
+        return _make_metrics(
+            approx_pages=70,
+            sources_count=30,
+            formatting_compliance=True,
+        )
+
+    def test_native_google_doc_path_calls_docs_api_and_analyzer(self) -> None:
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        doc_payload = {"body": {"content": []}}
+        docs_service.documents.return_value.get.return_value.execute.return_value = (
+            doc_payload
+        )
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli.analyze_dissertation",
+            return_value=self._metrics(),
+        ) as analyze:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.approx_pages, 70)
+        docs_service.documents.return_value.get.assert_called_with(
+            documentId="diss-id"
+        )
+        analyze.assert_called_once_with(doc_payload)
+
+    def test_native_google_doc_api_error_returns_none(self) -> None:
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        docs_service.documents.return_value.get.return_value.execute.side_effect = (
+            RuntimeError("403")
+        )
+        drive_service = MagicMock()
+        result = _try_load_dissertation_metrics(
+            dissertation_url=diss_url,
+            docs_service=docs_service,
+            drive_service=drive_service,
+        )
+        self.assertIsNone(result)
+
+    def test_drive_file_docx_path_downloads_and_analyzes(self) -> None:
+        diss_url = "https://drive.google.com/file/d/diss-docx-id/view"
+        docs_service = MagicMock()
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"PK\x03\x04docx-bytes",
+        ) as dl, patch(
+            "magister_checking.row_check_cli.analyze_docx_bytes",
+            return_value=self._metrics(),
+        ) as analyze:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.sources_count, 30)
+        dl.assert_called_once_with(
+            drive_service=drive_service, file_id="diss-docx-id"
+        )
+        analyze.assert_called_once()
+
+    def test_drive_file_download_failure_returns_none(self) -> None:
+        diss_url = "https://drive.google.com/file/d/diss-docx-id/view"
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=None,
+        ), patch(
+            "magister_checking.row_check_cli.analyze_docx_bytes"
+        ) as analyze:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=MagicMock(),
+                drive_service=MagicMock(),
+            )
+        self.assertIsNone(result)
+        analyze.assert_not_called()
+
+    def test_drive_file_analyzer_failure_returns_none(self) -> None:
+        diss_url = "https://drive.google.com/file/d/diss-docx-id/view"
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"corrupted",
+        ), patch(
+            "magister_checking.row_check_cli.analyze_docx_bytes",
+            side_effect=ValueError("not a zip"),
+        ):
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=MagicMock(),
+                drive_service=MagicMock(),
+            )
+        self.assertIsNone(result)
+
+    def test_unsupported_kind_returns_none(self) -> None:
+        result = _try_load_dissertation_metrics(
+            dissertation_url="https://drive.google.com/drive/folders/folder-id",
+            docs_service=MagicMock(),
+            drive_service=MagicMock(),
+        )
+        self.assertIsNone(result)
+
+    def test_empty_url_returns_none(self) -> None:
+        result = _try_load_dissertation_metrics(
+            dissertation_url="",
+            docs_service=MagicMock(),
+            drive_service=MagicMock(),
+        )
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

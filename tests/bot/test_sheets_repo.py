@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import gspread
 
 from magister_checking.bot.models import SHEET_HEADER, UserForm
-from magister_checking.bot.row_pipeline import Stage3CellUpdate
+from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
 from magister_checking.bot.sheets_repo import (
     ADMINS_WORKSHEET_NAME,
     _column_letter,
@@ -858,6 +858,109 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         self.assertEqual(len(ws.batch_update_calls), 1)
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
         self.assertEqual(ranges, ["I2", "J2"])
+
+    def test_writes_stage4_cells_in_same_batch(self) -> None:
+        """Stage 4 пишет pages_total/sources_count/compliance в общий batch."""
+        spreadsheet, ws = self._fresh_sheet()
+
+        stage4_cells = [
+            Stage4CellUpdate(column_key="pages_total", value="87"),
+            Stage4CellUpdate(column_key="sources_count", value="42"),
+            Stage4CellUpdate(column_key="compliance", value="соответствует"),
+        ]
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=[
+                Stage3CellUpdate(
+                    column_key="dissertation_url",
+                    value="https://docs.google.com/document/d/diss",
+                    strikethrough=False,
+                ),
+            ],
+            stage4_cells=stage4_cells,
+        )
+
+        saved = ws.rows[1]
+        # В тестовом заголовке: Число страниц=14, Число источников=15,
+        # Соответствие офо=16.
+        self.assertEqual(saved[14], "87")
+        self.assertEqual(saved[15], "42")
+        self.assertEqual(saved[16], "соответствует")
+
+        # Один batch_update — все значения вместе.
+        self.assertEqual(len(ws.batch_update_calls), 1)
+        batch, vio = ws.batch_update_calls[0]
+        self.assertEqual(vio, "RAW")
+        ranges = [entry["range"] for entry in batch]
+        self.assertEqual(ranges, ["I2", "J2", "M2", "O2", "P2", "Q2"])
+
+        # Strikethrough только для Stage 3 (1 ячейка), Stage 4 не получает
+        # repeatCell-запросов.
+        self.assertEqual(len(spreadsheet.batch_update_calls), 1)
+        requests = spreadsheet.batch_update_calls[0]["requests"]
+        self.assertEqual(len(requests), 1)
+
+    def test_stage4_only_writes_when_provided(self) -> None:
+        """Если stage4_cells не передали — Stage 4 колонки не трогаются."""
+        spreadsheet, ws = self._fresh_sheet()
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=[
+                Stage3CellUpdate(column_key="dissertation_url", value="нет"),
+            ],
+            stage4_cells=None,
+        )
+
+        ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
+        self.assertEqual(ranges, ["I2", "J2", "M2"])
+        # Stage 4 колонки в Phase A header — индексы 14, 15, 16
+        self.assertEqual(ws.rows[1][14], "")
+        self.assertEqual(ws.rows[1][15], "")
+        self.assertEqual(ws.rows[1][16], "")
+
+    def test_stage4_skips_missing_columns(self) -> None:
+        """Заголовок без Stage 4 колонок — соответствующие cells пропускаются."""
+        spreadsheet = FakeSpreadsheet()
+        header = [
+            "Отметка времени",
+            "ФИО",
+            "Ссылка на промежуточный отчет",
+            "Проверка ссылки",
+            "Доступ открыт",
+            "Ссылка на диссер",
+        ]
+        ws = FakeWorksheet(
+            [list(header), [""] * len(header)],
+            sheet_id=11,
+            spreadsheet=spreadsheet,
+        )
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_cells=[
+                Stage3CellUpdate(column_key="dissertation_url", value="diss"),
+            ],
+            stage4_cells=[
+                Stage4CellUpdate(column_key="pages_total", value="100"),
+                Stage4CellUpdate(column_key="sources_count", value="40"),
+                Stage4CellUpdate(column_key="compliance", value="соответствует"),
+            ],
+        )
+
+        # Stage 4 столбцов нет в заголовке — ни одного диапазона по ним.
+        ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
+        self.assertEqual(ranges, ["D2", "E2", "F2"])
 
 
 if __name__ == "__main__":

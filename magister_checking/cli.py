@@ -8,6 +8,7 @@ import io
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from googleapiclient.discovery import build
@@ -54,6 +55,113 @@ def cmd_bot(_: argparse.Namespace) -> int:
 
     run_bot(config)
     return 0
+
+
+def cmd_broadcast(ns: argparse.Namespace) -> int:
+    """Рассылает текстовое сообщение всем зарегистрированным пользователям бота.
+
+    По умолчанию — dry-run: только печатает список адресатов и текст. Реальная
+    отправка требует двух явных флагов: ``--send`` и ``--i-know-this-is-irreversible``.
+    Это два барьера от случайной массовой отправки (handoff §3 — рассылка
+    необратима).
+
+    Источник адресатов:
+    - ``registration``: только колонка ``telegram_id`` листа Регистрация;
+    - ``persistence``:  только ``user_data``/``chat_data`` PicklePersistence;
+    - ``both`` (default): объединение с дедупликацией.
+
+    Текст сообщения берётся из файла (``--message-file``) — это надёжнее, чем
+    передавать многострочный текст через ``-m`` PowerShell (handoff §5,
+    PowerShell-mojibake).
+    """
+
+    import asyncio
+
+    from telegram import Bot
+
+    from magister_checking.bot.config import ConfigError, load_config
+    from magister_checking.bot.sheets_repo import (
+        get_worksheet,
+        list_registered_telegram_ids,
+    )
+    from magister_checking.broadcast import (
+        collect_chat_ids_from_persistence,
+        format_dry_run_preview,
+        format_send_summary,
+        merge_dedup,
+        send_broadcast,
+    )
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации бота: {exc}", file=sys.stderr)
+        return 2
+
+    message_path = ns.message_file
+    try:
+        message = message_path.read_text(encoding="utf-8").rstrip("\n")
+    except OSError as exc:
+        print(f"Не удалось прочитать --message-file {message_path}: {exc}", file=sys.stderr)
+        return 2
+    if not message.strip():
+        print(f"Файл {message_path} пуст — нечего рассылать.", file=sys.stderr)
+        return 2
+
+    source = ns.source
+    reg_ids: list[str] = []
+    persist_ids: list[str] = []
+    if source in ("registration", "both"):
+        worksheet = get_worksheet(config)
+        reg_ids = list_registered_telegram_ids(worksheet)
+    if source in ("persistence", "both"):
+        persist_ids = collect_chat_ids_from_persistence(config.persistence_file)
+
+    if source == "registration":
+        recipients = merge_dedup(reg_ids)
+        source_label = f"Регистрация ({len(reg_ids)} ID)"
+    elif source == "persistence":
+        recipients = merge_dedup(persist_ids)
+        source_label = (
+            f"PicklePersistence: {config.persistence_file} ({len(persist_ids)} ID)"
+        )
+    else:
+        recipients = merge_dedup(reg_ids, persist_ids)
+        source_label = (
+            f"Регистрация ({len(reg_ids)}) ∪ PicklePersistence "
+            f"{config.persistence_file} ({len(persist_ids)}) → дедуп: {len(recipients)}"
+        )
+
+    if not ns.send:
+        print(format_dry_run_preview(recipients, message, source_label=source_label))
+        return 0
+
+    if not ns.i_know_this_is_irreversible:
+        print(
+            "--send требует подтверждения: добавьте --i-know-this-is-irreversible.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not recipients:
+        print("Получателей нет — отправка не выполнена.", file=sys.stderr)
+        return 1
+
+    print(f"Отправляю сообщение {len(recipients)} получателям...")
+    sleep_between = max(1.0 / max(ns.rate, 1.0), 0.0)
+
+    async def _run() -> int:
+        async with Bot(config.telegram_bot_token) as bot:
+            result = await send_broadcast(
+                bot,
+                recipients,
+                message,
+                sleep_between=sleep_between,
+            )
+        print(format_send_summary(result))
+        return 0 if not result.failed else 1
+
+    return asyncio.run(_run())
 
 
 def cmd_check_row(ns: argparse.Namespace) -> int:
@@ -292,6 +400,45 @@ def main(argv: list[str] | None = None) -> int:
         help="Запустить Telegram-бота @magistrcheckbot (long polling). Конфиг — .env",
     )
     p_bot.set_defaults(func=cmd_bot)
+
+    p_bcast = sub.add_parser(
+        "broadcast",
+        help="Рассылка текстового сообщения зарегистрированным пользователям бота "
+        "(dry-run по умолчанию; --send + --i-know-this-is-irreversible для отправки)",
+    )
+    p_bcast.add_argument(
+        "--message-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="путь к UTF-8 текстовому файлу с сообщением (без шаблонизации)",
+    )
+    p_bcast.add_argument(
+        "--source",
+        choices=("registration", "persistence", "both"),
+        default="both",
+        help="источник адресатов: лист Регистрация / PicklePersistence / "
+        "оба с дедупом (default)",
+    )
+    p_bcast.add_argument(
+        "--send",
+        action="store_true",
+        help="реально отправлять (без флага — dry-run: только превью)",
+    )
+    p_bcast.add_argument(
+        "--i-know-this-is-irreversible",
+        dest="i_know_this_is_irreversible",
+        action="store_true",
+        help="обязательное второе подтверждение для --send",
+    )
+    p_bcast.add_argument(
+        "--rate",
+        type=float,
+        default=25.0,
+        metavar="MSGS_PER_SEC",
+        help="темп отправки (default 25 msg/сек, лимит Telegram ~30/сек)",
+    )
+    p_bcast.set_defaults(func=cmd_broadcast)
 
     p_check = sub.add_parser(
         "check-row",

@@ -445,6 +445,36 @@ def find_row_by_telegram_id(
     return None
 
 
+def list_registered_telegram_ids(worksheet: gspread.Worksheet) -> List[str]:
+    """Список уникальных непустых telegram_id из листа Регистрация.
+
+    Заголовочная строка пропускается. Дубликаты схлопываются с сохранением
+    первого появления (стабильный порядок). Если колонки ``telegram_id`` нет —
+    возвращает пустой список (а не падает: вызывающий broadcast CLI просто
+    получит «получателей нет», что корректнее, чем исключение).
+
+    Используется broadcast-командой как один из источников аудитории
+    (handoff §1 — рассылка обновления Stage 4 .docx fix).
+    """
+
+    field_map = _field_to_column_map(worksheet)
+    col_idx = field_map.get("telegram_id")
+    if col_idx is None:
+        return []
+    values = worksheet.col_values(col_idx + 1)
+    out: List[str] = []
+    seen: set[str] = set()
+    for idx, raw in enumerate(values, start=1):
+        if idx == 1:
+            continue
+        cleaned = str(raw or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
 def normalize_fio(value: str) -> str:
     """Приводит ФИО к канонической форме для сравнения.
 

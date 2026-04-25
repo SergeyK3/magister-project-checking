@@ -399,6 +399,35 @@ class TryLoadDissertationMetricsTests(unittest.TestCase):
         )
         analyze.assert_called_once_with(doc_payload)
 
+    def test_native_google_doc_merges_pdf_page_count_from_drive_export(self) -> None:
+        """После анализа нативного Google Doc подставляем pdf_pages из Drive export:PDF."""
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        doc_payload = {"body": {"content": []}}
+        docs_service.documents.return_value.get.return_value.execute.return_value = (
+            doc_payload
+        )
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli.analyze_dissertation",
+            return_value=self._metrics(),
+        ) as analyze, patch(
+            "magister_checking.row_check_cli.count_pdf_pages_via_drive_export",
+            return_value=67,
+        ) as pdf_exp:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.approx_pages, 70)
+        self.assertEqual(result.pdf_pages, 67)
+        analyze.assert_called_once_with(doc_payload)
+        pdf_exp.assert_called_once_with(
+            drive_service=drive_service, file_id="diss-id"
+        )
+
     def test_native_google_doc_api_error_with_drive_failure_returns_none(self) -> None:
         """Docs API упал И Drive download не вернул байты → None.
 

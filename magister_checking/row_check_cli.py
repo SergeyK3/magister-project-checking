@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +46,7 @@ from magister_checking.dissertation_metrics import (
     DissertationMetrics,
     analyze_dissertation,
     analyze_docx_bytes,
+    count_pdf_pages_via_drive_export,
 )
 from magister_checking.drive_docx import google_doc_from_drive_file
 from magister_checking.drive_urls import (
@@ -251,9 +252,15 @@ def _try_load_dissertation_metrics(
             except Exception:  # noqa: BLE001
                 return None
         try:
-            return analyze_dissertation(doc)
+            metrics = analyze_dissertation(doc)
         except Exception:  # noqa: BLE001
             return None
+        pdf_pages = count_pdf_pages_via_drive_export(
+            drive_service=drive_service, file_id=file_id
+        )
+        if pdf_pages is not None and pdf_pages > 0:
+            metrics = replace(metrics, pdf_pages=pdf_pages)
+        return metrics
 
     if kind == "drive_file":
         data = _download_drive_file_bytes_all_drives(

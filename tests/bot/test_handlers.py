@@ -23,6 +23,8 @@ from magister_checking.bot.handlers import (
     RECHECK_BUTTON_LABEL,
     RECHECK_CALLBACK_DATA,
     admin_menu,
+    admin_stats,
+    admin_sync_dashboard,
     ask_confirm,
     build_recheck_keyboard,
     cancel,
@@ -550,7 +552,16 @@ class HelpAndCommandsTests(unittest.TestCase):
         slugs = [c.command for c in cmds]
         self.assertEqual(
             slugs,
-            ["start", "help", "recheck", "cancel", "admin", "project_card"],
+            [
+                "start",
+                "help",
+                "recheck",
+                "cancel",
+                "admin",
+                "project_card",
+                "stats",
+                "sync_dashboard",
+            ],
         )
 
     def test_help_command_replies_with_text(self) -> None:
@@ -563,6 +574,61 @@ class HelpAndCommandsTests(unittest.TestCase):
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("/start", text)
         self.assertIn("/recheck", text)
+        self.assertIn("/stats", text)
+
+
+class AdminStatsTests(unittest.TestCase):
+    def test_admin_stats_denies_non_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/stats")
+
+        with _patch_admin_check(False):
+            _run(admin_stats(update, ctx))
+
+        self.assertIn("только администраторам", update.message.reply_text.await_args.args[0])
+        self.assertIsNone(update.message.reply_text.await_args.kwargs.get("parse_mode"))
+
+    def test_admin_stats_sends_html_summary(self) -> None:
+        ws = FakeWorksheet(
+            [
+                list(SHEET_HEADER),
+                ["111", "", "", "", "Иванов", "М1", "ООО", "инж", "+7", "Петров", "https://x", "yes", "yes", "REGISTERED", "ok"],
+            ]
+        )
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/stats")
+
+        with _patch_admin_check(True), _patch_worksheet(ws):
+            _run(admin_stats(update, ctx))
+
+        update.message.reply_text.assert_awaited_once()
+        self.assertEqual(update.message.reply_text.await_args.kwargs.get("parse_mode"), "HTML")
+        body = update.message.reply_text.await_args.args[0]
+        self.assertIn("Сводка", body)
+        self.assertIn("Всего регистраций: 1", body)
+
+    def test_admin_sync_dashboard_calls_sync(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/sync_dashboard")
+
+        with _patch_admin_check(True), _patch_worksheet(ws), _patch_dashboard_sync() as m:
+            _run(admin_sync_dashboard(update, ctx))
+
+        m.assert_called_once()
+        self.assertIn("обновлён", update.message.reply_text.await_args.args[0].lower())
+
+    def test_admin_sync_dashboard_denies_non_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/sync_dashboard")
+
+        with _patch_admin_check(False), _patch_dashboard_sync() as m:
+            _run(admin_sync_dashboard(update, ctx))
+
+        self.assertIn("только администраторам", update.message.reply_text.await_args.args[0])
+        m.assert_not_called()
 
 
 class AdminProjectCardTests(unittest.TestCase):

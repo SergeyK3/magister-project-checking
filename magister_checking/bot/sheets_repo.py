@@ -7,6 +7,7 @@ worksheet-объект (gspread.Worksheet) — это упрощает тест�
 from __future__ import annotations
 
 from datetime import datetime
+import html
 import re
 from dataclasses import dataclass, fields
 from typing import Iterable, List, Optional
@@ -686,6 +687,24 @@ def build_dashboard_rows(registration_worksheet: gspread.Worksheet) -> List[List
     while len(rows) < 16:
         rows.append(["", ""])
     return rows
+
+
+def format_dashboard_telegram_message(dashboard_rows: List[List[str]]) -> str:
+    """Те же пары «показатель / значение», что на листе Dashboard, текстом для Telegram (D1)."""
+
+    lines: List[str] = ["<b>Сводка (лист Dashboard)</b>", ""]
+    for row in dashboard_rows:
+        if not row or len(row) < 2:
+            continue
+        key = (row[0] or "").strip()
+        val = (row[1] or "").strip()
+        if not key and not val:
+            continue
+        ek = html.escape(key)
+        ev = html.escape(val)
+        if key:
+            lines.append(f"{ek}: {ev}" if val else ek)
+    return "\n".join(lines)
 
 
 def sync_registration_dashboard(config: BotConfig) -> None:

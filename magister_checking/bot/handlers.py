@@ -40,6 +40,8 @@ from magister_checking.bot.sheets_repo import (
     find_rows_by_fio,
     get_worksheet,
     is_admin_telegram_id,
+    build_dashboard_rows,
+    format_dashboard_telegram_message,
     load_row_values,
     load_user,
     set_row_fill_status,
@@ -79,7 +81,11 @@ HELP_REPLY_TEXT = (
     "/cancel — прервать текущий диалог\n"
     "/admin — панель администратора (только для telegram_id из листа "
     f"«{ADMINS_WORKSHEET_NAME}»)\n"
-    "/project_card — сформировать PDF-карточку проекта (только админы)\n\n"
+    "/project_card — сформировать PDF-карточку проекта (только админы)\n"
+    "/stats — краткая сводка по регистрациям, как в листе «Dashboard» (только "
+    "админы)\n"
+    "/sync_dashboard — обновить лист «Dashboard» в Google Sheets (только "
+    "админы)\n\n"
     f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n\n"
     "Подсказка: меню команд (кнопка рядом с полем ввода) подтягивается "
     "после перезапуска бота."
@@ -96,6 +102,8 @@ def default_bot_commands() -> list[BotCommand]:
         BotCommand("cancel", "Прервать текущий диалог"),
         BotCommand("admin", "Панель администратора"),
         BotCommand("project_card", "PDF-карточка проекта (админы)"),
+        BotCommand("stats", "Сводка Dashboard в чат (админы)"),
+        BotCommand("sync_dashboard", "Обновить лист Dashboard (админы)"),
     ]
 
 
@@ -398,6 +406,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     _record_action(user_form, "ask_bind_fio")
     return BIND_ASK_FIO
+
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: те же цифры, что на листе «Dashboard» (D1), без открытия таблицы."""
+
+    if update.message is None:
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+        )
+        return
+
+    cfg = _bot_config(context)
+    try:
+        worksheet = await _call_blocking(get_worksheet, cfg)
+        rows = await _call_blocking(build_dashboard_rows, worksheet)
+        text = format_dashboard_telegram_message(rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось сформировать /stats")
+        await update.message.reply_text(
+            f"Не удалось получить сводку. Кратко: {_format_user_visible_exc(exc)}"
+        )
+        return
+
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def admin_sync_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: пересчитать лист «Dashboard» (D2) — вручную, если меняли таблицу вне бота."""
+
+    if update.message is None:
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+        )
+        return
+
+    cfg = _bot_config(context)
+    try:
+        await _call_blocking(sync_registration_dashboard, cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось обновить Dashboard (sync)")
+        await update.message.reply_text(
+            f"Не удалось обновить лист «Dashboard».\n\nКратко: {_format_user_visible_exc(exc)}"
+        )
+        return
+
+    await update.message.reply_text("Лист «Dashboard» в таблице обновлён.")
 
 
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -990,6 +1048,8 @@ __all__ = [
     "USER_DATA_PENDING_KEY",
     "USER_DATA_CURRENT_KEY",
     "admin_menu",
+    "admin_stats",
+    "admin_sync_dashboard",
     "ask_confirm",
     "build_recheck_keyboard",
     "cancel",

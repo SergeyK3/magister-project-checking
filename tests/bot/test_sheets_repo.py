@@ -24,6 +24,7 @@ from magister_checking.bot.sheets_repo import (
     ensure_header,
     find_row_by_telegram_id,
     find_rows_by_fio,
+    format_dashboard_telegram_message,
     get_or_create_worksheet,
     is_admin_telegram_id,
     load_user,
@@ -571,6 +572,21 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(rows[11], ["Доступ открыт", "1"])
         self.assertEqual(rows[12], ["Доступ не открыт", "1"])
         self.assertEqual(len(rows), 16)
+
+    def test_format_dashboard_telegram_message_includes_header_and_escapes(self) -> None:
+        sample = [
+            ["Показатель", "Значение"],
+            ["Обновлено", "25.04.2026 12:00:00"],
+            ["Всего регистраций", "0"],
+        ]
+        out = format_dashboard_telegram_message(sample)
+        self.assertIn("<b>Сводка", out)
+        self.assertIn("Всего регистраций: 0", out)
+        xss = format_dashboard_telegram_message(
+            [["K", "1 < 2 &"], ["A", "b"]]
+        )
+        self.assertIn("1 &lt; 2 &amp;", xss)
+        self.assertNotIn("< 2", xss)
 
     def test_get_or_create_worksheet_creates_missing_dashboard_sheet(self) -> None:
         spreadsheet = FakeSpreadsheet()

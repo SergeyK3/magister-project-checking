@@ -32,6 +32,8 @@ from magister_checking.bot.handlers import (
     PROJECT_CARD_ASK_TARGET,
     RECHECK_CALLBACK_DATA,
     admin_menu,
+    admin_stats,
+    admin_sync_dashboard,
     ask_confirm,
     cancel,
     confirm_bind,
@@ -239,6 +241,8 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(conv_handler)
 
     application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("stats", admin_stats))
+    application.add_handler(CommandHandler("sync_dashboard", admin_sync_dashboard))
     application.add_handler(CommandHandler("recheck", recheck))
     application.add_handler(
         CallbackQueryHandler(recheck_button, pattern=f"^{RECHECK_CALLBACK_DATA}$")

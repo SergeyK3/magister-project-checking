@@ -14,8 +14,12 @@ from docx.enum.text import WD_LINE_SPACING  # type: ignore[import-untyped]
 from magister_checking.docs_extract import extract_plain_text
 
 
-# Порядок важен: более длинные фразы раньше
+# Порядок важен: более длинные фразы раньше (подстрочные совпадения в lower()).
+# В т.ч. типичные заголовки: «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» (Гизатова),
+# «ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР» (қазақша).
 _BIB_MARKERS = (
+    "список использованных источников",
+    "пайдаланылған әдебиеттер",
     "список литературы",
     "использованная литература",
     "библиографический список",
@@ -348,7 +352,10 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
 
     notes: list[str] = []
     if sources is None:
-        notes.append("Число источников не оценено (маркер списка не найден).")
+        notes.append(
+            "Число источников не оценено: нет ожидаемого заголовка библиографии и/или "
+            "нумерованного списка 1. … / 1) … / [1] …"
+        )
     if formatting_compliance is None:
         notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
@@ -370,7 +377,53 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     )
 
 
+def _citation_index_numbers_in_text(tail: str) -> list[int]:
+    """Номера, стоящие в начале строки: ``1. …``, ``1) …``, ``[1] …`` (многострочный текст)."""
+
+    nums: list[int] = []
+    for m in re.finditer(r"(?m)^\s*(\d+)[\.\)]\s*\S", tail):
+        nums.append(int(m.group(1)))
+    for m in re.finditer(r"(?m)^\s*\[(\d+)\]\s*\S", tail):
+        nums.append(int(m.group(1)))
+    return nums
+
+
+def _citation_index_numbers_glued(tail: str) -> list[int]:
+    """То же, но если Google API склеил абзацы без ``\\n`` (несколько ``n.`` в одной строке).
+
+    Плюc подряд идущие вхождения (без привязки к началу всего хвоста). Годы
+    1900–2100 отбрасываем, чтобы снизить шум в колонтитулах/датах.
+    """
+
+    nums: list[int] = []
+    for m in re.finditer(r"(\d+)[\.\)]\s+\S", tail):
+        n = int(m.group(1))
+        if 1900 <= n <= 2100:
+            continue
+        nums.append(n)
+    for m in re.finditer(r"\[(\d+)\]\s*\S", tail):
+        n = int(m.group(1))
+        if 1900 <= n <= 2100:
+            continue
+        nums.append(n)
+    return nums
+
+
+def _max_citation_index_in_text_chunk(text: str) -> int | None:
+    """Максимальный индекс нумерованного пункта (последний «номер в списке»)."""
+
+    nums = _citation_index_numbers_in_text(text)
+    if not nums:
+        nums = _citation_index_numbers_glued(text)
+    return max(nums) if nums else None
+
+
 def _estimate_sources_count(plain: str) -> int | None:
+    """Секция библиографии: берём **последний (макс.)** номер нумерованного пункта.
+
+    Раньше считались только строки с шаблоном; теперь логика «1 … N → N»,
+    как при ручной сверке по последней записи.
+    """
     lower = plain.lower()
     best = -1
     for m in _BIB_MARKERS:
@@ -380,14 +433,7 @@ def _estimate_sources_count(plain: str) -> int | None:
     if best < 0:
         return None
     tail = plain[best:]
-    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-    n = 0
-    for ln in lines[1:400]:
-        if re.match(r"^\d+[\.\)]\s+\S", ln):
-            n += 1
-        elif re.match(r"^\[\d+\]\s*\S", ln):
-            n += 1
-    return n if n > 0 else None
+    return _max_citation_index_in_text_chunk(tail)
 
 
 def count_pdf_pages_via_drive_export(*, drive_service: Any, file_id: str) -> int | None:
@@ -516,14 +562,7 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         else:
             review_pages = max(1, len(review_text) // _CHARS_PER_PAGE_RU)
 
-        lines = [ln.strip() for ln in review_text.splitlines() if ln.strip()]
-        n = 0
-        for ln in lines[:1200]:
-            if re.match(r"^\d+[\.\)]\s+\S", ln):
-                n += 1
-            elif re.match(r"^\[\d+\]\s*\S", ln):
-                n += 1
-        review_sources = n if n > 0 else None
+        review_sources = _max_citation_index_in_text_chunk(review_text)
 
     notes: list[str] = []
     if pages_total is None:
@@ -571,11 +610,5 @@ def _estimate_review_metrics(plain: str) -> tuple[int | None, int | None]:
             end = pos
     seg = plain[start:end]
     pages = max(1, len(seg) // _CHARS_PER_PAGE_RU) if seg.strip() else None
-    lines = [ln.strip() for ln in seg.splitlines() if ln.strip()]
-    n = 0
-    for ln in lines[:800]:
-        if re.match(r"^\d+[\.\)]\s+\S", ln):
-            n += 1
-        elif re.match(r"^\[\d+\]\s*\S", ln):
-            n += 1
-    return pages, (n if n > 0 else None)
+    n = _max_citation_index_in_text_chunk(seg)
+    return pages, n

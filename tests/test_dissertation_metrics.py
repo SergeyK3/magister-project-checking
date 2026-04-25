@@ -67,6 +67,29 @@ class DissertationMetricsTests(unittest.TestCase):
         self.assertEqual(metrics.times_new_roman_ratio, 1.0)
         self.assertEqual(metrics.single_spacing_ratio, 1.0)
 
+    def test_google_doc_uses_list_header_spectrum_or_kazakh_and_max_index(self) -> None:
+        """Заголовки «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» / каз. раздел: индекс = max(n)."""
+        gizatova = _document(
+            [
+                _paragraph("Текст…\n"),
+                _paragraph("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\n"),
+                _paragraph("59. Книга девятьсот пятидесят девятая\n"),
+                _paragraph("60. Книга шестьдесятая\n"),
+                _paragraph("61. Последняя запись\n"),
+            ]
+        )
+        self.assertEqual(analyze_dissertation(gizatova).sources_count, 61)
+
+        kz = _document(
+            [
+                _paragraph("Текст…\n"),
+                _paragraph("ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР\n"),
+                _paragraph("1. Бірінші\n"),
+                _paragraph("5. Соңғы нөмір\n"),
+            ]
+        )
+        self.assertEqual(analyze_dissertation(kz).sources_count, 5)
+
     def test_google_doc_metrics_fail_when_font_and_spacing_do_not_meet_threshold(self) -> None:
         doc = _document(
             [

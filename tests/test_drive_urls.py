@@ -85,6 +85,37 @@ class TestClassifyDriveUrl(unittest.TestCase):
         ):
             self.assertEqual(classify_drive_url(url), "other", msg=url)
 
+    def test_docx_in_docs_viewer_with_rtpof_classified_as_drive_file(self) -> None:
+        """docs.google.com/document URL с ``rtpof=true`` — это Drive viewer
+        для загруженного .docx, а не нативный Doc.
+
+        Боевой кейс: магистрант загружает .docx в Drive и шарит ссылку
+        прямо из браузера. URL вида
+        ``docs.google.com/document/d/<id>/edit?usp=drive_link&ouid=...&rtpof=true&sd=true``
+        ведёт на .docx (mime ``…wordprocessingml.document``), и Docs API
+        на нём отвечает HTTP 400 «not supported». Классификатор должен
+        сразу отправить такой URL в drive_file, чтобы Stage 4 пошёл по
+        пути download bytes → analyze_docx_bytes (handoff §B).
+        """
+        for url in (
+            "https://docs.google.com/document/d/ABC/edit?rtpof=true&sd=true",
+            "https://docs.google.com/document/d/ABC/edit?usp=drive_link&ouid=1&rtpof=true&sd=true",
+            "http://docs.google.com/document/d/ABC?rtpof=TRUE",  # case-insensitive
+            "https://docs.google.com/document/d/ABC?rtpof= true ",  # пробелы вокруг
+        ):
+            self.assertEqual(classify_drive_url(url), "drive_file", msg=url)
+
+    def test_native_doc_url_without_rtpof_remains_google_doc(self) -> None:
+        """Чтобы Variant A не сломал нативные Google Docs (без rtpof)."""
+
+        for url in (
+            "https://docs.google.com/document/d/ABC/edit",
+            "https://docs.google.com/document/d/ABC/edit?usp=sharing",
+            "https://docs.google.com/document/d/ABC/edit?usp=sharing&rtpof=false",
+            "https://docs.google.com/document/d/ABC/edit?rtpof=",  # пустое значение
+        ):
+            self.assertEqual(classify_drive_url(url), "google_doc", msg=url)
+
 
 if __name__ == "__main__":
     unittest.main()

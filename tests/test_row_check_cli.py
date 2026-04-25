@@ -399,19 +399,120 @@ class TryLoadDissertationMetricsTests(unittest.TestCase):
         )
         analyze.assert_called_once_with(doc_payload)
 
-    def test_native_google_doc_api_error_returns_none(self) -> None:
+    def test_native_google_doc_api_error_with_drive_failure_returns_none(self) -> None:
+        """Docs API упал И Drive download не вернул байты → None.
+
+        Это сохраняет старое наблюдаемое поведение для кейса «нативный
+        Google Doc, к которому у сервис-аккаунта нет прав» — get_media
+        на нативный Doc возвращает ошибку (Drive не отдаёт source-байты
+        для native Docs), наш _download_drive_file_bytes_all_drives
+        ловит её и возвращает None.
+        """
+
         diss_url = "https://docs.google.com/document/d/diss-id/edit"
         docs_service = MagicMock()
         docs_service.documents.return_value.get.return_value.execute.side_effect = (
             RuntimeError("403")
         )
         drive_service = MagicMock()
-        result = _try_load_dissertation_metrics(
-            dissertation_url=diss_url,
-            docs_service=docs_service,
-            drive_service=drive_service,
-        )
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=None,
+        ) as dl:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
         self.assertIsNone(result)
+        dl.assert_called_once_with(
+            drive_service=drive_service, file_id="diss-id"
+        )
+
+    def test_native_google_doc_api_error_falls_back_to_drive_docx(self) -> None:
+        """Variant B: docs.google.com URL, Docs API → HTTP 400, но файл реально .docx.
+
+        Боевой кейс: магистрант шарит .docx из Drive, URL получает форму
+        docs.google.com/document/.../edit (без rtpof, либо rtpof срезан).
+        Docs API падает «not supported», но файл доступен через Drive
+        get_media и парсится как .docx. Результат должен быть метриками,
+        а не None.
+        """
+
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        docs_service.documents.return_value.get.return_value.execute.side_effect = (
+            RuntimeError("400 not supported")
+        )
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"PK\x03\x04docx-bytes",
+        ) as dl, patch(
+            "magister_checking.row_check_cli.analyze_docx_bytes",
+            return_value=self._metrics(),
+        ) as analyze:
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.approx_pages, 70)
+        dl.assert_called_once_with(
+            drive_service=drive_service, file_id="diss-id"
+        )
+        analyze.assert_called_once_with(b"PK\x03\x04docx-bytes")
+
+    def test_native_google_doc_api_error_fallback_analyzer_failure_returns_none(self) -> None:
+        """Docs упал, Drive вернул байты, но analyze_docx_bytes тоже упал → None."""
+
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        docs_service.documents.return_value.get.return_value.execute.side_effect = (
+            RuntimeError("400")
+        )
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"corrupted",
+        ), patch(
+            "magister_checking.row_check_cli.analyze_docx_bytes",
+            side_effect=ValueError("not a zip"),
+        ):
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNone(result)
+
+    def test_native_google_doc_api_success_does_not_call_drive_fallback(self) -> None:
+        """Если Docs API отдал документ — Drive download не вызывается.
+
+        Защита от регрессии «лишний API вызов на каждый Google Doc».
+        """
+
+        diss_url = "https://docs.google.com/document/d/diss-id/edit"
+        docs_service = MagicMock()
+        doc_payload = {"body": {"content": []}}
+        docs_service.documents.return_value.get.return_value.execute.return_value = (
+            doc_payload
+        )
+        drive_service = MagicMock()
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives"
+        ) as dl, patch(
+            "magister_checking.row_check_cli.analyze_dissertation",
+            return_value=self._metrics(),
+        ):
+            result = _try_load_dissertation_metrics(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+            )
+        self.assertIsNotNone(result)
+        dl.assert_not_called()
 
     def test_drive_file_docx_path_downloads_and_analyzes(self) -> None:
         diss_url = "https://drive.google.com/file/d/diss-docx-id/view"

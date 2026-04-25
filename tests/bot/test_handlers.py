@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.ext import ConversationHandler
 
+from telegram import InlineKeyboardMarkup
+from telegram.error import BadRequest
+
 from magister_checking.bot import handlers
 from magister_checking.bot.handlers import (
     ADMIN_PROJECT_CARD_BUTTON,
@@ -17,8 +20,11 @@ from magister_checking.bot.handlers import (
     BIND_ASK_FIO,
     BIND_CONFIRM,
     PROJECT_CARD_ASK_TARGET,
+    RECHECK_BUTTON_LABEL,
+    RECHECK_CALLBACK_DATA,
     admin_menu,
     ask_confirm,
+    build_recheck_keyboard,
     cancel,
     confirm_bind,
     project_card_receive_target,
@@ -26,6 +32,7 @@ from magister_checking.bot.handlers import (
     receive_bind_fio,
     receive_field,
     recheck,
+    recheck_button,
     skip_bind,
     skip_field,
     start,
@@ -274,6 +281,14 @@ class AskConfirmTests(unittest.TestCase):
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.last_action, "confirmed_save")
         mock_dashboard.assert_called_once()
+
+        final_call = update.message.reply_text.await_args_list[-1]
+        self.assertIn("Регистрация завершена", final_call.args[0])
+        markup = final_call.kwargs.get("reply_markup")
+        self.assertIsInstance(markup, InlineKeyboardMarkup)
+        button = markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, RECHECK_BUTTON_LABEL)
+        self.assertEqual(button.callback_data, RECHECK_CALLBACK_DATA)
 
     def test_yes_saves_with_report_enrichment_when_available(self) -> None:
         ws = FakeWorksheet(
@@ -663,6 +678,14 @@ class RecheckHandlerTests(unittest.TestCase):
         self.assertTrue(any("полная проверка" in m for m in sent))
         self.assertTrue(any("Иванов И.И." in m for m in sent))
 
+        final_markup = update.message.reply_text.await_args_list[-1].kwargs.get(
+            "reply_markup"
+        )
+        self.assertIsInstance(final_markup, InlineKeyboardMarkup)
+        self.assertEqual(
+            final_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+        )
+
     def test_recheck_quick_passes_only_if_changed(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
         ctx = _FakeContext(ws)
@@ -694,9 +717,150 @@ class RecheckHandlerTests(unittest.TestCase):
         ):
             _run(recheck(update, ctx))
 
-        last_msg = update.message.reply_text.await_args_list[-1].args[0]
-        self.assertIn("Не удалось выполнить", last_msg)
-        self.assertIn("drive boom", last_msg)
+        last_call = update.message.reply_text.await_args_list[-1]
+        self.assertIn("Не удалось выполнить", last_call.args[0])
+        self.assertIn("drive boom", last_call.args[0])
+        retry_markup = last_call.kwargs.get("reply_markup")
+        self.assertIsInstance(retry_markup, InlineKeyboardMarkup)
+        self.assertEqual(
+            retry_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+        )
+
+
+def _make_callback_update(
+    *,
+    user_id: int = 111,
+    callback_data: str = RECHECK_CALLBACK_DATA,
+) -> MagicMock:
+    """Update без message — только callback_query (нажатие inline-кнопки).
+
+    ``callback_query.message`` мокается с ``reply_text`` для асинхронных
+    ответов через ``_send_recheck_reply``.
+    """
+
+    update = MagicMock()
+    update.message = None
+    update.effective_user.id = user_id
+    update.effective_user.username = "ivanov"
+    update.effective_user.first_name = "Иван"
+    update.effective_user.last_name = "Иванов"
+    query = MagicMock()
+    query.data = callback_data
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    query.message.reply_text = AsyncMock()
+    update.callback_query = query
+    return update
+
+
+class RecheckButtonTests(unittest.TestCase):
+    """Кнопка «🔄 Перепроверить» — inline callback под отчётом/регистрацией."""
+
+    def _row(self, *, telegram_id: str = "111") -> list[str]:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = telegram_id
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        row[SHEET_HEADER.index("report_url")] = (
+            "https://docs.google.com/document/d/r/edit"
+        )
+        return row
+
+    def test_keyboard_payload_matches_callback_pattern(self) -> None:
+        markup = build_recheck_keyboard()
+        button = markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, RECHECK_BUTTON_LABEL)
+        self.assertEqual(button.callback_data, RECHECK_CALLBACK_DATA)
+
+    def test_button_acks_query_and_strips_keyboard_then_runs_full_pipeline(
+        self,
+    ) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(user_id=111)
+
+        fake_report = RowCheckReport(fio="Иванов И.И.", row_number=2)
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run:
+            _run(recheck_button(update, ctx))
+
+        update.callback_query.answer.assert_awaited_once()
+        update.callback_query.edit_message_reply_markup.assert_awaited_once_with(
+            reply_markup=None
+        )
+        run.assert_called_once()
+        kwargs = run.call_args.kwargs
+        self.assertFalse(kwargs["only_if_changed"])
+        self.assertTrue(kwargs["apply"])
+        self.assertEqual(kwargs["history_source"], "bot")
+
+        replies = update.callback_query.message.reply_text.await_args_list
+        self.assertTrue(any("полная проверка" in c.args[0] for c in replies))
+        self.assertTrue(any("Иванов И.И." in c.args[0] for c in replies))
+        final_markup = replies[-1].kwargs.get("reply_markup")
+        self.assertIsInstance(final_markup, InlineKeyboardMarkup)
+        self.assertEqual(
+            final_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+        )
+
+    def test_button_unknown_telegram_id_replies_start_without_running_pipeline(
+        self,
+    ) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(user_id=999)
+
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check"
+        ) as run:
+            _run(recheck_button(update, ctx))
+
+        run.assert_not_called()
+        update.callback_query.answer.assert_awaited_once()
+        msg = update.callback_query.message.reply_text.await_args.args[0]
+        self.assertIn("/start", msg)
+
+    def test_button_swallows_edit_message_badrequest(self) -> None:
+        """Если кнопка не редактируется (старое сообщение / нет прав) — не падаем."""
+
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(user_id=111)
+        update.callback_query.edit_message_reply_markup.side_effect = BadRequest(
+            "Message can't be edited"
+        )
+
+        fake_report = RowCheckReport(fio="Иванов И.И.", row_number=2)
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run:
+            _run(recheck_button(update, ctx))
+
+        run.assert_called_once()
+        replies = update.callback_query.message.reply_text.await_args_list
+        self.assertTrue(any("Иванов И.И." in c.args[0] for c in replies))
+
+    def test_button_pipeline_exception_attaches_retry_keyboard(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(user_id=111)
+
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            side_effect=RuntimeError("docs api 500"),
+        ):
+            _run(recheck_button(update, ctx))
+
+        last_call = update.callback_query.message.reply_text.await_args_list[-1]
+        self.assertIn("Не удалось выполнить", last_call.args[0])
+        self.assertIn("docs api 500", last_call.args[0])
+        retry_markup = last_call.kwargs.get("reply_markup")
+        self.assertIsInstance(retry_markup, InlineKeyboardMarkup)
+        self.assertEqual(
+            retry_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+        )
 
 
 if __name__ == "__main__":

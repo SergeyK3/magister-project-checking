@@ -6,6 +6,7 @@ import logging
 
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
@@ -23,6 +24,7 @@ from magister_checking.bot.handlers import (
     BIND_CONFIRM,
     CONFIG_BOT_DATA_KEY,
     PROJECT_CARD_ASK_TARGET,
+    RECHECK_CALLBACK_DATA,
     admin_menu,
     ask_confirm,
     cancel,
@@ -32,6 +34,7 @@ from magister_checking.bot.handlers import (
     receive_bind_fio,
     receive_field,
     recheck,
+    recheck_button,
     skip_bind,
     skip_field,
     start,
@@ -153,6 +156,9 @@ def build_application(config: BotConfig) -> Application:
 
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("recheck", recheck))
+    application.add_handler(
+        CallbackQueryHandler(recheck_button, pattern=f"^{RECHECK_CALLBACK_DATA}$")
+    )
     return application
 
 

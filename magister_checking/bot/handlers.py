@@ -8,7 +8,15 @@ import io
 import logging
 from typing import Awaitable, Callable, List, Optional
 
-from telegram import InputFile, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from magister_checking.bot.config import BotConfig
@@ -657,7 +665,10 @@ async def ask_confirm(
             "Данные сохранены.\n\n"
             f"Строка в таблице: {row_num}\n"
             f"Статус: {user_form.fill_status}\n"
-            "Спасибо. Регистрация завершена."
+            "Спасибо. Регистрация завершена.\n\n"
+            "Чтобы запустить проверку вашего отчёта прямо сейчас — "
+            "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /recheck.",
+            reply_markup=build_recheck_keyboard(),
         )
 
     return ConversationHandler.END
@@ -670,6 +681,11 @@ RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "
 режим «full by default»), но магистрант может написать ``/recheck quick``,
 чтобы получить ответ «без изменений» без повторной нагрузки на Drive."""
 
+RECHECK_BUTTON_LABEL = "🔄 Перепроверить"
+RECHECK_CALLBACK_DATA = "recheck:full"
+"""Callback payload кнопки «Перепроверить». Эквивалент ``/recheck`` без аргументов
+(полный прогон). Узкий paттern регистрируется в ``app.build_application``."""
+
 
 def _parse_recheck_only_if_changed(message_text: str) -> bool:
     """Распознаёт ``/recheck quick`` и эквиваленты — handoff §8 ``--only-if-changed``."""
@@ -680,24 +696,65 @@ def _parse_recheck_only_if_changed(message_text: str) -> bool:
     return parts[1].strip().lower() in RECHECK_QUICK_TOKENS
 
 
-async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда ``/recheck`` — магистрант запускает свою проверку повторно.
+def build_recheck_keyboard() -> InlineKeyboardMarkup:
+    """Inline-кнопка под итоговым отчётом и финалом регистрации.
+
+    Inline (а не Reply) — чтобы кнопка была привязана к конкретному сообщению
+    и пропадала после нажатия (см. ``recheck_button``). Это снижает риск
+    случайного двойного запуска тяжёлого пайплайна.
+    """
+
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(RECHECK_BUTTON_LABEL, callback_data=RECHECK_CALLBACK_DATA)]]
+    )
+
+
+async def _send_recheck_reply(
+    update: Update,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Отправляет ответ магистранту вне зависимости от источника обновления.
+
+    Для ``/recheck`` источник — обычное сообщение (``update.message``).
+    Для нажатия кнопки — ``update.callback_query.message`` (само inline-сообщение,
+    под которым висит кнопка). В обоих случаях reply уйдёт в нужный чат.
+    Если ни того, ни другого нет (странный update без сообщения) — молча
+    выходим, чтобы не падать на ``None``.
+    """
+
+    if update.message is not None:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+        return
+    callback = update.callback_query
+    if callback is not None and callback.message is not None:
+        await callback.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def _do_recheck(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    only_if_changed: bool,
+) -> None:
+    """Общее тело /recheck: вызывается из ``recheck`` и ``recheck_button``.
 
     Поиск строки в листе ``Регистрация`` идёт строго по ``telegram_id`` —
     ФИО как fallback не используем, чтобы случайный однофамилец не мог
     инициировать перезапись чужой строки. Если ``telegram_id`` не привязан
-    к листу, бот предлагает пройти ``/start``.
+    к листу, бот предлагает пройти ``/start`` и кнопку не показывает
+    (без строки нечего перепроверять).
 
-    По умолчанию выполняется полный прогон с ``apply=True``: lay результаты
-    в J:R и пишет одну запись в «Историю проверок» с ``source="bot"``.
-    Если магистрант написал ``/recheck quick``, включается короткое
-    замыкание ``only_if_changed=True`` (см. ``RECHECK_QUICK_TOKENS``).
+    Кнопка «Перепроверить» прицепляется к финальному отчёту, а также к
+    сообщениям об ошибках пайплайна — чтобы пользователь мог сразу повторить
+    при сетевом сбое или временном падении Drive/Docs API.
 
     Тяжёлая часть (Sheets/Drive/Docs IO) уходит в worker-поток, чтобы не
     блокировать event loop, — стандартный приём бота (``_call_blocking``).
     """
 
-    if update.message is None or update.effective_user is None:
+    if update.effective_user is None:
         return
 
     cfg = _bot_config(context)
@@ -706,17 +763,22 @@ async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     worksheet = await _call_blocking(get_worksheet, cfg)
     row_number = await _call_blocking(find_row_by_telegram_id, worksheet, telegram_id)
     if row_number is None:
-        await update.message.reply_text(
+        await _send_recheck_reply(
+            update,
             "Не нашёл вашу строку в листе «Регистрация».\n\n"
-            "Сначала пройдите регистрацию: /start"
+            "Сначала пройдите регистрацию: /start",
         )
         return
 
-    only_if_changed = _parse_recheck_only_if_changed(update.message.text or "")
-    mode_hint = "быстрый режим (только если входы поменялись)" if only_if_changed else "полная проверка"
-    await update.message.reply_text(
+    mode_hint = (
+        "быстрый режим (только если входы поменялись)"
+        if only_if_changed
+        else "полная проверка"
+    )
+    await _send_recheck_reply(
+        update,
         f"Запускаю повторную проверку вашей строки {row_number}: {mode_hint}.\n"
-        "Это может занять до минуты."
+        "Это может занять до минуты.",
     )
 
     locator = RowLocator(row_number=row_number)
@@ -731,7 +793,11 @@ async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             history_source="bot",
         )
     except ValueError as exc:
-        await update.message.reply_text(f"Ошибка: {exc}")
+        await _send_recheck_reply(
+            update,
+            f"Ошибка: {exc}",
+            reply_markup=build_recheck_keyboard(),
+        )
         return
     except Exception as exc:  # noqa: BLE001
         logger.exception(
@@ -739,14 +805,65 @@ async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             telegram_id,
             row_number,
         )
-        await update.message.reply_text(
+        await _send_recheck_reply(
+            update,
             "Не удалось выполнить повторную проверку.\n\n"
-            f"Причина: {exc}"
+            f"Причина: {exc}",
+            reply_markup=build_recheck_keyboard(),
         )
         return
 
     applied_effective = not report.unchanged
-    await update.message.reply_text(format_report(report, applied=applied_effective))
+    await _send_recheck_reply(
+        update,
+        format_report(report, applied=applied_effective),
+        reply_markup=build_recheck_keyboard(),
+    )
+
+
+async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда ``/recheck`` — магистрант запускает свою проверку повторно.
+
+    По умолчанию выполняется полный прогон с ``apply=True``: lay результаты
+    в J:R и пишет одну запись в «Историю проверок» с ``source="bot"``.
+    Если магистрант написал ``/recheck quick``, включается короткое
+    замыкание ``only_if_changed=True`` (см. ``RECHECK_QUICK_TOKENS``).
+    """
+
+    if update.message is None or update.effective_user is None:
+        return
+
+    only_if_changed = _parse_recheck_only_if_changed(update.message.text or "")
+    await _do_recheck(update, context, only_if_changed=only_if_changed)
+
+
+async def recheck_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline-кнопка «🔄 Перепроверить» под отчётом или финалом регистрации.
+
+    Поведение эквивалентно ``/recheck`` без аргументов — полный прогон
+    с ``apply=True``. Сценарий ``quick`` через кнопку не предлагаем: это
+    расширило бы UI на две кнопки без явной пользы — quick-режим остаётся
+    доступен текстом ``/recheck quick`` (handoff §8).
+
+    Перед запуском пайплайна снимаем клавиатуру с исходного сообщения, чтобы
+    повторное нажатие не запустило тяжёлый прогон второй раз. Если правка
+    падает (старое сообщение, нет прав) — молча игнорируем: на пайплайн это
+    не влияет, а ``BadRequest`` от Telegram при невозможности редактирования
+    клавиатуры — нормальная ситуация.
+    """
+
+    query = update.callback_query
+    if query is None:
+        return
+
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        # Сообщение слишком старое или нет прав на редактирование — не критично.
+        pass
+
+    await _do_recheck(update, context, only_if_changed=False)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -768,12 +885,15 @@ __all__ = [
     "BIND_CONFIRM",
     "CONFIG_BOT_DATA_KEY",
     "PROJECT_CARD_ASK_TARGET",
+    "RECHECK_BUTTON_LABEL",
+    "RECHECK_CALLBACK_DATA",
     "USER_DATA_BIND_ROW_KEY",
     "USER_DATA_FORM_KEY",
     "USER_DATA_PENDING_KEY",
     "USER_DATA_CURRENT_KEY",
     "admin_menu",
     "ask_confirm",
+    "build_recheck_keyboard",
     "cancel",
     "confirm_bind",
     "project_card_receive_target",
@@ -781,6 +901,7 @@ __all__ = [
     "receive_bind_fio",
     "receive_field",
     "recheck",
+    "recheck_button",
     "skip_bind",
     "skip_field",
     "start",

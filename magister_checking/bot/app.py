@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from typing import Optional
 
 from telegram.ext import (
     Application,
@@ -51,16 +53,39 @@ _NOISY_LOGGERS_WITH_TOKEN = ("httpx", "httpcore", "telegram.ext.Updater", "teleg
 """
 
 
-def configure_logging(level: int) -> None:
-    """Настраивает корневое логирование, если оно ещё не настроено."""
+_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        )
+
+def configure_logging(level: int, log_file: Optional[Path] = None) -> None:
+    """Настраивает корневое логирование, если оно ещё не настроено.
+
+    Если задан ``log_file`` — дополнительно прикрепляется ``FileHandler``,
+    пишущий те же записи в указанный файл (UTF-8). Это нужно headless-запуску
+    через Task Scheduler: бот сам пишет лог в ``state/logs/bot.log`` через
+    стандартный Python logging, без хрупкого PowerShell-пайпа
+    ``2>&1 | Out-File`` (см. комментарий к ``BotConfig.log_file``).
+    """
+
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(level=level, format=_LOG_FORMAT)
     else:
-        logging.getLogger().setLevel(level)
+        root.setLevel(level)
+
+    if log_file is not None:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        target = str(log_path.resolve())
+        already_attached = any(
+            isinstance(h, logging.FileHandler)
+            and getattr(h, "baseFilename", None) == target
+            for h in root.handlers
+        )
+        if not already_attached:
+            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            file_handler.setLevel(level)
+            file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+            root.addHandler(file_handler)
 
     noisy_level = max(level, logging.WARNING)
     for name in _NOISY_LOGGERS_WITH_TOKEN:
@@ -165,7 +190,7 @@ def build_application(config: BotConfig) -> Application:
 def run(config: BotConfig) -> None:
     """Запускает long-polling Telegram-бота. Блокирующий вызов."""
 
-    configure_logging(config.log_level)
+    configure_logging(config.log_level, log_file=config.log_file)
     application = build_application(config)
     logger.info(
         "magistrcheckbot started: spreadsheet=%s worksheet=%s",

@@ -43,6 +43,16 @@ class BotConfig:
     log_level: int
     persistence_file: Path
     docx_conversion_folder_id: str = ""
+    log_file: Optional[Path] = None
+    """Опциональный путь к файлу лога. Если задан — `configure_logging`
+    добавит ``FileHandler`` к корневому логгеру в дополнение к StreamHandler.
+
+    Источник: env ``BOT_LOG_FILE``. Используется headless-launcher'ом
+    (``scripts/bot_run_headless.ps1``), чтобы Task Scheduler-задача писала
+    лог в ``state/logs/bot.log`` через стандартный Python logging — без
+    хрупкого PowerShell-пайпа ``2>&1 | Out-File`` (PowerShell 5.x с
+    ``$ErrorActionPreference = 'Stop'`` оборачивает каждую stderr-строку
+    нативной команды как ``NativeCommandError`` и роняет пайплайн)."""
     """ID папки Google Drive (буфер для конверсии), куда копируются .docx
     отчёты с преобразованием в Google Doc перед чтением Docs API. Должна
     лежать в Shared Drive, иначе Service Account упрётся в storageQuota = 0
@@ -98,6 +108,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     project_card_output_folder_url = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
     persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
+    log_file_raw = _read_env("BOT_LOG_FILE")
     docx_conv_raw = (
         _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
         or _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_ID")
@@ -127,6 +138,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         if persistence_file_raw
         else DEFAULT_PERSISTENCE_FILE
     )
+    log_file = Path(log_file_raw).expanduser() if log_file_raw else None
     docx_conversion_folder_id = _resolve_docx_conversion_folder_id(docx_conv_raw)
 
     return BotConfig(
@@ -138,6 +150,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         log_level=_coerce_log_level(log_level_raw),
         persistence_file=persistence_file,
         docx_conversion_folder_id=docx_conversion_folder_id,
+        log_file=log_file,
     )
 
 

@@ -50,6 +50,7 @@ from magister_checking.bot.sheets_repo import (
     upsert_user_with_extras,
 )
 from magister_checking.bot.validation import (
+    REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
     SKIP_TOKEN,
     check_report_url,
     check_report_url_target_kind,
@@ -681,21 +682,39 @@ async def receive_field(
         if _is_skip_text(raw) and getattr(user_form, field_key):
             pass
         elif value:
+            # Запоминаем, не ждали ли мы исправления папки — чтобы после
+            # успешной валидации послать магистранту короткое «принято».
+            previous_was_folder_warning = (
+                user_form.report_url_valid == REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+            )
             # Сначала формальная проверка «папка vs документ» (без сети).
             # Если магистрант прислал ссылку на папку Drive, явно отвечаем
-            # сообщением об ошибке и кладём текст в «Проверка ссылки» —
-            # сам URL принимаем как есть, чтобы не блокировать дальнейшее
-            # заполнение анкеты; admin увидит причину в листе, магистрант
-            # сможет исправить через повторную регистрацию / /change.
+            # сообщением об ошибке и кладём текст в «Проверка ссылки», но
+            # из ASK_FIELD не выходим: следующее сообщение пользователя в
+            # этом же чате будет принято как новый URL для report_url
+            # (правильная ссылка на документ), без перевыдачи всего prompt.
             target_msg = check_report_url_target_kind(value)
             if target_msg:
-                await update.message.reply_text(target_msg)
                 user_form.report_url_valid = target_msg
                 user_form.report_url_accessible = ""
-            else:
-                valid, accessible = check_report_url(value)
-                user_form.report_url_valid = valid
-                user_form.report_url_accessible = accessible
+                _refresh_status(user_form)
+                _record_action(user_form, "report_url_folder_retry")
+                await update.message.reply_text(
+                    target_msg
+                    + "\n\nПришлите, пожалуйста, правильную ссылку на сам "
+                    "документ промежуточного отчёта (Google Docs / DOCX в "
+                    "Drive) прямо в ответ на это сообщение — я её проверю "
+                    "и продолжу регистрацию.\n"
+                    f"Чтобы пропустить этот шаг, отправьте {SKIP_TOKEN} или /skip."
+                )
+                return ASK_FIELD
+            valid, accessible = check_report_url(value)
+            user_form.report_url_valid = valid
+            user_form.report_url_accessible = accessible
+            if previous_was_folder_warning and valid == "yes":
+                await update.message.reply_text(
+                    "Ссылка принята. Продолжаю регистрацию."
+                )
         else:
             user_form.report_url_valid = ""
             user_form.report_url_accessible = ""

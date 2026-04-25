@@ -199,17 +199,21 @@ class ReceiveFieldTests(unittest.TestCase):
         sent_texts = [call.args[0] for call in update.message.reply_text.await_args_list]
         self.assertIn("Сейчас я покажу данные", sent_texts[0])
 
-    def test_report_url_folder_replies_with_warning_and_writes_to_cell(
+    def test_report_url_folder_keeps_user_on_field_for_retry(
         self,
     ) -> None:
         """Магистрант прислал ссылку на папку Drive вместо документа.
 
         Бот должен:
-        1) ответить ему конкретным сообщением «исправьте, это папка»;
-        2) записать это же сообщение в ``report_url_valid`` (колонка
+        1) ответить ему сообщением «исправьте, это папка» с приглашением
+           прислать правильную ссылку прямо здесь;
+        2) записать сообщение об ошибке в ``report_url_valid`` (колонка
            «Проверка ссылки» — для админа);
         3) очистить ``report_url_accessible`` (HTTP-проба не делалась);
-        4) **не звонить** ``check_report_url`` (без сетевой пробы).
+        4) **не звонить** ``check_report_url`` (без сетевой пробы);
+        5) **не двигать** диалог: остаёмся в ``ASK_FIELD`` с тем же
+           ``current_field == "report_url"``, чтобы следующее сообщение
+           пользователя ушло в ту же ветку валидации.
         """
 
         from magister_checking.bot.validation import (
@@ -239,7 +243,10 @@ class ReceiveFieldTests(unittest.TestCase):
             state = _run(receive_field(update, ctx))
 
         mock_check.assert_not_called()
-        self.assertEqual(state, ASK_CONFIRM)
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "report_url"
+        )
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.report_url, folder_url)
         self.assertEqual(
@@ -249,7 +256,184 @@ class ReceiveFieldTests(unittest.TestCase):
         sent_texts = [
             call.args[0] for call in update.message.reply_text.await_args_list
         ]
-        self.assertIn(REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE, sent_texts)
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn(REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE, sent_texts[0])
+        self.assertIn("в ответ на это сообщение", sent_texts[0])
+        self.assertIn("/skip", sent_texts[0])
+
+    def test_report_url_folder_then_valid_url_fixes_and_advances(self) -> None:
+        """Двухшаговый сценарий: папка → потом валидный документ.
+
+        Первый ввод (папка) кладёт предупреждение в ``report_url_valid`` и
+        оставляет диалог на том же поле. Второй ввод (валидный URL Google
+        Doc) должен:
+        - перезаписать ``report_url`` новой ссылкой;
+        - заменить сообщение-предупреждение на ``"yes"`` в
+          ``report_url_valid`` и проставить ``report_url_accessible == "yes"``;
+        - выслать короткое подтверждение «Ссылка принята. Продолжаю
+          регистрацию.»;
+        - продвинуть сценарий дальше (нет других missing-полей —
+          выходим в ``ASK_CONFIRM`` со сводкой).
+        """
+
+        from magister_checking.bot.validation import (
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(
+            telegram_id="111",
+            fio="X",
+            group_name="X",
+            workplace="X",
+            position="X",
+            phone="X",
+            supervisor="X",
+        )
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = []
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "report_url"
+
+        folder_url = "https://drive.google.com/drive/u/0/folders/1AbCdEf"
+        update_folder = _make_update(text=folder_url)
+        with patch(
+            "magister_checking.bot.handlers.check_report_url",
+            return_value=("yes", "yes"),
+        ) as mock_check_first, _patch_worksheet(ws):
+            state_after_folder = _run(receive_field(update_folder, ctx))
+
+        mock_check_first.assert_not_called()
+        self.assertEqual(state_after_folder, ASK_FIELD)
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(
+            form.report_url_valid, REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+        )
+
+        doc_url = "https://docs.google.com/document/d/abc/edit"
+        update_doc = _make_update(text=doc_url)
+        with patch(
+            "magister_checking.bot.handlers.check_report_url",
+            return_value=("yes", "yes"),
+        ) as mock_check_second, _patch_worksheet(ws):
+            state_after_doc = _run(receive_field(update_doc, ctx))
+
+        mock_check_second.assert_called_once_with(doc_url)
+        self.assertEqual(state_after_doc, ASK_CONFIRM)
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.report_url, doc_url)
+        self.assertEqual(form.report_url_valid, "yes")
+        self.assertEqual(form.report_url_accessible, "yes")
+        self.assertEqual(form.fill_status, "REGISTERED")
+
+        sent_texts = [
+            call.args[0]
+            for call in update_doc.message.reply_text.await_args_list
+        ]
+        self.assertTrue(
+            any("Ссылка принята" in text for text in sent_texts),
+            f"Ожидаемое подтверждение не найдено в: {sent_texts!r}",
+        )
+        self.assertTrue(
+            any("Сейчас я покажу данные" in text for text in sent_texts),
+            f"Ожидался переход к review-prompt, фактические сообщения: {sent_texts!r}",
+        )
+
+    def test_report_url_folder_followed_by_another_folder_keeps_user_stuck(
+        self,
+    ) -> None:
+        """Если магистрант прислал ещё одну папку — снова просим документ.
+
+        Диалог не должен «провалиться» к следующему шагу даже после
+        нескольких подряд неверных вводов; ``check_report_url`` (HTTP-проба)
+        не должна звониться ни на одной итерации.
+        """
+
+        from magister_checking.bot.validation import (
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(
+            telegram_id="111",
+            fio="X",
+            group_name="X",
+            workplace="X",
+            position="X",
+            phone="X",
+            supervisor="X",
+        )
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = []
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "report_url"
+
+        first_url = "https://drive.google.com/drive/u/0/folders/AAA"
+        second_url = "https://drive.google.com/drive/folders/BBB"
+        with patch(
+            "magister_checking.bot.handlers.check_report_url",
+            return_value=("yes", "yes"),
+        ) as mock_check, _patch_worksheet(ws):
+            state_first = _run(receive_field(_make_update(text=first_url), ctx))
+            state_second = _run(receive_field(_make_update(text=second_url), ctx))
+
+        mock_check.assert_not_called()
+        self.assertEqual(state_first, ASK_FIELD)
+        self.assertEqual(state_second, ASK_FIELD)
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "report_url"
+        )
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.report_url, second_url)
+        self.assertEqual(
+            form.report_url_valid, REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+        )
+        self.assertEqual(form.report_url_accessible, "")
+
+    def test_report_url_folder_then_skip_keeps_warning_and_advances(self) -> None:
+        """После папки магистрант может выйти через /skip — предупреждение остаётся.
+
+        Сохранённый ранее текст в ``report_url_valid`` (для админа) не
+        должен теряться при пропуске: ячейка по-прежнему объясняет, почему
+        ссылка не валидна. Сам URL папки тоже остаётся (магистрант ничего
+        нового не прислал)."""
+
+        from magister_checking.bot.validation import (
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(
+            telegram_id="111",
+            fio="X",
+            group_name="X",
+            workplace="X",
+            position="X",
+            phone="X",
+            supervisor="X",
+        )
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = []
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "report_url"
+
+        folder_url = "https://drive.google.com/drive/folders/AAA"
+        with patch(
+            "magister_checking.bot.handlers.check_report_url",
+            return_value=("yes", "yes"),
+        ), _patch_worksheet(ws):
+            state_after_folder = _run(
+                receive_field(_make_update(text=folder_url), ctx)
+            )
+        self.assertEqual(state_after_folder, ASK_FIELD)
+
+        with _patch_worksheet(ws):
+            state_after_skip = _run(skip_field(_make_update(text="/skip"), ctx))
+
+        self.assertEqual(state_after_skip, ASK_CONFIRM)
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.report_url, folder_url)
+        self.assertEqual(
+            form.report_url_valid, REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+        )
+        self.assertEqual(form.report_url_accessible, "")
 
     def test_skip_token_keeps_existing_value_during_recheck(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])

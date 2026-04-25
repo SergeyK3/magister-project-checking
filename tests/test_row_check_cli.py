@@ -8,8 +8,12 @@ from unittest.mock import MagicMock, patch
 from magister_checking.bot.models import UserForm
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.report_parser import ParsedReport
+from magister_checking.bot.row_pipeline import RowCheckReport
+from magister_checking.bot.sheets_repo import RecheckHistoryEntry
 from magister_checking.row_check_cli import (
     RowLocator,
+    _build_history_entry,
+    _compute_recheck_fingerprint,
     _try_load_dissertation_metrics,
     format_report,
     run_row_check,
@@ -479,6 +483,273 @@ class TryLoadDissertationMetricsTests(unittest.TestCase):
             drive_service=MagicMock(),
         )
         self.assertIsNone(result)
+
+
+class ComputeRecheckFingerprintTests(unittest.TestCase):
+    """Стабильность fingerprint: одинаковые входы → одинаковый sha256."""
+
+    def test_same_inputs_produce_same_fingerprint(self) -> None:
+        parsed = _parsed(
+            dissertation_url="https://docs.google.com/document/d/diss",
+            lkb_url="https://drive.google.com/file/d/lkb",
+        )
+        f1 = _compute_recheck_fingerprint(
+            report_url="https://docs.google.com/document/d/r",
+            report_modified_time="2026-04-25T05:00:00Z",
+            parsed=parsed,
+        )
+        f2 = _compute_recheck_fingerprint(
+            report_url="https://docs.google.com/document/d/r",
+            report_modified_time="2026-04-25T05:00:00Z",
+            parsed=parsed,
+        )
+        self.assertEqual(f1, f2)
+        self.assertEqual(len(f1), 64)
+
+    def test_modified_time_change_changes_fingerprint(self) -> None:
+        parsed = _parsed()
+        f1 = _compute_recheck_fingerprint(
+            report_url="u", report_modified_time="t1", parsed=parsed
+        )
+        f2 = _compute_recheck_fingerprint(
+            report_url="u", report_modified_time="t2", parsed=parsed
+        )
+        self.assertNotEqual(f1, f2)
+
+    def test_stage3_url_change_changes_fingerprint(self) -> None:
+        f1 = _compute_recheck_fingerprint(
+            report_url="u",
+            report_modified_time="t",
+            parsed=_parsed(dissertation_url="https://docs.google.com/document/d/A"),
+        )
+        f2 = _compute_recheck_fingerprint(
+            report_url="u",
+            report_modified_time="t",
+            parsed=_parsed(dissertation_url="https://docs.google.com/document/d/B"),
+        )
+        self.assertNotEqual(f1, f2)
+
+    def test_parsed_none_does_not_raise(self) -> None:
+        f = _compute_recheck_fingerprint(
+            report_url="u", report_modified_time="t", parsed=None
+        )
+        self.assertEqual(len(f), 64)
+
+
+class BuildHistoryEntryTests(unittest.TestCase):
+    """Сборка RecheckHistoryEntry из RowCheckReport."""
+
+    def test_builds_entry_with_passed_yes_when_no_issues(self) -> None:
+        report = RowCheckReport(fio="X Y", row_number=7)
+        entry = _build_history_entry(
+            report=report, source="cli", fingerprint="fp123"
+        )
+        self.assertIsInstance(entry, RecheckHistoryEntry)
+        self.assertEqual(entry.row_number, 7)
+        self.assertEqual(entry.fio, "X Y")
+        self.assertEqual(entry.source, "cli")
+        self.assertEqual(entry.passed, "yes")
+        self.assertEqual(entry.fingerprint, "fp123")
+
+    def test_builds_entry_with_passed_no_and_issues_joined(self) -> None:
+        report = RowCheckReport(fio="X Y", row_number=7)
+        report.stage1.issues.append("проблема А")
+        report.stage3.issues.append("проблема Б")
+        entry = _build_history_entry(report=report, source="bot", fingerprint="fp")
+        self.assertEqual(entry.passed, "no")
+        self.assertIn("проблема А", entry.issues)
+        self.assertIn("проблема Б", entry.issues)
+        self.assertEqual(entry.source, "bot")
+
+
+class OnlyIfChangedTests(unittest.TestCase):
+    """Поведение run_row_check(only_if_changed=True) с историей."""
+
+    def _user(self) -> UserForm:
+        return UserForm(
+            fio="Гизатова И.В.",
+            phone="+7",
+            report_url="https://docs.google.com/document/d/report/edit",
+        )
+
+    def test_short_circuits_when_fingerprint_matches_last_history(self) -> None:
+        user = self._user()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        parsed = _parsed(
+            dissertation_url="https://docs.google.com/document/d/diss",
+        )
+        config = MagicMock()
+
+        # Первый прогон — берём fingerprint из реального вычисления.
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed):
+            first = run_row_check(config, RowLocator(row_number=3))
+        self.assertFalse(first.unchanged)
+
+        last_entry = RecheckHistoryEntry(
+            timestamp="2026-04-25 05:00:00",
+            row_number=3,
+            fio=user.fio,
+            source="bot",
+            fingerprint="UNKNOWN",
+        )
+
+        # Подменяем fingerprint, который вернёт _compute_recheck_fingerprint,
+        # на тот же, что и в last_entry — чтобы сработало короткое замыкание.
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed), patch(
+            "magister_checking.row_check_cli._compute_recheck_fingerprint",
+            return_value="MATCHING_FP",
+        ), patch(
+            "magister_checking.row_check_cli.read_last_recheck_entry",
+            return_value=RecheckHistoryEntry(
+                timestamp="t", row_number=3, fingerprint="MATCHING_FP"
+            ),
+        ), patch(
+            "magister_checking.row_check_cli.run_row_pipeline"
+        ) as run_pipeline, patch(
+            "magister_checking.row_check_cli.apply_row_check_updates"
+        ) as apply_updates, patch(
+            "magister_checking.row_check_cli.append_recheck_history"
+        ) as append_history:
+            second = run_row_check(
+                config,
+                RowLocator(row_number=3),
+                apply=True,
+                only_if_changed=True,
+            )
+
+        self.assertTrue(second.unchanged)
+        self.assertEqual(second.row_number, 3)
+        run_pipeline.assert_not_called()
+        apply_updates.assert_not_called()
+        append_history.assert_not_called()
+
+    def test_runs_pipeline_when_fingerprint_differs(self) -> None:
+        user = self._user()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        parsed = _parsed(
+            dissertation_url="https://docs.google.com/document/d/diss",
+        )
+        config = MagicMock()
+
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed), patch(
+            "magister_checking.row_check_cli._compute_recheck_fingerprint",
+            return_value="NEW_FP",
+        ), patch(
+            "magister_checking.row_check_cli.read_last_recheck_entry",
+            return_value=RecheckHistoryEntry(
+                timestamp="t", row_number=3, fingerprint="OLD_FP"
+            ),
+        ):
+            report = run_row_check(
+                config,
+                RowLocator(row_number=3),
+                only_if_changed=True,
+            )
+
+        self.assertFalse(report.unchanged)
+        self.assertTrue(report.stage3.executed)
+
+    def test_apply_writes_history_with_source(self) -> None:
+        user = self._user()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        parsed = _parsed(
+            dissertation_url="https://docs.google.com/document/d/diss",
+        )
+        config = MagicMock()
+
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed), patch(
+            "magister_checking.row_check_cli.apply_row_check_updates"
+        ), patch(
+            "magister_checking.row_check_cli.append_recheck_history"
+        ) as append_history:
+            run_row_check(
+                config,
+                RowLocator(row_number=3),
+                apply=True,
+                history_source="bot",
+            )
+
+        append_history.assert_called_once()
+        spreadsheet_arg, entry_arg = append_history.call_args.args
+        self.assertEqual(entry_arg.source, "bot")
+        self.assertEqual(entry_arg.row_number, 3)
+        self.assertEqual(len(entry_arg.fingerprint), 64)
+
+    def test_history_failure_is_swallowed(self) -> None:
+        user = self._user()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        parsed = _parsed(
+            dissertation_url="https://docs.google.com/document/d/diss",
+        )
+        config = MagicMock()
+
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed), patch(
+            "magister_checking.row_check_cli.apply_row_check_updates"
+        ), patch(
+            "magister_checking.row_check_cli.append_recheck_history",
+            side_effect=RuntimeError("history boom"),
+        ):
+            # Не должно бросать — история вспомогательна.
+            report = run_row_check(
+                config,
+                RowLocator(row_number=3),
+                apply=True,
+                history_source="cli",
+            )
+        self.assertEqual(report.row_number, 3)
+
+
+class CliCheckRowFlagsTests(unittest.TestCase):
+    """Парсинг argparse и проброс флагов в run_row_check."""
+
+    def _run_cmd(self, argv: list[str]) -> tuple[int, MagicMock]:
+        from magister_checking import cli
+
+        fake_report = RowCheckReport(fio="X Y", row_number=4)
+
+        with patch(
+            "magister_checking.bot.config.load_config", return_value=MagicMock()
+        ), patch(
+            "magister_checking.row_check_cli.run_row_check",
+            return_value=fake_report,
+        ) as run:
+            code = cli.main(argv)
+        return code, run
+
+    def test_only_if_changed_propagates_to_run_row_check(self) -> None:
+        code, run = self._run_cmd(
+            ["check-row", "--row", "4", "--only-if-changed"]
+        )
+        self.assertEqual(code, 0)
+        run.assert_called_once()
+        self.assertTrue(run.call_args.kwargs["only_if_changed"])
+        self.assertEqual(run.call_args.kwargs["history_source"], "cli")
+        self.assertFalse(run.call_args.kwargs["apply"])
+
+    def test_default_check_row_does_not_pass_only_if_changed(self) -> None:
+        code, run = self._run_cmd(["check-row", "--row", "4"])
+        self.assertEqual(code, 0)
+        self.assertFalse(run.call_args.kwargs["only_if_changed"])
+
+    def test_apply_flag_combines_with_only_if_changed(self) -> None:
+        code, run = self._run_cmd(
+            ["check-row", "--row", "4", "--apply", "--only-if-changed"]
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(run.call_args.kwargs["apply"])
+        self.assertTrue(run.call_args.kwargs["only_if_changed"])
+
+
+class FormatReportUnchangedTests(unittest.TestCase):
+    def test_unchanged_report_renders_short_message(self) -> None:
+        report = RowCheckReport(fio="Иванов И.И.", row_number=5, unchanged=True)
+        text = format_report(report, applied=False)
+        self.assertIn("Иванов И.И.", text)
+        self.assertIn("Строка: 5", text)
+        self.assertIn("--only-if-changed", text)
+        self.assertIn("не тронуты", text)
+        self.assertNotIn("Извлечённые ссылки", text)
+        self.assertNotIn("dry-run", text)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,11 @@ from magister_checking.bot.models import SHEET_HEADER, UserForm
 from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
 from magister_checking.bot.sheets_repo import (
     ADMINS_WORKSHEET_NAME,
+    RECHECK_HISTORY_HEADER,
+    RECHECK_HISTORY_WORKSHEET_NAME,
+    RecheckHistoryEntry,
     _column_letter,
+    append_recheck_history,
     apply_row_check_updates,
     attach_telegram_to_row,
     build_dashboard_rows,
@@ -23,6 +27,7 @@ from magister_checking.bot.sheets_repo import (
     get_or_create_worksheet,
     is_admin_telegram_id,
     load_user,
+    read_last_recheck_entry,
     save_user_to_row_with_extras,
     normalize_fio,
     sync_registration_dashboard,
@@ -44,6 +49,7 @@ class FakeWorksheet:
         self.rows: List[List[str]] = [list(r) for r in (rows or [])]
         self.update_calls: List[tuple] = []
         self.batch_update_calls: List[tuple] = []
+        self.append_row_calls: List[tuple] = []
         self.id = sheet_id
         self.spreadsheet = spreadsheet
 
@@ -67,6 +73,16 @@ class FakeWorksheet:
         while result and result[-1] == "":
             result.pop()
         return result
+
+    def append_row(
+        self, values: list, value_input_option: str | None = None
+    ) -> None:
+        """Аналог gspread.Worksheet.append_row для тестов истории."""
+        self.append_row_calls.append((list(values), value_input_option))
+        self.rows.append([str(v) for v in values])
+
+    def get_all_values(self) -> List[List[str]]:
+        return [list(r) for r in self.rows]
 
     def update(self, range_a1: str, values: List[List[str]]) -> None:
         self.update_calls.append((range_a1, values))
@@ -728,7 +744,13 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         batch, value_input_option = ws.batch_update_calls[0]
         self.assertEqual(value_input_option, "RAW")
         ranges = [entry["range"] for entry in batch]
-        self.assertEqual(ranges, ["I2", "J2", "M2"])
+        # Re-check (Stage 4 (c) overwrite_clean): batch включает все
+        # 9 известных колонок проверки, даже если пайплайн не дал значения
+        # — тогда туда уходит "" (clean-write).
+        self.assertEqual(
+            ranges,
+            ["I2", "J2", "K2", "L2", "M2", "N2", "O2", "P2", "Q2"],
+        )
 
     def test_strikethrough_format_requests_match_cells(self) -> None:
         spreadsheet, ws = self._fresh_sheet()
@@ -759,37 +781,41 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         self.assertEqual(len(spreadsheet.batch_update_calls), 1)
         body = spreadsheet.batch_update_calls[0]
         requests = body["requests"]
-        self.assertEqual(len(requests), 4)
+        # Clean-write: 9 repeatCell — strike False по всем известным колонкам
+        # проверки (I..Q), плюс stage3-значения переопределяют 4 из них.
+        self.assertEqual(len(requests), 9)
 
-        for request, expected in zip(
-            requests,
-            [
-                ("project_folder_url", 10, False),
-                ("lkb_url", 11, True),
-                ("dissertation_url", 12, False),
-                ("publication_url", 13, False),
-            ],
-        ):
-            _key, expected_col, expected_strike = expected
+        # Извлекаем strike по индексу колонки для удобной проверки.
+        strike_by_col = {
+            req["repeatCell"]["range"]["startColumnIndex"]: req["repeatCell"][
+                "cell"
+            ]["userEnteredFormat"]["textFormat"]["strikethrough"]
+            for req in requests
+        }
+        self.assertEqual(strike_by_col[10], False)  # project_folder_url
+        self.assertEqual(strike_by_col[11], True)   # lkb_url (передан True)
+        self.assertEqual(strike_by_col[12], False)  # dissertation_url
+        self.assertEqual(strike_by_col[13], False)  # publication_url
+        # Колонки Stage 2 / Stage 4: clean-write кладёт strike=False.
+        for col_idx in (8, 9, 14, 15, 16):
+            self.assertEqual(strike_by_col[col_idx], False)
+
+        for request in requests:
             range_ = request["repeatCell"]["range"]
             self.assertEqual(range_["sheetId"], 42)
             self.assertEqual(range_["startRowIndex"], 1)
             self.assertEqual(range_["endRowIndex"], 2)
-            self.assertEqual(range_["startColumnIndex"], expected_col)
-            self.assertEqual(range_["endColumnIndex"], expected_col + 1)
-            self.assertEqual(
-                request["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
-                    "strikethrough"
-                ],
-                expected_strike,
-            )
             self.assertEqual(
                 request["repeatCell"]["fields"],
                 "userEnteredFormat.textFormat.strikethrough",
             )
 
-    def test_skips_stage2_when_probe_is_none(self) -> None:
+    def test_clears_stage2_cells_when_probe_is_none(self) -> None:
+        """Re-check (overwrite_clean): если probe=None, I/J всё равно
+        затираются — никакой stale 'yes' от прошлого прогона не
+        остаётся, если магистрант сменил отчёт и Stage 2 не дошёл."""
         spreadsheet, ws = self._fresh_sheet()
+        ws.rows[1] = ["x"] * len(self._HEADER_PHASE_A)  # эмуляция прежнего прогона
 
         apply_row_check_updates(
             ws,
@@ -801,10 +827,14 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(ws.rows[1][8], "")  # Проверка ссылки — не тронули
-        self.assertEqual(ws.rows[1][9], "")  # Доступ открыт — не тронули
+        self.assertEqual(ws.rows[1][8], "")   # Проверка ссылки очищена
+        self.assertEqual(ws.rows[1][9], "")   # Доступ открыт очищен
+        self.assertEqual(ws.rows[1][12], "нет")  # Stage 3 dissertation
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
-        self.assertEqual(ranges, ["M2"])
+        self.assertEqual(
+            ranges,
+            ["I2", "J2", "K2", "L2", "M2", "N2", "O2", "P2", "Q2"],
+        )
         self.assertEqual(len(spreadsheet.batch_update_calls), 1)
 
     def test_skips_missing_columns_in_custom_header(self) -> None:
@@ -838,12 +868,26 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         )
 
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
-        self.assertEqual(ranges, ["D2", "E2", "F2"])  # publication_url пропущен
+        # Колонок publication_url, pages_total, sources_count, compliance
+        # в этом заголовке нет — clean-write их пропускает. Остальные
+        # 5 колонок (I,J,K,L,M в Phase A → D..H здесь) затираются и
+        # перезаписываются.
+        self.assertEqual(ranges, ["D2", "E2", "F2", "G2", "H2"])
         requests = spreadsheet.batch_update_calls[0]["requests"]
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0]["repeatCell"]["range"]["startColumnIndex"], 5)
+        # 5 strike-сбросов (по числу присутствующих в заголовке колонок,
+        # для которых _set_strike зовётся), плюс stage3 переопределяет
+        # один из них (project_folder_url=col 5 → strike=False, что
+        # совпадает с дефолтом).
+        self.assertEqual(len(requests), 5)
+        cols = sorted(
+            req["repeatCell"]["range"]["startColumnIndex"] for req in requests
+        )
+        self.assertEqual(cols, [3, 4, 5, 6, 7])
 
-    def test_no_format_call_when_no_stage3(self) -> None:
+    def test_clean_write_format_call_even_without_stage3(self) -> None:
+        """Re-check: clean-write всегда снимает strike со всех известных
+        колонок, даже если Stage 3 не дал ячеек (pipeline остановился
+        раньше). Это нужно, чтобы прошлый прогон не оставил зачёркивания."""
         spreadsheet, ws = self._fresh_sheet()
 
         apply_row_check_updates(
@@ -854,10 +898,22 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
             stage3_cells=None,
         )
 
-        self.assertEqual(spreadsheet.batch_update_calls, [])
         self.assertEqual(len(ws.batch_update_calls), 1)
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
-        self.assertEqual(ranges, ["I2", "J2"])
+        self.assertEqual(
+            ranges,
+            ["I2", "J2", "K2", "L2", "M2", "N2", "O2", "P2", "Q2"],
+        )
+        self.assertEqual(len(spreadsheet.batch_update_calls), 1)
+        requests = spreadsheet.batch_update_calls[0]["requests"]
+        # Все 9 cell-ов сбрасывают strikethrough в False.
+        self.assertEqual(len(requests), 9)
+        for req in requests:
+            self.assertFalse(
+                req["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"][
+                    "strikethrough"
+                ]
+            )
 
     def test_writes_stage4_cells_in_same_batch(self) -> None:
         """Stage 4 пишет pages_total/sources_count/compliance в общий batch."""
@@ -891,22 +947,31 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         self.assertEqual(saved[15], "42")
         self.assertEqual(saved[16], "соответствует")
 
-        # Один batch_update — все значения вместе.
+        # Один batch_update — все 9 колонок проверки (clean-write).
         self.assertEqual(len(ws.batch_update_calls), 1)
         batch, vio = ws.batch_update_calls[0]
         self.assertEqual(vio, "RAW")
         ranges = [entry["range"] for entry in batch]
-        self.assertEqual(ranges, ["I2", "J2", "M2", "O2", "P2", "Q2"])
+        self.assertEqual(
+            ranges,
+            ["I2", "J2", "K2", "L2", "M2", "N2", "O2", "P2", "Q2"],
+        )
 
-        # Strikethrough только для Stage 3 (1 ячейка), Stage 4 не получает
-        # repeatCell-запросов.
+        # Strikethrough — 9 запросов (по числу clean-write колонок).
+        # Stage 3 переопределяет один из них (dissertation_url col 12).
         self.assertEqual(len(spreadsheet.batch_update_calls), 1)
         requests = spreadsheet.batch_update_calls[0]["requests"]
-        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(requests), 9)
 
-    def test_stage4_only_writes_when_provided(self) -> None:
-        """Если stage4_cells не передали — Stage 4 колонки не трогаются."""
+    def test_stage4_columns_cleared_when_not_provided(self) -> None:
+        """Re-check: stage4_cells=None → Stage 4 колонки в листе ЗАТИРАЮТСЯ
+        (clean-write), а не остаются как были. Если в прошлом прогоне
+        туда что-то записали, после нового прогона без Stage 4 они пустеют."""
         spreadsheet, ws = self._fresh_sheet()
+        # Эмуляция прошлой записи Stage 4: P (14)=87, Q (15)=42, R (16)=да
+        ws.rows[1][14] = "87"
+        ws.rows[1][15] = "42"
+        ws.rows[1][16] = "соответствует"
 
         apply_row_check_updates(
             ws,
@@ -920,8 +985,11 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         )
 
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
-        self.assertEqual(ranges, ["I2", "J2", "M2"])
-        # Stage 4 колонки в Phase A header — индексы 14, 15, 16
+        self.assertEqual(
+            ranges,
+            ["I2", "J2", "K2", "L2", "M2", "N2", "O2", "P2", "Q2"],
+        )
+        # Stage 4 колонки в Phase A header — индексы 14, 15, 16 — пусты.
         self.assertEqual(ws.rows[1][14], "")
         self.assertEqual(ws.rows[1][15], "")
         self.assertEqual(ws.rows[1][16], "")
@@ -961,6 +1029,161 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         # Stage 4 столбцов нет в заголовке — ни одного диапазона по ним.
         ranges = [entry["range"] for entry in ws.batch_update_calls[0][0]]
         self.assertEqual(ranges, ["D2", "E2", "F2"])
+
+
+class RecheckHistoryEntryTests(unittest.TestCase):
+    """Сериализация одной строки истории."""
+
+    def test_to_row_in_header_order(self) -> None:
+        entry = RecheckHistoryEntry(
+            timestamp="2026-04-25 09:30:00",
+            row_number=3,
+            fio="Гизатова И.В.",
+            source="bot",
+            stopped_at="",
+            passed="yes",
+            issues="Ссылка не открывается",
+            pages_total="87",
+            sources_count="42",
+            compliance="соответствует",
+            fingerprint="abc123",
+        )
+        row = entry.to_row()
+        self.assertEqual(len(row), len(RECHECK_HISTORY_HEADER))
+        self.assertEqual(
+            row,
+            [
+                "2026-04-25 09:30:00",
+                "3",
+                "Гизатова И.В.",
+                "bot",
+                "",
+                "yes",
+                "Ссылка не открывается",
+                "87",
+                "42",
+                "соответствует",
+                "abc123",
+            ],
+        )
+
+    def test_from_row_round_trip(self) -> None:
+        entry = RecheckHistoryEntry(
+            timestamp="2026-04-25", row_number=5, fio="X", fingerprint="hash"
+        )
+        restored = RecheckHistoryEntry.from_row(entry.to_row())
+        self.assertEqual(restored.row_number, 5)
+        self.assertEqual(restored.fio, "X")
+        self.assertEqual(restored.fingerprint, "hash")
+
+    def test_from_row_pads_short_rows(self) -> None:
+        restored = RecheckHistoryEntry.from_row(["2026-04-25", "7"])
+        self.assertEqual(restored.row_number, 7)
+        self.assertEqual(restored.fingerprint, "")
+
+    def test_from_row_handles_invalid_row_number(self) -> None:
+        restored = RecheckHistoryEntry.from_row(["ts", "abc", "fio"])
+        self.assertEqual(restored.row_number, 0)
+
+
+class AppendRecheckHistoryTests(unittest.TestCase):
+    """Лист «История проверок» создаётся лениво и заголовок выставляется."""
+
+    def test_creates_worksheet_with_header_on_first_call(self) -> None:
+        spreadsheet = FakeSpreadsheet()
+        entry = RecheckHistoryEntry(
+            timestamp="2026-04-25", row_number=3, fio="X", source="bot"
+        )
+
+        append_recheck_history(spreadsheet, entry)
+
+        self.assertIn(RECHECK_HISTORY_WORKSHEET_NAME, spreadsheet.worksheets)
+        ws = spreadsheet.worksheets[RECHECK_HISTORY_WORKSHEET_NAME]
+        self.assertEqual(list(ws.rows[0]), list(RECHECK_HISTORY_HEADER))
+        self.assertEqual(len(ws.append_row_calls), 1)
+        appended_values, vio = ws.append_row_calls[0]
+        self.assertEqual(vio, "RAW")
+        self.assertEqual(appended_values[1], "3")
+        self.assertEqual(appended_values[2], "X")
+        self.assertEqual(appended_values[3], "bot")
+
+    def test_reuses_existing_worksheet_keeps_header(self) -> None:
+        spreadsheet = FakeSpreadsheet()
+        existing = FakeWorksheet(
+            [list(RECHECK_HISTORY_HEADER)],
+            sheet_id=99,
+            spreadsheet=spreadsheet,
+        )
+        spreadsheet.worksheets[RECHECK_HISTORY_WORKSHEET_NAME] = existing
+
+        append_recheck_history(
+            spreadsheet,
+            RecheckHistoryEntry(timestamp="t", row_number=4, fio="Y"),
+        )
+
+        self.assertEqual(len(existing.update_calls), 0)
+        self.assertEqual(len(existing.append_row_calls), 1)
+
+    def test_repairs_wrong_header(self) -> None:
+        """Если в листе вдруг окажется чужая шапка — переписываем (наш лист)."""
+        spreadsheet = FakeSpreadsheet()
+        existing = FakeWorksheet(
+            [["ts", "row"]],
+            sheet_id=99,
+            spreadsheet=spreadsheet,
+        )
+        spreadsheet.worksheets[RECHECK_HISTORY_WORKSHEET_NAME] = existing
+
+        append_recheck_history(
+            spreadsheet,
+            RecheckHistoryEntry(timestamp="t", row_number=4),
+        )
+
+        self.assertEqual(list(existing.rows[0]), list(RECHECK_HISTORY_HEADER))
+
+
+class ReadLastRecheckEntryTests(unittest.TestCase):
+    """Поиск последней записи по row_number для --only-if-changed."""
+
+    def _ws(
+        self, spreadsheet: FakeSpreadsheet, *rows: list[str]
+    ) -> FakeWorksheet:
+        ws = FakeWorksheet(
+            [list(RECHECK_HISTORY_HEADER), *(list(r) for r in rows)],
+            sheet_id=77,
+            spreadsheet=spreadsheet,
+        )
+        spreadsheet.worksheets[RECHECK_HISTORY_WORKSHEET_NAME] = ws
+        return ws
+
+    def test_returns_none_when_history_sheet_missing(self) -> None:
+        spreadsheet = FakeSpreadsheet()
+        self.assertIsNone(read_last_recheck_entry(spreadsheet, 3))
+
+    def test_returns_none_when_no_entries_for_row(self) -> None:
+        spreadsheet = FakeSpreadsheet()
+        self._ws(
+            spreadsheet,
+            ["t1", "5", "X", "bot", "", "yes", "", "", "", "", "fp1"],
+        )
+        self.assertIsNone(read_last_recheck_entry(spreadsheet, 3))
+
+    def test_returns_last_for_row_when_multiple_present(self) -> None:
+        spreadsheet = FakeSpreadsheet()
+        self._ws(
+            spreadsheet,
+            ["t1", "3", "X", "cli", "", "yes", "", "", "", "", "fp_old"],
+            ["t2", "5", "Y", "bot", "", "yes", "", "", "", "", "fp_other"],
+            ["t3", "3", "X", "bot", "", "no", "issue", "", "", "", "fp_new"],
+        )
+
+        entry = read_last_recheck_entry(spreadsheet, 3)
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry.timestamp, "t3")
+        self.assertEqual(entry.fingerprint, "fp_new")
+        self.assertEqual(entry.passed, "no")
+        self.assertEqual(entry.issues, "issue")
 
 
 if __name__ == "__main__":

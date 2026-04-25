@@ -25,10 +25,12 @@ from magister_checking.bot.handlers import (
     project_card_start,
     receive_bind_fio,
     receive_field,
+    recheck,
     skip_bind,
     skip_field,
     start,
 )
+from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.models import SHEET_HEADER, UserForm
 from tests.bot.test_sheets_repo import FakeWorksheet
 
@@ -605,6 +607,96 @@ class AdminProjectCardTests(unittest.TestCase):
 
         self.assertEqual(state, PROJECT_CARD_ASK_TARGET)
         self.assertIn("несколько строк", update.message.reply_text.await_args.args[0])
+
+
+class RecheckHandlerTests(unittest.TestCase):
+    """Команда /recheck — повторная проверка магистрантом своей строки."""
+
+    def _row(
+        self,
+        *,
+        telegram_id: str = "111",
+        fio: str = "Иванов И.И.",
+        report_url: str = "https://docs.google.com/document/d/r/edit",
+    ) -> list[str]:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = telegram_id
+        row[SHEET_HEADER.index("fio")] = fio
+        row[SHEET_HEADER.index("report_url")] = report_url
+        return row
+
+    def test_recheck_unknown_telegram_id_replies_start(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=999, text="/recheck")
+
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check"
+        ) as run:
+            _run(recheck(update, ctx))
+
+        run.assert_not_called()
+        msg = update.message.reply_text.await_args_list[-1].args[0]
+        self.assertIn("/start", msg)
+
+    def test_recheck_runs_full_pipeline_for_known_user(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=111, text="/recheck")
+
+        fake_report = RowCheckReport(fio="Иванов И.И.", row_number=2)
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run:
+            _run(recheck(update, ctx))
+
+        run.assert_called_once()
+        kwargs = run.call_args.kwargs
+        self.assertFalse(kwargs["only_if_changed"])
+        self.assertTrue(kwargs["apply"])
+        self.assertEqual(kwargs["history_source"], "bot")
+        locator = run.call_args.args[1]
+        self.assertEqual(locator.row_number, 2)
+
+        sent = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any("полная проверка" in m for m in sent))
+        self.assertTrue(any("Иванов И.И." in m for m in sent))
+
+    def test_recheck_quick_passes_only_if_changed(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=111, text="/recheck quick")
+
+        fake_report = RowCheckReport(
+            fio="Иванов И.И.", row_number=2, unchanged=True
+        )
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run:
+            _run(recheck(update, ctx))
+
+        kwargs = run.call_args.kwargs
+        self.assertTrue(kwargs["only_if_changed"])
+        sent = [c.args[0] for c in update.message.reply_text.await_args_list]
+        self.assertTrue(any("быстрый режим" in m for m in sent))
+        self.assertTrue(any("--only-if-changed" in m for m in sent))
+
+    def test_recheck_swallows_pipeline_exception_and_replies(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=111, text="/recheck")
+
+        with _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            side_effect=RuntimeError("drive boom"),
+        ):
+            _run(recheck(update, ctx))
+
+        last_msg = update.message.reply_text.await_args_list[-1].args[0]
+        self.assertIn("Не удалось выполнить", last_msg)
+        self.assertIn("drive boom", last_msg)
 
 
 if __name__ == "__main__":

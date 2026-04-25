@@ -342,6 +342,56 @@ class RunRowCheckTests(unittest.TestCase):
         load_metrics.assert_not_called()
         self.assertFalse(report.stage4.executed)
 
+    def test_report_url_folder_writes_warning_to_check_link_cell_on_apply(
+        self,
+    ) -> None:
+        """report_url — ссылка на папку Drive (Камзебаева row 2 кейс).
+
+        ``apply_row_check_updates`` должен получить ``report_url_valid``,
+        равный сообщению об ошибке (а не «yes»/«no»), и пустой
+        ``report_url_accessible``. ``check_report_url`` (HTTP-проба) не
+        вызывается. В Stage 1 issues появляется конкретное сообщение
+        «исправьте на ссылку на документ».
+        """
+        from magister_checking.bot.validation import (
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+        folder_url = "https://drive.google.com/drive/u/0/folders/1AbCdEf"
+        user = UserForm(
+            fio="Камзебаева Анель Дулатовна",
+            phone="+77052107246",
+            report_url=folder_url,
+        )
+        config = MagicMock()
+        with _install_io_mocks(
+            user=user,
+            document=None,
+            parsed=None,
+        ), patch(
+            "magister_checking.row_check_cli.check_report_url"
+        ) as mock_probe, patch(
+            "magister_checking.row_check_cli.apply_row_check_updates"
+        ) as apply_updates, patch(
+            "magister_checking.row_check_cli.append_recheck_history"
+        ):
+            report = run_row_check(
+                config, RowLocator(row_number=2), apply=True
+            )
+
+        mock_probe.assert_not_called()
+        apply_updates.assert_called_once()
+        kwargs = apply_updates.call_args.kwargs
+        self.assertEqual(
+            kwargs["report_url_valid"], REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+        )
+        self.assertEqual(kwargs["report_url_accessible"], "")
+        self.assertIn(
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+            report.stage1.issues,
+        )
+        self.assertEqual(report.stopped_at, "stage1")
+
     def test_format_report_includes_links_block(self) -> None:
         user = UserForm(
             fio="Гизатова Ирина Владимировна",

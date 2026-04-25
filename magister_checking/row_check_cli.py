@@ -41,6 +41,7 @@ from magister_checking.bot.sheets_repo import (
 from magister_checking.bot.validation import (
     REPORT_URL_WRONG_TARGET_MESSAGE,
     check_report_url,
+    check_report_url_target_kind,
 )
 from magister_checking.dissertation_metrics import (
     DissertationMetrics,
@@ -494,8 +495,15 @@ def run_row_check(
                 unchanged=True,
             )
 
+    # Формальная проверка «папка vs документ» (без сети). Если report_url —
+    # ссылка на папку Drive, дальше HTTP-проба не нужна: в листе и в
+    # справке магистранта пишем явное сообщение «исправьте на ссылку на
+    # документ». Реальный кейс — Камзебаева row 2 (handoff §«не удалось
+    # извлечь file_id из …/folders/…»).
+    report_url_target_message = check_report_url_target_kind(report_url)
+
     url_probe: tuple[str, str] | None = None
-    if not skip_http and report_url:
+    if not skip_http and report_url and report_url_target_message is None:
         url_probe = check_report_url(report_url)
 
     link_accessibility: dict[str, bool] | None = None
@@ -558,9 +566,29 @@ def run_row_check(
         if pipeline_report.stopped_at is None:
             pipeline_report.stopped_at = "stage1"
 
+    # Folder-вместо-документа в report_url — отдельное более конкретное
+    # сообщение (см. ``check_report_url_target_kind``). Перезаписывает
+    # generic «неверна» при необходимости и попадает в справку магистранта.
+    if (
+        report_url_target_message
+        and report_url_target_message not in pipeline_report.stage1.issues
+    ):
+        pipeline_report.stage1.issues.append(report_url_target_message)
+        pipeline_report.stage1.passed = False
+        if pipeline_report.stopped_at is None:
+            pipeline_report.stopped_at = "stage1"
+
     if apply:
-        report_url_valid = url_probe[0] if url_probe is not None else None
-        report_url_accessible = url_probe[1] if url_probe is not None else None
+        if report_url_target_message:
+            # Дублируем сообщение в колонку «Проверка ссылки» для админа,
+            # «Доступ открыт» оставляем пустым (HTTP-пробы не делали).
+            report_url_valid = report_url_target_message
+            report_url_accessible = ""
+        else:
+            report_url_valid = url_probe[0] if url_probe is not None else None
+            report_url_accessible = (
+                url_probe[1] if url_probe is not None else None
+            )
         fill_status_update = resolve_fill_status_after_row_check(user, pipeline_report)
         apply_row_check_updates(
             worksheet,

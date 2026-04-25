@@ -199,6 +199,58 @@ class ReceiveFieldTests(unittest.TestCase):
         sent_texts = [call.args[0] for call in update.message.reply_text.await_args_list]
         self.assertIn("Сейчас я покажу данные", sent_texts[0])
 
+    def test_report_url_folder_replies_with_warning_and_writes_to_cell(
+        self,
+    ) -> None:
+        """Магистрант прислал ссылку на папку Drive вместо документа.
+
+        Бот должен:
+        1) ответить ему конкретным сообщением «исправьте, это папка»;
+        2) записать это же сообщение в ``report_url_valid`` (колонка
+           «Проверка ссылки» — для админа);
+        3) очистить ``report_url_accessible`` (HTTP-проба не делалась);
+        4) **не звонить** ``check_report_url`` (без сетевой пробы).
+        """
+
+        from magister_checking.bot.validation import (
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(
+            telegram_id="111",
+            fio="X",
+            group_name="X",
+            workplace="X",
+            position="X",
+            phone="X",
+            supervisor="X",
+        )
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = []
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "report_url"
+
+        folder_url = "https://drive.google.com/drive/u/0/folders/1AbCdEf"
+        update = _make_update(text=folder_url)
+        with patch(
+            "magister_checking.bot.handlers.check_report_url",
+            return_value=("yes", "yes"),
+        ) as mock_check, _patch_worksheet(ws):
+            state = _run(receive_field(update, ctx))
+
+        mock_check.assert_not_called()
+        self.assertEqual(state, ASK_CONFIRM)
+        form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
+        self.assertEqual(form.report_url, folder_url)
+        self.assertEqual(
+            form.report_url_valid, REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+        )
+        self.assertEqual(form.report_url_accessible, "")
+        sent_texts = [
+            call.args[0] for call in update.message.reply_text.await_args_list
+        ]
+        self.assertIn(REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE, sent_texts)
+
     def test_skip_token_keeps_existing_value_during_recheck(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)

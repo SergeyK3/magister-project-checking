@@ -52,6 +52,7 @@ from magister_checking.bot.sheets_repo import (
 from magister_checking.bot.validation import (
     SKIP_TOKEN,
     check_report_url,
+    check_report_url_target_kind,
     normalize_text,
 )
 from magister_checking.project_card_pipeline import generate_project_card_pdf
@@ -680,9 +681,21 @@ async def receive_field(
         if _is_skip_text(raw) and getattr(user_form, field_key):
             pass
         elif value:
-            valid, accessible = check_report_url(value)
-            user_form.report_url_valid = valid
-            user_form.report_url_accessible = accessible
+            # Сначала формальная проверка «папка vs документ» (без сети).
+            # Если магистрант прислал ссылку на папку Drive, явно отвечаем
+            # сообщением об ошибке и кладём текст в «Проверка ссылки» —
+            # сам URL принимаем как есть, чтобы не блокировать дальнейшее
+            # заполнение анкеты; admin увидит причину в листе, магистрант
+            # сможет исправить через повторную регистрацию / /change.
+            target_msg = check_report_url_target_kind(value)
+            if target_msg:
+                await update.message.reply_text(target_msg)
+                user_form.report_url_valid = target_msg
+                user_form.report_url_accessible = ""
+            else:
+                valid, accessible = check_report_url(value)
+                user_form.report_url_valid = valid
+                user_form.report_url_accessible = accessible
         else:
             user_form.report_url_valid = ""
             user_form.report_url_accessible = ""

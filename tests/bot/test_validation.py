@@ -11,10 +11,12 @@ import requests
 from magister_checking.bot.validation import (
     FIO_INVALID_MESSAGE,
     PHONE_INVALID_MESSAGE,
+    REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
     REPORT_URL_WRONG_TARGET_MESSAGE,
     SKIP_TOKEN,
     check_report_document_marker,
     check_report_url,
+    check_report_url_target_kind,
     is_interim_report_document,
     is_valid_url,
     normalize_text,
@@ -280,6 +282,51 @@ class InterimReportMarkerTests(unittest.TestCase):
     def test_empty_document_rejected(self) -> None:
         self.assertFalse(is_interim_report_document({}))
         self.assertFalse(is_interim_report_document(None))
+
+
+class CheckReportUrlTargetKindTests(unittest.TestCase):
+    """Формальная проверка вида URL: документ vs папка Drive."""
+
+    def test_empty_url_returns_none(self) -> None:
+        self.assertIsNone(check_report_url_target_kind(""))
+
+    def test_google_doc_url_is_document(self) -> None:
+        self.assertIsNone(
+            check_report_url_target_kind(
+                "https://docs.google.com/document/d/abc123/edit"
+            )
+        )
+
+    def test_drive_file_url_is_document(self) -> None:
+        # Загруженный .docx в Drive — тоже документ для целей этой проверки.
+        self.assertIsNone(
+            check_report_url_target_kind(
+                "https://drive.google.com/file/d/abc123/view"
+            )
+        )
+
+    def test_arbitrary_https_is_document(self) -> None:
+        # «не папка Drive» — пропускаем (другие проверки сработают позже).
+        self.assertIsNone(
+            check_report_url_target_kind("https://example.com/report.pdf")
+        )
+
+    def test_drive_folder_url_returns_message(self) -> None:
+        self.assertEqual(
+            check_report_url_target_kind(
+                "https://drive.google.com/drive/folders/1AbCdEf"
+            ),
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
+
+    def test_drive_folder_url_with_user_segment_returns_message(self) -> None:
+        # Реальная форма Камзебаевой (row 2): /drive/u/0/folders/<id>.
+        self.assertEqual(
+            check_report_url_target_kind(
+                "https://drive.google.com/drive/u/0/folders/1AbCdEfGhIjK"
+            ),
+            REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE,
+        )
 
 
 if __name__ == "__main__":

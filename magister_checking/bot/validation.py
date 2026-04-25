@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from magister_checking.drive_urls import is_google_drive_folder_url
+
 
 SKIP_TOKEN = "-"
 """Если магистрант ввёл этот токен — поле считаем пропущенным."""
@@ -19,6 +21,14 @@ _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 FIO_INVALID_MESSAGE = "В поле «ФИО» введена фраза, не похожая на имя"
 PHONE_INVALID_MESSAGE = "В поле «Телефон» введён неверный номер"
 REPORT_URL_WRONG_TARGET_MESSAGE = "Ссылка на промежуточный отчёт неверна"
+REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE = (
+    "Ссылка на промежуточный отчет содержит адрес папки, а не документа. "
+    "Пожалуйста, исправьте!"
+)
+"""Магистрант вместо ссылки на сам Google Doc прислал URL папки Drive
+(``…/drive/folders/…``). Дублируется в колонке «Проверка ссылки» листа,
+чтобы админ видел причину «промежуточный отчёт не загрузился» без захода
+в Drive (реальный кейс — Камзебаева, row 2)."""
 
 _CYRILLIC_CLASS = r"А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі"
 _CYRILLIC_UPPER_CLASS = r"А-ЯЁӘҒҚҢӨҰҮҺІ"
@@ -157,6 +167,27 @@ def check_report_document_marker(document: Any) -> str | None:
     if is_interim_report_document(document):
         return None
     return REPORT_URL_WRONG_TARGET_MESSAGE
+
+
+def check_report_url_target_kind(url: str) -> str | None:
+    """Проверяет, что ссылка на отчёт ведёт на документ, а не на папку Drive.
+
+    Это формальная (без сети) проверка по виду URL. Сейчас отлавливает
+    только «папка вместо документа» — самый частый случай (Камзебаева,
+    row 2: ``https://drive.google.com/drive/folders/…``). Возвращает
+    готовое сообщение для магистранта при нарушении правила; ``None``
+    — формат URL допустим (документ Docs, файл Drive, любая http(s)
+    ссылка не на ``/folders/…``).
+
+    Пустой URL пропускаем (``None``): валидация «обязательное поле»
+    делается отдельно.
+    """
+
+    if not url:
+        return None
+    if is_google_drive_folder_url(url):
+        return REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE
+    return None
 
 
 def _is_dangerous_ip(ip: ipaddress._BaseAddress) -> bool:

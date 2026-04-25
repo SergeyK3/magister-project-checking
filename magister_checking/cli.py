@@ -83,12 +83,17 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
             locator,
             skip_http=ns.skip_http,
             apply=ns.apply,
+            only_if_changed=ns.only_if_changed,
+            history_source="cli",
         )
     except ValueError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
 
-    print(format_report(report, applied=ns.apply))
+    # При only_if_changed + unchanged лист не трогали — applied=False,
+    # чтобы пометка «(запись в лист выполнена)» не печаталась.
+    applied_effective = ns.apply and not report.unchanged
+    print(format_report(report, applied=applied_effective))
     return 0
 
 
@@ -316,6 +321,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="записать результаты Stage 2/Stage 3 в лист (J/K/L/M/N/O + "
         "strikethrough для недоступных Stage 3 ссылок). По умолчанию dry-run.",
+    )
+    p_check.add_argument(
+        "--only-if-changed",
+        action="store_true",
+        help="не запускать пайплайн, если входы (URL отчёта, modifiedTime, "
+        "ссылки Stage 3) совпадают с последним прогоном из листа "
+        "«История проверок» (handoff Stage 4 (c) — diff_detection).",
     )
     p_check.set_defaults(func=cmd_check_row)
 

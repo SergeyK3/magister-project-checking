@@ -31,6 +31,7 @@ from magister_checking.bot.handlers import (
     project_card_start,
     receive_bind_fio,
     receive_field,
+    recheck,
     skip_bind,
     skip_field,
     start,
@@ -151,6 +152,7 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(conv_handler)
 
     application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("recheck", recheck))
     return application
 
 

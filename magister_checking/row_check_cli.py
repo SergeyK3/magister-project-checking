@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from google.oauth2.service_account import Credentials
@@ -27,10 +29,13 @@ from magister_checking.bot.row_pipeline import (
 )
 from magister_checking.bot.sheets_repo import (
     GOOGLE_SCOPES,
+    RecheckHistoryEntry,
+    append_recheck_history,
     apply_row_check_updates,
     find_rows_by_fio,
     get_spreadsheet,
     load_user,
+    read_last_recheck_entry,
 )
 from magister_checking.bot.validation import (
     REPORT_URL_WRONG_TARGET_MESSAGE,
@@ -285,18 +290,138 @@ def _prefetch_drive_file_mimes(
     return mimes
 
 
+def _get_drive_modified_time(*, drive_service: Any, file_id: str) -> str:
+    """``modifiedTime`` файла в Drive (RFC3339) или ``""`` при ошибке.
+
+    Используется для re-check fingerprint (handoff §8 — diff_detection):
+    если магистрант переписал свой отчёт, ``modifiedTime`` поменяется,
+    fingerprint станет другим и ``--only-if-changed`` не сработает.
+    """
+
+    if not file_id:
+        return ""
+    try:
+        meta = (
+            drive_service.files()
+            .get(fileId=file_id, fields="modifiedTime", supportsAllDrives=True)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    return str((meta or {}).get("modifiedTime") or "")
+
+
+def _compute_recheck_fingerprint(
+    *,
+    report_url: str,
+    report_modified_time: str,
+    parsed: ParsedReport | None,
+) -> str:
+    """sha256 от существенных входов прогона (handoff §8 fingerprint).
+
+    Состав:
+    - URL отчёта;
+    - ``modifiedTime`` отчёта в Drive (если получен);
+    - четыре ссылки Stage 3 (project_folder_url, lkb_url, dissertation_url,
+      publication_url) — их изменение должно перезапускать проверку.
+
+    Если ``parsed`` отсутствует (отчёт не распарсился), вместо четырёх
+    ссылок пишутся пустые строки — это даёт детерминированный
+    fingerprint, который можно сравнить с прошлым.
+    """
+
+    parts: list[tuple[str, str]] = [
+        ("report_url", report_url or ""),
+        ("report_modified", report_modified_time or ""),
+        (
+            "project_folder_url",
+            (parsed.project_folder_url if parsed else "") or "",
+        ),
+        ("lkb_url", (parsed.lkb_url if parsed else "") or ""),
+        (
+            "dissertation_url",
+            (parsed.dissertation_url if parsed else "") or "",
+        ),
+        (
+            "publication_url",
+            (parsed.publication_url if parsed else "") or "",
+        ),
+    ]
+    canonical = "\n".join(f"{k}={v}" for k, v in parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_history_entry(
+    *,
+    report: RowCheckReport,
+    source: str,
+    fingerprint: str,
+) -> RecheckHistoryEntry:
+    """Готовит ``RecheckHistoryEntry`` для append в лист «История проверок»."""
+
+    pages = report.stage4.pages_total
+    sources = report.stage4.sources_count
+    return RecheckHistoryEntry(
+        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        row_number=report.row_number or 0,
+        fio=report.fio or "",
+        source=source,
+        stopped_at=report.stopped_at or "",
+        passed="no" if report.all_issues() else "yes",
+        issues=" | ".join(report.all_issues()),
+        pages_total="" if pages is None else str(pages),
+        sources_count="" if sources is None else str(sources),
+        compliance=compliance_to_text(report.stage4.compliance),
+        fingerprint=fingerprint,
+    )
+
+
+def _resolve_report_file_id(
+    *, report_url: str, drive_service: Any
+) -> str:
+    """ID отчёта в Drive (для запроса ``modifiedTime``).
+
+    Без сети не определишь, поэтому передаём ``drive_service``. Возвращает
+    ``""`` при любой ошибке: тогда modifiedTime в fingerprint попадёт пустой
+    и --only-if-changed просто никогда не сработает по этому полю
+    (но всё ещё сработает по списку URL).
+    """
+
+    if not report_url:
+        return ""
+    try:
+        return resolve_report_google_doc_id(report_url, drive_service=drive_service)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def run_row_check(
     config: BotConfig,
     locator: RowLocator,
     *,
     skip_http: bool = False,
     apply: bool = False,
+    only_if_changed: bool = False,
+    history_source: str = "cli",
 ) -> RowCheckReport:
     """Основной glue: открывает таблицу, подгружает артефакты, запускает пайплайн.
 
-    При ``apply=True`` пишет результаты Stage 2/Stage 3 в лист (колонки
-    J/K/L/M/N/O и флаг ``strikethrough`` для неоткрывающихся ссылок Stage 3).
-    По умолчанию лист не изменяется (dry-run).
+    При ``apply=True`` пишет результаты Stage 2/Stage 3/Stage 4 в лист
+    (колонки J:R с clean-write — старые значения и strikethrough
+    затираются, чтобы re-check корректно отражал свежий результат), а
+    также добавляет одну строку в лист «История проверок» с fingerprint
+    входов (handoff §8 — Stage 4 (c) re-check).
+
+    При ``only_if_changed=True`` сразу после загрузки и парсинга отчёта
+    (но **до** HTTP-пробы Stage 2, mime-prefetch Stage 3 и тяжёлой
+    Stage 4 загрузки диссертации) вычисляется fingerprint текущих
+    входов и сравнивается с последней записью «Истории проверок» по
+    этой строке. Совпадение → возвращается отчёт с ``unchanged=True``,
+    пайплайн не выполняется, в лист и историю ничего не пишется
+    (handoff §8 — diff_detection «без прогона пайплайна»).
+
+    ``history_source`` — что записать в колонку ``source`` истории:
+    ``cli`` (CLI вручную), ``bot`` (магистрант через /recheck).
     """
 
     spreadsheet = get_spreadsheet(config)
@@ -317,11 +442,37 @@ def run_row_check(
         docx_conversion_folder_id=config.docx_conversion_folder_id,
     )
 
+    parsed_report = _try_parse_report(report_document) if report_document else None
+
+    # Re-check (Stage 4 (c)) fingerprint: вход коротко-замыкающего флага
+    # ``--only-if-changed`` (handoff §8). Считаем СРАЗУ после парсинга
+    # отчёта — раньше HTTP-пробы report_url, mime-prefetch и Stage 4
+    # IO, чтобы при совпадении с прошлым прогоном вообще ничего тяжёлого
+    # не делать (короткое замыкание = «без прогона пайплайна»).
+    report_file_id = _resolve_report_file_id(
+        report_url=report_url, drive_service=drive_service
+    )
+    report_modified_time = _get_drive_modified_time(
+        drive_service=drive_service, file_id=report_file_id
+    )
+    fingerprint = _compute_recheck_fingerprint(
+        report_url=report_url,
+        report_modified_time=report_modified_time,
+        parsed=parsed_report,
+    )
+
+    if only_if_changed:
+        last = read_last_recheck_entry(spreadsheet, row_number)
+        if last is not None and last.fingerprint == fingerprint:
+            return RowCheckReport(
+                fio=user.fio or "",
+                row_number=row_number,
+                unchanged=True,
+            )
+
     url_probe: tuple[str, str] | None = None
     if not skip_http and report_url:
         url_probe = check_report_url(report_url)
-
-    parsed_report = _try_parse_report(report_document) if report_document else None
 
     link_accessibility: dict[str, bool] | None = None
     link_mime_types: dict[str, str] | None = None
@@ -394,6 +545,23 @@ def run_row_check(
             stage3_cells=pipeline_report.stage3_cells,
             stage4_cells=pipeline_report.stage4_cells,
         )
+        # Запись в историю — только при реальной записи в лист, чтобы
+        # dry-run не «нагружал» историю шумовыми записями. Источник
+        # (cli/bot) попадает в одноимённую колонку.
+        try:
+            append_recheck_history(
+                spreadsheet,
+                _build_history_entry(
+                    report=pipeline_report,
+                    source=history_source,
+                    fingerprint=fingerprint,
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            # История — вспомогательный артефакт. Если что-то пошло не
+            # так (нет прав на add_worksheet, лимиты Sheets), не валим
+            # основной flow проверки: магистрант увидел результат.
+            pass
 
     return pipeline_report
 
@@ -403,7 +571,21 @@ def format_report(report: RowCheckReport, *, applied: bool = False) -> str:
 
     ``applied=True`` дописывает пометку о том, что результаты этапов 2-4
     записаны в лист; иначе выводит пометку dry-run.
+
+    Если ``report.unchanged`` — короткое замыкание ``--only-if-changed``:
+    выводится одна строка о том, что с прошлого прогона ничего не
+    поменялось и ни лист, ни история не тронуты.
     """
+
+    if report.unchanged:
+        fio = report.fio or "(без ФИО)"
+        row = report.row_number or "?"
+        return (
+            f"Магистрант: {fio}\n"
+            f"Строка: {row}\n\n"
+            "С прошлой проверки входы не менялись (--only-if-changed).\n"
+            "Лист и история проверок не тронуты."
+        )
 
     lines = report.spravka_lines()
     if report.stage3_cells:

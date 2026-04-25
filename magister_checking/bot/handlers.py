@@ -42,6 +42,11 @@ from magister_checking.bot.validation import (
     normalize_text,
 )
 from magister_checking.project_card_pipeline import generate_project_card_pdf
+from magister_checking.row_check_cli import (
+    RowLocator,
+    format_report,
+    run_row_check,
+)
 
 logger = logging.getLogger("magistrcheckbot")
 _REGISTRATION_SHEETS_LOCK = asyncio.Lock()
@@ -658,6 +663,92 @@ async def ask_confirm(
     return ConversationHandler.END
 
 
+RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "diff"}
+"""Ключевые слова, после которых ``/recheck`` работает как ``--only-if-changed``.
+
+По умолчанию ``/recheck`` запускает полный прогон (handoff §8 — diff_detection
+режим «full by default»), но магистрант может написать ``/recheck quick``,
+чтобы получить ответ «без изменений» без повторной нагрузки на Drive."""
+
+
+def _parse_recheck_only_if_changed(message_text: str) -> bool:
+    """Распознаёт ``/recheck quick`` и эквиваленты — handoff §8 ``--only-if-changed``."""
+
+    parts = (message_text or "").strip().split()
+    if len(parts) < 2:
+        return False
+    return parts[1].strip().lower() in RECHECK_QUICK_TOKENS
+
+
+async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда ``/recheck`` — магистрант запускает свою проверку повторно.
+
+    Поиск строки в листе ``Регистрация`` идёт строго по ``telegram_id`` —
+    ФИО как fallback не используем, чтобы случайный однофамилец не мог
+    инициировать перезапись чужой строки. Если ``telegram_id`` не привязан
+    к листу, бот предлагает пройти ``/start``.
+
+    По умолчанию выполняется полный прогон с ``apply=True``: lay результаты
+    в J:R и пишет одну запись в «Историю проверок» с ``source="bot"``.
+    Если магистрант написал ``/recheck quick``, включается короткое
+    замыкание ``only_if_changed=True`` (см. ``RECHECK_QUICK_TOKENS``).
+
+    Тяжёлая часть (Sheets/Drive/Docs IO) уходит в worker-поток, чтобы не
+    блокировать event loop, — стандартный приём бота (``_call_blocking``).
+    """
+
+    if update.message is None or update.effective_user is None:
+        return
+
+    cfg = _bot_config(context)
+    telegram_id = str(update.effective_user.id)
+
+    worksheet = await _call_blocking(get_worksheet, cfg)
+    row_number = await _call_blocking(find_row_by_telegram_id, worksheet, telegram_id)
+    if row_number is None:
+        await update.message.reply_text(
+            "Не нашёл вашу строку в листе «Регистрация».\n\n"
+            "Сначала пройдите регистрацию: /start"
+        )
+        return
+
+    only_if_changed = _parse_recheck_only_if_changed(update.message.text or "")
+    mode_hint = "быстрый режим (только если входы поменялись)" if only_if_changed else "полная проверка"
+    await update.message.reply_text(
+        f"Запускаю повторную проверку вашей строки {row_number}: {mode_hint}.\n"
+        "Это может занять до минуты."
+    )
+
+    locator = RowLocator(row_number=row_number)
+    try:
+        report = await _call_blocking(
+            run_row_check,
+            cfg,
+            locator,
+            skip_http=False,
+            apply=True,
+            only_if_changed=only_if_changed,
+            history_source="bot",
+        )
+    except ValueError as exc:
+        await update.message.reply_text(f"Ошибка: {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Не удалось выполнить /recheck для telegram_id=%s row=%s",
+            telegram_id,
+            row_number,
+        )
+        await update.message.reply_text(
+            "Не удалось выполнить повторную проверку.\n\n"
+            f"Причина: {exc}"
+        )
+        return
+
+    applied_effective = not report.unchanged
+    await update.message.reply_text(format_report(report, applied=applied_effective))
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Команда /cancel: прервать диалог."""
 
@@ -689,6 +780,7 @@ __all__ = [
     "project_card_start",
     "receive_bind_fio",
     "receive_field",
+    "recheck",
     "skip_bind",
     "skip_field",
     "start",

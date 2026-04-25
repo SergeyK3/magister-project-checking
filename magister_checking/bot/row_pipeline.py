@@ -183,6 +183,12 @@ class RowCheckReport:
     stage4: Stage4Result = field(default_factory=Stage4Result)
     stage4_cells: list[Stage4CellUpdate] = field(default_factory=list)
     stopped_at: str | None = None
+    unchanged: bool = False
+    """True, если ``run_row_check(only_if_changed=True)`` обнаружил, что
+    с прошлого прогона ничего не поменялось (fingerprint совпал) и
+    короткое замыкание сработало: пайплайн не выполнялся, в лист и
+    в историю проверок ничего не пишется (handoff §8 — diff_detection
+    force_flag). Для остальных кейсов всегда False."""
 
     def all_issues(self) -> list[str]:
         return [

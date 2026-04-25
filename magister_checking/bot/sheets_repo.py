@@ -15,7 +15,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from magister_checking.bot.config import BotConfig
-from magister_checking.bot.models import SHEET_HEADER, UserForm, compute_fill_status
+from magister_checking.bot.models import SHEET_HEADER, UserForm, effective_fill_status
 from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
 
 _SHEETS_VALUE_INPUT_OPTION = "RAW"
@@ -52,7 +52,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 DASHBOARD_WORKSHEET_NAME = "Dashboard"
 ADMINS_WORKSHEET_NAME = "Администраторы"
 RECHECK_HISTORY_WORKSHEET_NAME = "История проверок"
-_DASHBOARD_RANGE = "A1:B12"
+_DASHBOARD_RANGE = "A1:B16"
 
 
 # Stage 4 (c): схема листа «История проверок». Колонки фиксированы:
@@ -666,7 +666,7 @@ def build_dashboard_rows(registration_worksheet: gspread.Worksheet) -> List[List
     """Строит простую сводку по регистрациям для листа Dashboard."""
 
     users = _iter_users(registration_worksheet)
-    statuses = [compute_fill_status(user).value for user in users]
+    statuses = [effective_fill_status(user).value for user in users]
     total = len(users)
     rows = [
         ["Показатель", "Значение"],
@@ -675,12 +675,15 @@ def build_dashboard_rows(registration_worksheet: gspread.Worksheet) -> List[List
         ["Полностью зарегистрированы", str(sum(status == "REGISTERED" for status in statuses))],
         ["Частично заполнены", str(sum(status == "PARTIAL" for status in statuses))],
         ["Новые / пустые", str(sum(status == "NEW" for status in statuses))],
+        ["Проверка пройдена (OK)", str(sum(status == "OK" for status in statuses))],
+        ["Нужны исправления (NEED_FIX)", str(sum(status == "NEED_FIX" for status in statuses))],
+        ["Ошибка проверки (ERROR)", str(sum(status == "ERROR" for status in statuses))],
         ["Привязаны к Telegram", str(sum(bool((user.telegram_id or "").strip()) for user in users))],
         ["Есть ссылка на отчет", str(sum(bool((user.report_url or "").strip()) for user in users))],
         ["Доступ открыт", str(sum((user.report_url_accessible or "").strip().lower() == "yes" for user in users))],
         ["Доступ не открыт", str(sum((user.report_url_accessible or "").strip().lower() == "no" for user in users))],
     ]
-    while len(rows) < 12:
+    while len(rows) < 16:
         rows.append(["", ""])
     return rows
 
@@ -797,6 +800,7 @@ def apply_row_check_updates(
     report_url_accessible: str | None = None,
     stage3_cells: list[Stage3CellUpdate] | None = None,
     stage4_cells: list[Stage4CellUpdate] | None = None,
+    fill_status: str | None = None,
 ) -> None:
     """Записывает результаты прогона одной строки листа «Регистрация».
 
@@ -821,6 +825,9 @@ def apply_row_check_updates(
     значения и зачёркивания исчезают, если магистрант исправил ссылку.
     Все значения уходят одним ``worksheet.batch_update`` (RAW), форматы —
     одним ``spreadsheet.batch_update`` с ``repeatCell``.
+
+    ``fill_status`` — опционально: код п.12 ТЗ (``OK`` / ``NEED_FIX`` и т.д.);
+    не входит в clean-write Stage 2–4, перезаписывается только если передан.
     """
 
     stage3_cells = list(stage3_cells or [])
@@ -871,6 +878,9 @@ def apply_row_check_updates(
     for cell in stage4_cells:
         _set_value(cell.column_key, cell.value)
 
+    if fill_status is not None:
+        _set_value("fill_status", fill_status)
+
     # Сборка batch — порядок диапазонов идёт по индексу колонки для
     # детерминизма (тесты рассчитывают на стабильный порядок ranges).
     ordered_keys = sorted(
@@ -918,6 +928,21 @@ def apply_row_check_updates(
         spreadsheet = getattr(worksheet, "spreadsheet", None)
         if spreadsheet is not None and hasattr(spreadsheet, "batch_update"):
             spreadsheet.batch_update({"requests": format_requests})
+
+
+def set_row_fill_status(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+    status: str,
+) -> None:
+    """Пишет одну ячейку ``fill_status`` (если столбец есть в заголовке)."""
+
+    field_map = _field_to_column_map(worksheet)
+    col_idx = field_map.get("fill_status")
+    if col_idx is None:
+        return
+    letter = _column_letter(col_idx)
+    _safe_update(worksheet, f"{letter}{row_number}", [[status]])
 
 
 def upsert_user(worksheet: gspread.Worksheet, user: UserForm) -> int:

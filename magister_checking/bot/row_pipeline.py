@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from magister_checking.bot.models import UserForm
+from magister_checking.bot.models import FillStatus, UserForm, compute_fill_status
 from magister_checking.bot.stage_checks import run_stage1_checks
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.drive_urls import DriveUrlKind, classify_drive_url
@@ -573,3 +573,26 @@ def run_row_pipeline(
     report.stage4 = run_stage4(dissertation_metrics=dissertation_metrics)
     report.stage4_cells = build_stage4_cells(report.stage4)
     return report
+
+
+def resolve_fill_status_after_row_check(
+    user_form: UserForm,
+    report: RowCheckReport,
+) -> str | None:
+    """Строка для колонки ``fill_status`` после прогона проверки (п.12 ТЗ).
+
+    ``None`` — не менять ячейку (короткое замыкание ``unchanged``).
+    Для неполной анкеты синхронизируем NEW/PARTIAL; при полной —
+    ``OK`` или ``NEED_FIX`` по результату этапов.
+    """
+
+    if report.unchanged:
+        return None
+
+    base = compute_fill_status(user_form)
+    if base != FillStatus.REGISTERED:
+        return base.value
+
+    if report.all_issues() or report.stopped_at is not None:
+        return FillStatus.NEED_FIX.value
+    return FillStatus.OK.value

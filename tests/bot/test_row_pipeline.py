@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from magister_checking.bot.models import UserForm
+from magister_checking.bot.models import FillStatus, UserForm
 from magister_checking.bot.row_pipeline import (
     COMPLIANCE_TEXT_NO,
     COMPLIANCE_TEXT_UNKNOWN,
@@ -12,9 +12,11 @@ from magister_checking.bot.row_pipeline import (
     DOCX_MIME,
     LINK_MISSING_VALUE,
     PDF_MIME,
+    RowCheckReport,
     Stage4CellUpdate,
     build_stage4_cells,
     compliance_to_text,
+    resolve_fill_status_after_row_check,
     run_row_pipeline,
     run_stage2,
     run_stage3,
@@ -630,6 +632,52 @@ class RunRowPipelineTests(unittest.TestCase):
         self.assertEqual(lines[0], f"Магистрант: {VALID_FIO}")
         self.assertEqual(lines[1], "Строка в листе «Регистрация»: 12")
         self.assertIn(f"- {PHONE_INVALID_MESSAGE}", lines)
+
+
+class ResolveFillStatusAfterRowCheckTests(unittest.TestCase):
+    def _registered_user(self) -> UserForm:
+        return UserForm(
+            fio=VALID_FIO,
+            phone=VALID_PHONE,
+            report_url=REPORT_URL,
+            group_name="М-101",
+            workplace="w",
+            position="p",
+            supervisor="s",
+        )
+
+    def test_unchanged_returns_none(self) -> None:
+        u = self._registered_user()
+        r = RowCheckReport(fio="x", row_number=1, unchanged=True)
+        self.assertIsNone(resolve_fill_status_after_row_check(u, r))
+
+    def test_partial_user_returns_partial(self) -> None:
+        u = UserForm(fio="x")
+        r = RowCheckReport(fio="x", row_number=1)
+        self.assertEqual(
+            resolve_fill_status_after_row_check(u, r), FillStatus.PARTIAL.value
+        )
+
+    def test_registered_no_issues_ok(self) -> None:
+        u = self._registered_user()
+        r = RowCheckReport(fio="x", row_number=1)
+        self.assertEqual(resolve_fill_status_after_row_check(u, r), FillStatus.OK.value)
+
+    def test_registered_with_issues_need_fix(self) -> None:
+        u = self._registered_user()
+        r = RowCheckReport(fio="x", row_number=1)
+        r.stage1.issues.append("bad")
+        self.assertEqual(
+            resolve_fill_status_after_row_check(u, r), FillStatus.NEED_FIX.value
+        )
+
+    def test_registered_stopped_need_fix(self) -> None:
+        u = self._registered_user()
+        r = RowCheckReport(fio="x", row_number=1)
+        r.stopped_at = "stage2"
+        self.assertEqual(
+            resolve_fill_status_after_row_check(u, r), FillStatus.NEED_FIX.value
+        )
 
 
 if __name__ == "__main__":

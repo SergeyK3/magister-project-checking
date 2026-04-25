@@ -25,6 +25,7 @@ from magister_checking.bot.row_pipeline import (
     _LINK_FIELDS,
     _extract_link,
     compliance_to_text,
+    resolve_fill_status_after_row_check,
     run_row_pipeline,
 )
 from magister_checking.bot.sheets_repo import (
@@ -553,6 +554,7 @@ def run_row_check(
     if apply:
         report_url_valid = url_probe[0] if url_probe is not None else None
         report_url_accessible = url_probe[1] if url_probe is not None else None
+        fill_status_update = resolve_fill_status_after_row_check(user, pipeline_report)
         apply_row_check_updates(
             worksheet,
             row_number,
@@ -560,6 +562,7 @@ def run_row_check(
             report_url_accessible=report_url_accessible,
             stage3_cells=pipeline_report.stage3_cells,
             stage4_cells=pipeline_report.stage4_cells,
+            fill_status=fill_status_update,
         )
         # Запись в историю — только при реальной записи в лист, чтобы
         # dry-run не «нагружал» историю шумовыми записями. Источник

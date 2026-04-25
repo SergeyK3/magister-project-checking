@@ -8,11 +8,20 @@ from typing import List, Tuple
 
 
 class FillStatus(str, Enum):
-    """Статусы заполненности анкеты (см. п.12 ТЗ)."""
+    """Рабочие состояния по п.12 ТЗ (tezis v2).
+
+    NEW / PARTIAL / REGISTERED — этап анкеты; OK / NEED_FIX / ERROR — итог
+    или сбой полной проверки строки (после ``check-row`` / ``/recheck``).
+    CHECKING зарезервирован для будущего «проверка выполняется».
+    """
 
     NEW = "NEW"
     PARTIAL = "PARTIAL"
     REGISTERED = "REGISTERED"
+    CHECKING = "CHECKING"
+    NEED_FIX = "NEED_FIX"
+    ERROR = "ERROR"
+    OK = "OK"
 
 
 @dataclass
@@ -92,11 +101,14 @@ def get_missing_field_keys(user: UserForm) -> List[str]:
 
 
 def compute_fill_status(user: UserForm) -> FillStatus:
-    """Считает статус заполненности по правилам п.12 ТЗ.
+    """Считает статус **заполненности анкеты** (без учёта итога проверки).
 
     - NEW — ни одно обязательное поле не заполнено;
     - REGISTERED — все обязательные поля заполнены;
     - PARTIAL — часть обязательных полей заполнена.
+
+    Итоги проверки (OK / NEED_FIX / ERROR) задаются колонкой ``fill_status``
+    в листе и учитываются в :func:`effective_fill_status`.
     """
 
     filled = [bool(getattr(user, name)) for name in REQUIRED_FIELDS]
@@ -105,3 +117,15 @@ def compute_fill_status(user: UserForm) -> FillStatus:
     if all(filled):
         return FillStatus.REGISTERED
     return FillStatus.PARTIAL
+
+
+def effective_fill_status(user: UserForm) -> FillStatus:
+    """Статус для отчётов и Dashboard: ячейка листа, если это код §12, иначе расчёт по анкете."""
+
+    raw = (user.fill_status or "").strip()
+    if raw:
+        try:
+            return FillStatus(raw)
+        except ValueError:
+            pass
+    return compute_fill_status(user)

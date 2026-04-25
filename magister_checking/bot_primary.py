@@ -28,6 +28,7 @@ from magister_checking.bot.models import (
     FillStatus,
     UserForm,
     compute_fill_status,
+    effective_fill_status,
     get_missing_field_keys,
     get_missing_fields,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "cancel",
     "check_report_url",
     "compute_fill_status",
+    "effective_fill_status",
     "configure_logging",
     "ensure_header",
     "find_row_by_telegram_id",

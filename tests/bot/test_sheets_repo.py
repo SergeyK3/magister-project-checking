@@ -557,14 +557,20 @@ class DashboardTests(unittest.TestCase):
         rows = build_dashboard_rows(ws)
 
         self.assertEqual(rows[0], ["Показатель", "Значение"])
+        self.assertEqual(rows[1][0], "Обновлено")
+        self.assertEqual(len(rows[1][1].split()), 2)  # date + time
         self.assertEqual(rows[2], ["Всего регистраций", "3"])
         self.assertEqual(rows[3], ["Полностью зарегистрированы", "1"])
         self.assertEqual(rows[4], ["Частично заполнены", "1"])
         self.assertEqual(rows[5], ["Новые / пустые", "1"])
-        self.assertEqual(rows[6], ["Привязаны к Telegram", "2"])
-        self.assertEqual(rows[7], ["Есть ссылка на отчет", "2"])
-        self.assertEqual(rows[8], ["Доступ открыт", "1"])
-        self.assertEqual(rows[9], ["Доступ не открыт", "1"])
+        self.assertEqual(rows[6], ["Проверка пройдена (OK)", "0"])
+        self.assertEqual(rows[7], ["Нужны исправления (NEED_FIX)", "0"])
+        self.assertEqual(rows[8], ["Ошибка проверки (ERROR)", "0"])
+        self.assertEqual(rows[9], ["Привязаны к Telegram", "2"])
+        self.assertEqual(rows[10], ["Есть ссылка на отчет", "2"])
+        self.assertEqual(rows[11], ["Доступ открыт", "1"])
+        self.assertEqual(rows[12], ["Доступ не открыт", "1"])
+        self.assertEqual(len(rows), 16)
 
     def test_get_or_create_worksheet_creates_missing_dashboard_sheet(self) -> None:
         spreadsheet = FakeSpreadsheet()

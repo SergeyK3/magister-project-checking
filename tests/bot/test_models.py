@@ -11,6 +11,7 @@ from magister_checking.bot.models import (
     FillStatus,
     UserForm,
     compute_fill_status,
+    effective_fill_status,
     get_missing_field_keys,
     get_missing_fields,
 )
@@ -66,6 +67,18 @@ class FillStatusTests(unittest.TestCase):
     def test_telegram_fields_do_not_affect_status(self) -> None:
         form = UserForm(telegram_id="123", telegram_username="abc")
         self.assertEqual(compute_fill_status(form), FillStatus.NEW)
+
+
+class EffectiveFillStatusTests(unittest.TestCase):
+    def test_uses_sheet_cell_when_valid_code(self) -> None:
+        form = _full_form()
+        form.fill_status = "OK"
+        self.assertEqual(effective_fill_status(form), FillStatus.OK)
+
+    def test_falls_back_to_compute_when_cell_unknown(self) -> None:
+        form = _full_form()
+        form.fill_status = "legacy_custom"
+        self.assertEqual(effective_fill_status(form), FillStatus.REGISTERED)
 
 
 class MissingFieldsTests(unittest.TestCase):

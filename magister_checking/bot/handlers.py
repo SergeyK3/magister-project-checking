@@ -24,6 +24,7 @@ from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import (
     FIELD_LABELS,
     FIELD_PROMPTS,
+    FillStatus,
     REQUIRED_FIELDS,
     SHEET_HEADER,
     UserForm,
@@ -41,6 +42,7 @@ from magister_checking.bot.sheets_repo import (
     is_admin_telegram_id,
     load_row_values,
     load_user,
+    set_row_fill_status,
     sync_registration_dashboard,
     upsert_user,
     upsert_user_with_extras,
@@ -178,7 +180,31 @@ def _record_action(user_form: UserForm, action: str) -> None:
 
 
 def _refresh_status(user_form: UserForm) -> None:
-    user_form.fill_status = compute_fill_status(user_form).value
+    """Обновляет ``fill_status`` в памяти: анкета и сохранённые итоги проверки §12."""
+
+    base = compute_fill_status(user_form)
+    raw = (user_form.fill_status or "").strip()
+    try:
+        current_enum = FillStatus(raw) if raw else None
+    except ValueError:
+        current_enum = None
+
+    post_check = {
+        FillStatus.OK,
+        FillStatus.NEED_FIX,
+        FillStatus.ERROR,
+        FillStatus.CHECKING,
+    }
+
+    if base in (FillStatus.NEW, FillStatus.PARTIAL):
+        user_form.fill_status = base.value
+        return
+
+    if current_enum in post_check:
+        user_form.fill_status = current_enum.value
+        return
+
+    user_form.fill_status = FillStatus.REGISTERED.value
 
 
 def _summary_text(user_form: UserForm) -> str:
@@ -751,6 +777,23 @@ def build_recheck_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+async def _try_mark_recheck_error(cfg: BotConfig, row_number: int) -> None:
+    """После сбоя ``/recheck`` помечает строку ``ERROR`` (п.12 ТЗ), если колонка есть."""
+
+    try:
+        worksheet = await _call_blocking(get_worksheet, cfg)
+        await _call_blocking(
+            set_row_fill_status,
+            worksheet,
+            row_number,
+            FillStatus.ERROR.value,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Не удалось записать fill_status=ERROR для строки %s", row_number
+        )
+
+
 async def _send_recheck_reply(
     update: Update,
     text: str,
@@ -835,6 +878,7 @@ async def _do_recheck(
             history_source="bot",
         )
     except ValueError as exc:
+        await _try_mark_recheck_error(cfg, row_number)
         await _send_recheck_reply(
             update,
             f"Ошибка: {exc}",
@@ -847,6 +891,7 @@ async def _do_recheck(
             telegram_id,
             row_number,
         )
+        await _try_mark_recheck_error(cfg, row_number)
         await _send_recheck_reply(
             update,
             "Не удалось выполнить повторную проверку.\n\n"

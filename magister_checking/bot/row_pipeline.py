@@ -15,6 +15,10 @@ from magister_checking.bot.models import FillStatus, UserForm, compute_fill_stat
 from magister_checking.bot.stage_checks import run_stage1_checks
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.drive_urls import DriveUrlKind, classify_drive_url
+from magister_checking.formatting_rules import (
+    FormattingRules,
+    evaluate_formatting_compliance,
+)
 from magister_checking.report_parser import ParsedReport
 
 
@@ -168,6 +172,16 @@ class Stage4Result:
     sources_count: int | None = None
     compliance: bool | None = None
     skipped_reason: str | None = None
+    compliance_text: str | None = None
+    """Подробный текст «Найдено / Нужно» для cell листа и Telegram
+    (handoff §formatting v2 — full_in_same_cell).
+
+    Заполняется, только если в ``run_stage4`` передан ``formatting_rules``.
+    Если ``None`` — caller использует короткое «соответствует / не
+    соответствует / —» через ``compliance_to_text(compliance)``.
+    Это сделано для обратной совместимости со старыми тестами и
+    code-paths без правил.
+    """
 
 
 @dataclass
@@ -443,6 +457,7 @@ def _resolve_pages_total(metrics: DissertationMetrics) -> int | None:
 def run_stage4(
     *,
     dissertation_metrics: DissertationMetrics | None,
+    formatting_rules: FormattingRules | None = None,
 ) -> Stage4Result:
     """Содержательный разбор диссертации (п.9.4 ТЗ, handoff §3-§4).
 
@@ -455,8 +470,19 @@ def run_stage4(
         не пишем в лист.
       - метрики получены → ``executed=True``, ``passed=True`` (warning-
         модель), значения ``pages_total/sources_count/compliance``
-        переносятся в результат как есть; для ``compliance is False``
-        в ``issues`` добавляется одно сообщение с деталями.
+        переносятся в результат.
+
+    Compliance:
+      - Если ``formatting_rules`` передан (handoff §formatting v2): итог
+        вычисляется ``evaluate_formatting_compliance(metrics, rules)``,
+        в ``compliance_text`` сохраняется подробный «Найдено / Нужно»
+        для cell и Telegram (full_in_same_cell). При несоответствии в
+        ``issues`` идёт ровно тот же текст.
+      - Без ``formatting_rules`` — fallback на ``metrics.formatting_compliance``
+        (только три ratio TNR/14pt/single, без полей и нумерации); в
+        ``issues`` уходит короткое «оформление не соответствует …».
+        Этот режим оставлен для обратной совместимости с тестами,
+        которые передают metrics-ручки без полей/нумерации.
 
     Caller обязан вызывать этот этап только после успешной Stage 3
     (диссертация — Google Doc или .docx и доступна). Пайплайн делает
@@ -473,10 +499,17 @@ def run_stage4(
     result.executed = True
     result.pages_total = _resolve_pages_total(dissertation_metrics)
     result.sources_count = dissertation_metrics.sources_count
-    result.compliance = dissertation_metrics.formatting_compliance
 
-    if dissertation_metrics.formatting_compliance is False:
-        result.issues.append(_format_compliance_issue(dissertation_metrics))
+    if formatting_rules is not None:
+        report = evaluate_formatting_compliance(dissertation_metrics, formatting_rules)
+        result.compliance = report.compliance
+        result.compliance_text = report.text
+        if report.compliance is False:
+            result.issues.append(report.text)
+    else:
+        result.compliance = dissertation_metrics.formatting_compliance
+        if dissertation_metrics.formatting_compliance is False:
+            result.issues.append(_format_compliance_issue(dissertation_metrics))
 
     # Warning-модель (handoff §8.3): сам факт получения метрик == passed.
     # Несоответствие оформлению — это warning, а не блокер.
@@ -499,12 +532,15 @@ def build_stage4_cells(stage4: Stage4Result) -> list[Stage4CellUpdate]:
     sources_value = (
         str(stage4.sources_count) if stage4.sources_count is not None else ""
     )
+    compliance_value = (
+        stage4.compliance_text
+        if stage4.compliance_text is not None
+        else compliance_to_text(stage4.compliance)
+    )
     return [
         Stage4CellUpdate(column_key="pages_total", value=pages_value),
         Stage4CellUpdate(column_key="sources_count", value=sources_value),
-        Stage4CellUpdate(
-            column_key="compliance", value=compliance_to_text(stage4.compliance)
-        ),
+        Stage4CellUpdate(column_key="compliance", value=compliance_value),
     ]
 
 
@@ -517,6 +553,7 @@ def run_row_pipeline(
     link_accessibility: dict[str, bool] | None = None,
     link_mime_types: dict[str, str] | None = None,
     dissertation_metrics: DissertationMetrics | None = None,
+    formatting_rules: FormattingRules | None = None,
     row_number: int | None = None,
 ) -> RowCheckReport:
     """Пропускает строку через этапы 1-4.
@@ -570,7 +607,10 @@ def run_row_pipeline(
         report.stopped_at = "stage3"
         return report
 
-    report.stage4 = run_stage4(dissertation_metrics=dissertation_metrics)
+    report.stage4 = run_stage4(
+        dissertation_metrics=dissertation_metrics,
+        formatting_rules=formatting_rules,
+    )
     report.stage4_cells = build_stage4_cells(report.stage4)
     return report
 

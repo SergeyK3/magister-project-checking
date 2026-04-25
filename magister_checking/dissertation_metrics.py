@@ -50,6 +50,37 @@ class DissertationMetrics:
     single_spacing_ratio: float | None
     headings_found: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    page_margins_cm: dict[str, float] | None = None
+    """Поля «доминирующей» секции (top/bottom/left/right в см).
+
+    Для DOCX — мода ``<w:pgMar>`` по всем ``<w:sectPr>`` в порядке
+    конверсии twips ÷ 567. Для Google Doc — ``documentStyle.margin*`` (pt → см).
+    ``None`` — поля не извлечены (нет ``sectPr`` / нестандартный API).
+    """
+    page_margins_secondary_cm: list[dict[str, float]] = field(default_factory=list)
+    """Прочие комбинации полей, встретившиеся в документе (без основной).
+
+    У Камзебаевой 7 секций имеют (1.83/2.12/1.75/0.75), 1 — (1.83/0.49/1.75/0.75)
+    (титул), 1 — (2.5/2.12/1.75/0.75) (приложения). В ``page_margins_cm`` уйдёт
+    мода, в ``secondary`` — оставшиеся две — для отчёта «у вас N секций
+    с другими полями».
+    """
+    page_numbering_present: bool | None = None
+    """True, если в документе обнаружено поле PAGE в footer-е, привязанном
+    к большинству секций (или в основной body-final ``sectPr``).
+
+    False — нумерации фактически нет (footer без PAGE, либо PAGE в footer-е,
+    привязанном лишь к малой части секций — реальный кейс Камзебаевой:
+    1 из 9 sectPr).
+    None — не определено (например, у Google Doc API нет поля footers).
+    """
+    page_numbering_position: str | None = None
+    """Положение номера страницы: 'bottom-left' / 'bottom-center' / 'bottom-right'
+    / 'top-...' / None (если PAGE есть, но позиция не определена)."""
+    page_numbering_sections_with_footer: int | None = None
+    """Кол-во ``<w:sectPr>`` с явным footerReference (DOCX). Для Google Doc — None."""
+    page_numbering_sections_total: int | None = None
+    """Всего ``<w:sectPr>`` в документе (DOCX). Для Google Doc — None."""
 
 
 def iter_heading_texts(document: dict[str, Any]) -> Iterator[str]:
@@ -180,6 +211,156 @@ def _google_effective_paragraph_style(
     return base
 
 
+def _gdoc_dimension_to_cm(dim: dict[str, Any] | None) -> float | None:
+    """Google Docs Dimension {'magnitude': float, 'unit': 'PT'} → см.
+
+    API Google Docs всегда отдаёт margins в pt (см. v1 docs §Dimension).
+    Если ``unit`` отсутствует или не PT — отдаём None, чтобы вызывающий
+    мог корректно сказать «не определено», а не давать вводящие в
+    заблуждение цифры.
+    """
+
+    if not dim:
+        return None
+    if dim.get("unit") not in (None, "PT"):
+        return None
+    return _pt_to_cm(dim.get("magnitude"))
+
+
+def _gdoc_collect_section_margins(document: dict[str, Any]) -> list[dict[str, float]]:
+    """Список ``{top,bottom,left,right}`` (см) по всем секциям Google Doc.
+
+    Google Doc хранит margins в двух местах:
+    - ``document.documentStyle.margin{Top,Bottom,Left,Right}`` — дефолт.
+    - В ``content[].sectionBreak.sectionStyle.margin{Top,Bottom,Left,Right}``
+      — переопределение для секции, начинающейся с этого ``SectionBreak``.
+
+    По спецификации API: первая секция использует ``documentStyle``
+    как дефолт; ``sectionStyle`` секции после ``SectionBreak``
+    переопределяет дефолт. Возвращаем все встретившиеся комбинации
+    (включая дефолт), порядок — как в документе.
+    """
+
+    out: list[dict[str, float]] = []
+    keys = ("Top", "Bottom", "Left", "Right")
+
+    def _collect(style: dict[str, Any] | None) -> dict[str, float] | None:
+        if not style:
+            return None
+        margins: dict[str, float] = {}
+        for k in keys:
+            cm = _gdoc_dimension_to_cm(style.get(f"margin{k}"))
+            if cm is not None:
+                margins[k.lower()] = cm
+        if {"top", "bottom", "left", "right"}.issubset(margins.keys()):
+            return margins
+        return None
+
+    default = _collect(document.get("documentStyle"))
+    if default is not None:
+        out.append(default)
+
+    for chunk in document.get("body", {}).get("content", []) or []:
+        sb = chunk.get("sectionBreak") if isinstance(chunk, dict) else None
+        if not sb:
+            continue
+        sec_style = sb.get("sectionStyle")
+        m = _collect(sec_style)
+        if m is not None:
+            out.append(m)
+
+    return out
+
+
+def _gdoc_iter_footer_paragraphs(footer: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    for chunk in footer.get("content", []) or []:
+        para = chunk.get("paragraph") if isinstance(chunk, dict) else None
+        if isinstance(para, dict):
+            yield para
+
+
+def _gdoc_paragraph_alignment_to_position(alignment: str | None) -> str | None:
+    """Google Doc ``paragraphStyle.alignment`` → 'left'/'center'/'right'.
+
+    Возможные значения по API: ``START`` (left для LTR), ``CENTER``,
+    ``END`` (right для LTR), ``JUSTIFIED``, ``ALIGNMENT_UNSPECIFIED``.
+    Магистерские проекты у нас LTR (русский/казахский), так что
+    START/END однозначно мапятся на left/right.
+    """
+
+    if not alignment:
+        return None
+    a = alignment.upper()
+    if a in {"START", "ALIGNMENT_UNSPECIFIED"}:
+        return "left"
+    if a == "CENTER":
+        return "center"
+    if a == "END":
+        return "right"
+    if a == "JUSTIFIED":
+        return "left"
+    return None
+
+
+def _gdoc_page_numbering_info(document: dict[str, Any]) -> dict[str, Any]:
+    """Информация о нумерации страниц в Google Doc (через Docs API).
+
+    Логика:
+    - Перебираем ``document.footers`` (dict ``footerId -> Footer``).
+    - В каждом footer ищем абзац, элементы которого содержат
+      ``autoText.type == 'PAGE_NUMBER'``.
+    - ``present = True`` если найден хотя бы один такой абзац.
+    - ``position`` = ``bottom-{horizontal}`` по ``paragraphStyle.alignment``
+      первого подходящего абзаца.
+
+    У Google Doc нет аналога DOCX-секций с покрытием, поэтому
+    ``sections_with_footer`` / ``sections_total`` всегда None — coverage-
+    warning не генерируется (для GDoc это не имеет смысла, нумерация
+    либо есть, либо нет, без частичности по разделам).
+    """
+
+    footers = document.get("footers") or {}
+    if not isinstance(footers, dict) or not footers:
+        return {
+            "present": False,
+            "position": None,
+            "sections_with_footer": None,
+            "sections_total": None,
+        }
+
+    for footer in footers.values():
+        if not isinstance(footer, dict):
+            continue
+        for para in _gdoc_iter_footer_paragraphs(footer):
+            elements = para.get("elements") or []
+            has_page = False
+            for el in elements:
+                if not isinstance(el, dict):
+                    continue
+                auto = el.get("autoText") or {}
+                if auto.get("type") == "PAGE_NUMBER":
+                    has_page = True
+                    break
+            if not has_page:
+                continue
+            alignment = (para.get("paragraphStyle") or {}).get("alignment")
+            horizontal = _gdoc_paragraph_alignment_to_position(alignment)
+            position = f"bottom-{horizontal}" if horizontal else None
+            return {
+                "present": True,
+                "position": position,
+                "sections_with_footer": None,
+                "sections_total": None,
+            }
+
+    return {
+        "present": False,
+        "position": None,
+        "sections_with_footer": None,
+        "sections_total": None,
+    }
+
+
 def _analyze_google_doc_formatting(document: dict[str, Any]) -> tuple[bool | None, float | None, float | None, float | None]:
     named_styles = _google_named_styles(document)
     total_chars = 0
@@ -257,6 +438,32 @@ def _docx_plain_text_all_paragraphs(doc: Any) -> str:
 
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+# 1 cm = 567 twips ровно (Word/OOXML — 1440 twips/inch, 2.54 cm/inch).
+_TWIPS_PER_CM = 567.0
+# 1 cm = 28.3464567 pt (72 pt/inch ÷ 2.54 cm/inch). Для Google Doc API
+# (DocumentStyle.margin* — Dimension с ``unit='PT'``).
+_PT_PER_CM = 28.3464567
+
+
+def _twips_to_cm(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(int(value) / _TWIPS_PER_CM, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pt_to_cm(magnitude: float | int | None) -> float | None:
+    if magnitude is None:
+        return None
+    try:
+        return round(float(magnitude) / _PT_PER_CM, 2)
+    except (TypeError, ValueError):
+        return None
 
 
 def _docx_paragraph_numpr(paragraph: Any) -> tuple[str, str] | None:
@@ -490,6 +697,284 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
     return best
 
 
+def _docx_collect_section_margins(doc: Any) -> list[dict[str, float]]:
+    """Список ``{'top','bottom','left','right'}`` в см по всем ``<w:sectPr>``.
+
+    Для каждой секции читает ``<w:pgMar>`` и конвертирует twips → см
+    через ``_TWIPS_PER_CM`` (567 ровно). Секции без ``pgMar`` пропускает.
+    Порядок результата соответствует порядку секций в документе (это
+    нужно для последующего multi-section diagnose).
+    """
+
+    body_elem = getattr(getattr(doc, "element", None), "body", None)
+    if body_elem is None:
+        return []
+    out: list[dict[str, float]] = []
+    for sectpr in body_elem.iter(f"{_W_NS}sectPr"):
+        pgmar = sectpr.find(f"{_W_NS}pgMar")
+        if pgmar is None:
+            continue
+        margins: dict[str, float] = {}
+        for key in ("top", "bottom", "left", "right"):
+            cm = _twips_to_cm(pgmar.get(f"{_W_NS}{key}"))
+            if cm is not None:
+                margins[key] = cm
+        if {"top", "bottom", "left", "right"}.issubset(margins.keys()):
+            out.append(margins)
+    return out
+
+
+def _dominant_margins(
+    margins_list: list[dict[str, float]],
+) -> tuple[dict[str, float] | None, list[dict[str, float]]]:
+    """Возвращает ``(мода, остальные уникальные комбинации)``.
+
+    Если все секции одинаковые → ``(margins, [])``. Если есть несколько
+    групп → берётся самая частая (мода); при ничьей — первая встретившаяся
+    (детерминизм для тестов). Остальные уникальные комбинации (без моды)
+    идут в ``secondary``, чтобы caller мог сообщить «у вас N секций
+    с другими полями».
+    """
+
+    if not margins_list:
+        return None, []
+    keys = ("top", "bottom", "left", "right")
+    counts: dict[tuple[float, ...], int] = {}
+    order: list[tuple[float, ...]] = []
+    for m in margins_list:
+        key = tuple(m[k] for k in keys)
+        if key not in counts:
+            counts[key] = 0
+            order.append(key)
+        counts[key] += 1
+    best_key = max(order, key=lambda k: counts[k])
+    dominant = {k: v for k, v in zip(keys, best_key)}
+    secondary = [
+        {k: v for k, v in zip(keys, key)}
+        for key in order
+        if key != best_key
+    ]
+    return dominant, secondary
+
+
+def _docx_footer_alignment_for_page_field(
+    docx_bytes: bytes,
+    footer_target: str,
+) -> str | None:
+    """Эффективное выравнивание абзаца с PAGE-полем в footer-файле.
+
+    Читает ``word/<footer_target>``. Из всех ``<w:p>`` берёт первый,
+    у которого есть ``<w:instrText>PAGE</w:instrText>`` или
+    ``<w:fldSimple w:instr="PAGE"/>``. Возвращает ``<w:jc w:val="..."/>``
+    напрямую из ``pPr`` (если задан) либо из применённого ``pStyle``
+    (через ``word/styles.xml``). Если ничего не задано — возвращает
+    ``'left'`` (дефолт OOXML).
+
+    ``None`` — если footer-файла нет или PAGE-поля в нём нет.
+    """
+
+    import io as _io
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(_io.BytesIO(docx_bytes)) as zf:
+            footer_path = f"word/{footer_target}"
+            if footer_path not in zf.namelist():
+                return None
+            footer_xml = zf.read(footer_path)
+            try:
+                styles_xml = zf.read("word/styles.xml")
+            except KeyError:
+                styles_xml = None
+    except (zipfile.BadZipFile, KeyError):
+        return None
+
+    from xml.etree import ElementTree as ET
+
+    style_jc: dict[str, str] = {}
+    if styles_xml is not None:
+        try:
+            sroot = ET.fromstring(styles_xml)
+        except ET.ParseError:
+            sroot = None
+        if sroot is not None:
+            for st in sroot.findall(f"{_W_NS}style"):
+                sid = st.get(f"{_W_NS}styleId") or ""
+                ppr = st.find(f"{_W_NS}pPr")
+                if ppr is None:
+                    continue
+                jc_el = ppr.find(f"{_W_NS}jc")
+                if jc_el is not None:
+                    val = jc_el.get(f"{_W_NS}val")
+                    if val:
+                        style_jc[sid] = val
+
+    try:
+        froot = ET.fromstring(footer_xml)
+    except ET.ParseError:
+        return None
+    for p in froot.iter(f"{_W_NS}p"):
+        instr_texts = [
+            (t.text or "").strip().upper()
+            for t in p.iter(f"{_W_NS}instrText")
+        ]
+        simples = [
+            (fs.get(f"{_W_NS}instr") or "").strip().upper()
+            for fs in p.iter(f"{_W_NS}fldSimple")
+        ]
+        has_page = any("PAGE" in s for s in instr_texts) or any(
+            "PAGE" in s for s in simples
+        )
+        if not has_page:
+            continue
+        ppr = p.find(f"{_W_NS}pPr")
+        if ppr is not None:
+            jc_el = ppr.find(f"{_W_NS}jc")
+            if jc_el is not None:
+                val = jc_el.get(f"{_W_NS}val")
+                if val:
+                    return val.lower()
+            ps_el = ppr.find(f"{_W_NS}pStyle")
+            if ps_el is not None:
+                pstyle = ps_el.get(f"{_W_NS}val") or ""
+                if pstyle in style_jc:
+                    return style_jc[pstyle].lower()
+        return "left"
+    return None
+
+
+def _jc_to_horizontal(jc: str | None) -> str | None:
+    """OOXML ``<w:jc>`` → 'left' / 'center' / 'right' для отчёта.
+
+    Принимаются исторические синонимы: ``start``=left, ``end``=right
+    (LTR-документы; для RTL были бы наоборот, но магистерские проекты
+    у нас на русском/казахском — оба LTR).
+    """
+
+    if not jc:
+        return None
+    j = jc.lower()
+    if j in {"left", "start"}:
+        return "left"
+    if j in {"right", "end"}:
+        return "right"
+    if j in {"center", "centre"}:
+        return "center"
+    if j == "both":
+        return "left"
+    return None
+
+
+def _docx_page_numbering_info(doc: Any, docx_bytes: bytes) -> dict[str, Any]:
+    """Информация о нумерации страниц в DOCX.
+
+    Алгоритм:
+    1. Перебираем все ``<w:sectPr>``. Для каждой считаем
+       ``<w:footerReference>`` (любого типа: default/first/even).
+    2. Для секций с footerReference запоминаем ``r:id`` → разрешаем в
+       ``word/_rels/document.xml.rels`` → ``footerN.xml``.
+    3. Для каждого footer-файла проверяем наличие ``<w:instrText>PAGE</w:instrText>``
+       (или ``<w:fldSimple w:instr="PAGE"/>``) и берём выравнивание.
+    4. ``present = True`` если хотя бы один footer с PAGE привязан к более
+       чем половине секций (или к единственной final-body секции).
+       Иначе ``False`` — это случай Камзебаевой (1 sectPr с footer из 9).
+    5. ``position`` — направление выравнивания PAGE-абзаца (``bottom-...``
+       т.к. footer всегда внизу страницы; ``header_*`` отдельно не
+       поддерживаем — у методички номер всегда внизу).
+
+    Возвращает dict с ключами ``present``, ``position``,
+    ``sections_with_footer``, ``sections_total``.
+    """
+
+    body_elem = getattr(getattr(doc, "element", None), "body", None)
+    if body_elem is None:
+        return {
+            "present": None,
+            "position": None,
+            "sections_with_footer": None,
+            "sections_total": None,
+        }
+
+    rels_map: dict[str, str] = {}
+    import io as _io
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    try:
+        with zipfile.ZipFile(_io.BytesIO(docx_bytes)) as zf:
+            try:
+                rels_xml = zf.read("word/_rels/document.xml.rels")
+            except KeyError:
+                rels_xml = None
+    except zipfile.BadZipFile:
+        rels_xml = None
+    if rels_xml is not None:
+        try:
+            rroot = ET.fromstring(rels_xml)
+            for rel in rroot.findall(f"{_PKG_REL_NS}Relationship"):
+                rid = rel.get("Id") or ""
+                target = rel.get("Target") or ""
+                rtype = rel.get("Type") or ""
+                if "footer" in rtype.lower() and rid and target:
+                    rels_map[rid] = target
+        except ET.ParseError:
+            pass
+
+    sections_total = 0
+    sections_with_footer = 0
+    page_alignments: list[str] = []
+    for sectpr in body_elem.iter(f"{_W_NS}sectPr"):
+        sections_total += 1
+        refs = sectpr.findall(f"{_W_NS}footerReference")
+        if not refs:
+            continue
+        sections_with_footer += 1
+        for ref in refs:
+            rid = ref.get(f"{_R_NS}id")
+            if not rid:
+                continue
+            target = rels_map.get(rid)
+            if not target:
+                continue
+            align = _docx_footer_alignment_for_page_field(docx_bytes, target)
+            if align is not None:
+                page_alignments.append(align)
+
+    if sections_total == 0:
+        return {
+            "present": None,
+            "position": None,
+            "sections_with_footer": 0,
+            "sections_total": 0,
+        }
+
+    # Решение от 25.04.2026 (handoff §formatting_compliance): coverage сам по
+    # себе — ненадёжный сигнал. У Мараджаповой 3/7 sectPr с явным
+    # footerReference, и в Google Docs нумерация ВИДНА на каждой (наследует
+    # default-footer). У Камзебаевой 1/9, и Google Docs нумерацию не
+    # наследует — на большинстве страниц её визуально нет. По XML отличить
+    # эти два случая надёжно нельзя. Поэтому ``present`` = «PAGE-поле есть
+    # хотя бы в одном footer-файле, и хотя бы один sectPr явно указывает
+    # footerReference». Coverage идёт в отчёт как warning, не блокирует.
+    has_any_page = bool(page_alignments)
+    present = bool(has_any_page and sections_with_footer > 0)
+
+    position: str | None = None
+    if page_alignments:
+        # Берём первое успешное выравнивание (детерминизм для тестов;
+        # на одном документе обычно все footer-PAGE одинаково выровнены).
+        horizontal = _jc_to_horizontal(page_alignments[0])
+        if horizontal is not None:
+            position = f"bottom-{horizontal}"
+
+    return {
+        "present": present,
+        "position": position,
+        "sections_with_footer": sections_with_footer,
+        "sections_total": sections_total,
+    }
+
+
 def _docx_font_size_pt(run: Any, paragraph: Any, document: Any) -> float | None:
     normal_style = document.styles["Normal"] if "Normal" in document.styles else None
     candidates = [
@@ -611,6 +1096,10 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     if formatting_compliance is None:
         notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
+    margins_list = _gdoc_collect_section_margins(document)
+    page_margins, page_margins_secondary = _dominant_margins(margins_list)
+    numbering_info = _gdoc_page_numbering_info(document)
+
     return DissertationMetrics(
         approx_pages=pages,
         pdf_pages=None,
@@ -626,6 +1115,12 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
         single_spacing_ratio=line_spacing_ratio,
         headings_found=headings[:30],
         notes=notes,
+        page_margins_cm=page_margins,
+        page_margins_secondary_cm=page_margins_secondary,
+        page_numbering_present=numbering_info.get("present"),
+        page_numbering_position=numbering_info.get("position"),
+        page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
+        page_numbering_sections_total=numbering_info.get("sections_total"),
     )
 
 
@@ -1015,6 +1510,10 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
     if formatting_compliance is None:
         notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
+    margins_list = _docx_collect_section_margins(doc)
+    page_margins, page_margins_secondary = _dominant_margins(margins_list)
+    numbering_info = _docx_page_numbering_info(doc, docx_bytes)
+
     return DissertationMetrics(
         approx_pages=approx_pages,
         pdf_pages=None,
@@ -1030,6 +1529,12 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         single_spacing_ratio=line_spacing_ratio,
         headings_found=headings[:30],
         notes=notes,
+        page_margins_cm=page_margins,
+        page_margins_secondary_cm=page_margins_secondary,
+        page_numbering_present=numbering_info.get("present"),
+        page_numbering_position=numbering_info.get("position"),
+        page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
+        page_numbering_sections_total=numbering_info.get("sections_total"),
     )
 
 

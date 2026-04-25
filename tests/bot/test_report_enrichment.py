@@ -113,8 +113,10 @@ class BuildSheetEnrichmentTests(unittest.TestCase):
         self.assertEqual(result["sources_count"], "2")
         self.assertEqual(result["compliance"], "Соответствует")
         self.assertEqual(result["publication_url"], URL_MISSING)
+        # У ``_dissertation_doc()`` нет ни «На тему», ни Heading 1 — тема пустая;
+        # текст русский, поэтому язык должен определиться как «русский».
         self.assertEqual(result["dissertation_title"], "")
-        self.assertEqual(result["dissertation_language"], "")
+        self.assertEqual(result["dissertation_language"], "русский")
 
 
 def _run_enrichment_with_parsed(
@@ -158,6 +160,106 @@ def _parsed(**overrides: object) -> ParsedReport:
     }
     defaults.update(overrides)
     return ParsedReport(**defaults)  # type: ignore[arg-type]
+
+
+class DissertationMetaInEnrichmentTests(unittest.TestCase):
+    """Поведение интеграции ``dissertation_meta`` в ``build_sheet_enrichment``.
+
+    Проверяем оба источника темы/языка (Google Doc) и факт того, что
+    результаты эвристик действительно проникают в выходной dict.
+    """
+
+    def _doc_with_topic(self, *, topic_paragraph: str, language_text: str) -> dict:
+        return {
+            "namedStyles": {
+                "styles": [
+                    {
+                        "namedStyleType": "NORMAL_TEXT",
+                        "textStyle": {
+                            "weightedFontFamily": {"fontFamily": "Times New Roman"},
+                            "fontSize": {"magnitude": 14, "unit": "PT"},
+                        },
+                        "paragraphStyle": {"lineSpacing": 100.0},
+                    }
+                ]
+            },
+            "body": {
+                "content": [
+                    _paragraph("Магистерская диссертация\n"),
+                    _paragraph(topic_paragraph + "\n"),
+                    _paragraph(language_text + "\n"),
+                ]
+            },
+        }
+
+    def _run(self, diss_doc: dict) -> dict[str, str]:
+        config = MagicMock()
+        user_form = UserForm(report_url="https://docs.google.com/document/d/report/edit")
+        parsed = ParsedReport(
+            lkb_status="да",
+            lkb_url=None,
+            dissertation_url="https://docs.google.com/document/d/diss/edit",
+            review_article_url=None,
+            review_article_note="",
+            results_article_url=None,
+        )
+        docs_service = MagicMock()
+        report_req = MagicMock()
+        report_req.execute.return_value = {"body": {"content": []}}
+        diss_req = MagicMock()
+        diss_req.execute.return_value = diss_doc
+        docs_service.documents.return_value.get.side_effect = [report_req, diss_req]
+        drive_service = MagicMock()
+
+        with patch(
+            "magister_checking.bot.report_enrichment._service_account_credentials",
+            return_value=MagicMock(),
+        ), patch(
+            "magister_checking.bot.report_enrichment.build",
+            side_effect=[docs_service, drive_service],
+        ), patch(
+            "magister_checking.bot.report_enrichment.resolve_report_google_doc_id",
+            return_value="report-id",
+        ), patch(
+            "magister_checking.bot.report_enrichment.parse_intermediate_report",
+            return_value=parsed,
+        ), patch(
+            "magister_checking.bot.report_enrichment.count_pdf_pages_via_drive_export",
+            return_value=42,
+        ):
+            return build_sheet_enrichment(config, user_form)
+
+    def test_russian_topic_and_language(self) -> None:
+        doc = self._doc_with_topic(
+            topic_paragraph="На тему: Применение машинного обучения в медицине",
+            language_text=(
+                "Введение\n"
+                + "Настоящая работа посвящена изучению методов обработки данных. " * 80
+            ),
+        )
+        result = self._run(doc)
+        self.assertEqual(
+            result["dissertation_title"],
+            "Применение машинного обучения в медицине",
+        )
+        self.assertEqual(result["dissertation_language"], "русский")
+
+    def test_kazakh_language_via_intro(self) -> None:
+        doc = self._doc_with_topic(
+            topic_paragraph="На тему: Қазақ тіліндегі мәтінді жіктеу",
+            language_text=(
+                "Кіріспе\n"
+                + (
+                    "Қазіргі таңда үлкен деректерді өңдеу мәселелері өте өзекті "
+                    "болып табылады, әңғқөұүһі жұмыста зерттеледі. "
+                ) * 50
+            ),
+        )
+        result = self._run(doc)
+        self.assertEqual(
+            result["dissertation_title"], "Қазақ тіліндегі мәтінді жіктеу"
+        )
+        self.assertEqual(result["dissertation_language"], "казахский")
 
 
 class PublicationUrlTests(unittest.TestCase):

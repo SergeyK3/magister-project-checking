@@ -10,6 +10,13 @@ from googleapiclient.discovery import build
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import UserForm
 from magister_checking.bot.sheets_repo import GOOGLE_SCOPES
+from magister_checking.dissertation_meta import (
+    detect_dissertation_language_from_docx_bytes,
+    detect_dissertation_language_from_gdoc,
+    detect_dissertation_title_from_docx_bytes,
+    detect_dissertation_title_from_gdoc,
+    warn_if_unusual_language,
+)
 from magister_checking.dissertation_metrics import (
     analyze_dissertation,
     analyze_docx_bytes,
@@ -45,12 +52,21 @@ def _analyze_dissertation_fields(
     drive_service: Any,
     dissertation_url: str | None,
     parsed: ParsedReport,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str, str]:
+    """Возвращает ``(pages_total, sources_count, compliance, dissertation_title, dissertation_language)``.
+
+    Тема и язык извлекаются через ``magister_checking.dissertation_meta``;
+    при английском языке поднимается warning через ``warn_if_unusual_language``
+    (handoff §5 п.4).
+    """
+
     pages_total = ""
     sources_count = ""
     compliance = ""
+    dissertation_title = ""
+    dissertation_language = ""
     if not dissertation_url:
-        return pages_total, sources_count, compliance
+        return pages_total, sources_count, compliance, dissertation_title, dissertation_language
 
     file_id = extract_google_file_id(dissertation_url)
     try:
@@ -58,14 +74,25 @@ def _analyze_dissertation_fields(
     except Exception:  # noqa: BLE001
         data = download_drive_file_bytes(drive_service=drive_service, file_id=file_id)
         if not data:
-            return pages_total, sources_count, compliance
+            return (
+                pages_total,
+                sources_count,
+                compliance,
+                dissertation_title,
+                dissertation_language,
+            )
         metrics = analyze_docx_bytes(data)
         if metrics.approx_pages:
             pages_total = str(metrics.approx_pages)
         if metrics.sources_count is not None:
             sources_count = str(metrics.sources_count)
         compliance = _compliance_value(metrics.formatting_compliance)
-        return pages_total, sources_count, compliance
+        dissertation_title = detect_dissertation_title_from_docx_bytes(data)
+        dissertation_language = detect_dissertation_language_from_docx_bytes(data)
+        warn_if_unusual_language(
+            dissertation_language, context=f"dissertation_url={dissertation_url}"
+        )
+        return pages_total, sources_count, compliance, dissertation_title, dissertation_language
 
     metrics = analyze_dissertation(diss_doc)
     pdf_pages = count_pdf_pages_via_drive_export(drive_service=drive_service, file_id=file_id)
@@ -75,7 +102,12 @@ def _analyze_dissertation_fields(
     if metrics.sources_count is not None:
         sources_count = str(metrics.sources_count)
     compliance = _compliance_value(metrics.formatting_compliance)
-    return pages_total, sources_count, compliance
+    dissertation_title = detect_dissertation_title_from_gdoc(diss_doc)
+    dissertation_language = detect_dissertation_language_from_gdoc(diss_doc)
+    warn_if_unusual_language(
+        dissertation_language, context=f"dissertation_url={dissertation_url}"
+    )
+    return pages_total, sources_count, compliance, dissertation_title, dissertation_language
 
 
 def _link_value(url: str | None) -> str:
@@ -128,7 +160,13 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
         report_url if is_google_drive_folder_url(report_url) else ""
     )
     publication_url = parsed.results_article_url or parsed.review_article_url or ""
-    pages_total, sources_count, compliance = _analyze_dissertation_fields(
+    (
+        pages_total,
+        sources_count,
+        compliance,
+        dissertation_title,
+        dissertation_language,
+    ) = _analyze_dissertation_fields(
         docs_service=docs_service,
         drive_service=drive_service,
         dissertation_url=parsed.dissertation_url,
@@ -143,6 +181,6 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
         "pages_total": pages_total,
         "sources_count": sources_count,
         "compliance": compliance,
-        "dissertation_title": "",
-        "dissertation_language": "",
+        "dissertation_title": dissertation_title,
+        "dissertation_language": dissertation_language,
     }

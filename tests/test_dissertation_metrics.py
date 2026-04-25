@@ -10,6 +10,11 @@ from docx import Document  # type: ignore[import-untyped]
 
 from magister_checking.dissertation_metrics import (
     _docx_bibliography_word_list_count,
+    _dominant_margins,
+    _gdoc_collect_section_margins,
+    _gdoc_page_numbering_info,
+    _jc_to_horizontal,
+    _twips_to_cm,
     analyze_dissertation,
     analyze_docx_bytes,
 )
@@ -387,6 +392,196 @@ class DocxPagesSanityCheckTests(unittest.TestCase):
         ):
             metrics = analyze_docx_bytes(docx)
         self.assertGreaterEqual(metrics.approx_pages, 1)
+
+
+class DocxMarginsAndNumberingTests(unittest.TestCase):
+    """Парсеры полей и нумерации для DOCX (handoff §formatting v2).
+
+    Покрытие:
+    - twips→см с реальным делителем 567 (1 cm = 1440/2.54 twips, ровно).
+    - ``_dominant_margins`` возвращает моду + остальные комбинации
+      в порядке встречи (детерминизм для отчёта по multi-section).
+    - ``_jc_to_horizontal`` корректно мапит OOXML jc-значения (включая
+      исторические синонимы start/end/both).
+    """
+
+    def test_twips_to_cm_uses_exact_567(self) -> None:
+        # Камзебаева row 2 — 7 секций имеют top=1037 twips → ровно 1.83 см.
+        self.assertEqual(_twips_to_cm("1037"), 1.83)
+        # Сулейменова row 6 — top=1134 twips = 2.0 см.
+        self.assertEqual(_twips_to_cm("1134"), 2.0)
+        # Мараджапова row 17 — left=1701 twips = 3.0 см.
+        self.assertEqual(_twips_to_cm("1701"), 3.0)
+        self.assertIsNone(_twips_to_cm(None))
+        self.assertIsNone(_twips_to_cm("not-a-number"))
+
+    def test_dominant_margins_picks_mode_and_keeps_others(self) -> None:
+        """Реплика реального паттерна Камзебаевой: 7 одинаковых, 2 уникальных."""
+
+        kamzebayeva = [
+            {"top": 1.83, "bottom": 0.49, "left": 1.75, "right": 0.75},  # титул
+            *(
+                [{"top": 1.83, "bottom": 2.12, "left": 1.75, "right": 0.75}] * 7
+            ),
+            {"top": 2.5, "bottom": 2.12, "left": 1.75, "right": 0.75},  # приложения
+        ]
+        dominant, secondary = _dominant_margins(kamzebayeva)
+        self.assertEqual(
+            dominant, {"top": 1.83, "bottom": 2.12, "left": 1.75, "right": 0.75}
+        )
+        # Уникальные комбинации в порядке встречи (без моды).
+        self.assertEqual(
+            secondary,
+            [
+                {"top": 1.83, "bottom": 0.49, "left": 1.75, "right": 0.75},
+                {"top": 2.5, "bottom": 2.12, "left": 1.75, "right": 0.75},
+            ],
+        )
+
+    def test_dominant_margins_empty(self) -> None:
+        self.assertEqual(_dominant_margins([]), (None, []))
+
+    def test_jc_to_horizontal_handles_aliases(self) -> None:
+        self.assertEqual(_jc_to_horizontal("left"), "left")
+        self.assertEqual(_jc_to_horizontal("start"), "left")
+        self.assertEqual(_jc_to_horizontal("right"), "right")
+        self.assertEqual(_jc_to_horizontal("end"), "right")
+        self.assertEqual(_jc_to_horizontal("center"), "center")
+        self.assertEqual(_jc_to_horizontal("centre"), "center")
+        # `both` — выравнивание по ширине; для footer-PAGE визуально это
+        # тоже левый край (нет переносов в одной строке с PAGE).
+        self.assertEqual(_jc_to_horizontal("both"), "left")
+        self.assertIsNone(_jc_to_horizontal(None))
+        self.assertIsNone(_jc_to_horizontal(""))
+
+
+class GoogleDocMarginsAndNumberingTests(unittest.TestCase):
+    """Парсеры полей и нумерации для Google Doc (Docs API)."""
+
+    @staticmethod
+    def _pt(magnitude: float) -> dict:
+        return {"magnitude": magnitude, "unit": "PT"}
+
+    def test_collect_default_document_style_margins(self) -> None:
+        """``documentStyle.margin*`` без секций → 1 запись (default)."""
+
+        # 56.6929 pt ≈ 2.0 см (1 cm = 28.346 pt).
+        doc = {
+            "documentStyle": {
+                "marginTop": self._pt(56.6929),
+                "marginBottom": self._pt(28.3464),
+                "marginLeft": self._pt(85.0394),
+                "marginRight": self._pt(28.3464),
+            },
+            "body": {"content": []},
+        }
+        margins = _gdoc_collect_section_margins(doc)
+        self.assertEqual(len(margins), 1)
+        self.assertEqual(
+            margins[0], {"top": 2.0, "bottom": 1.0, "left": 3.0, "right": 1.0}
+        )
+
+    def test_collect_section_break_overrides_default(self) -> None:
+        """Если ``sectionBreak.sectionStyle`` задаёт margins — добавляется к списку."""
+
+        doc = {
+            "documentStyle": {
+                "marginTop": self._pt(56.6929),
+                "marginBottom": self._pt(28.3464),
+                "marginLeft": self._pt(85.0394),
+                "marginRight": self._pt(28.3464),
+            },
+            "body": {
+                "content": [
+                    {
+                        "sectionBreak": {
+                            "sectionStyle": {
+                                "marginTop": self._pt(28.3464),
+                                "marginBottom": self._pt(28.3464),
+                                "marginLeft": self._pt(85.0394),
+                                "marginRight": self._pt(28.3464),
+                            }
+                        }
+                    }
+                ]
+            },
+        }
+        margins = _gdoc_collect_section_margins(doc)
+        self.assertEqual(len(margins), 2)
+
+    def test_page_numbering_present_via_autotext(self) -> None:
+        """Footer с PAGE_NUMBER + alignment=END → present=True, position=bottom-right."""
+
+        doc = {
+            "footers": {
+                "kix.f1": {
+                    "content": [
+                        {
+                            "paragraph": {
+                                "elements": [
+                                    {"autoText": {"type": "PAGE_NUMBER"}}
+                                ],
+                                "paragraphStyle": {"alignment": "END"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        info = _gdoc_page_numbering_info(doc)
+        self.assertTrue(info["present"])
+        self.assertEqual(info["position"], "bottom-right")
+        # Coverage не имеет смысла для GDoc — None.
+        self.assertIsNone(info["sections_with_footer"])
+        self.assertIsNone(info["sections_total"])
+
+    def test_page_numbering_absent_when_no_footers(self) -> None:
+        info = _gdoc_page_numbering_info({"body": {"content": []}})
+        self.assertFalse(info["present"])
+        self.assertIsNone(info["position"])
+
+    def test_page_numbering_absent_when_footer_has_no_page_field(self) -> None:
+        """Footer есть, но без autoText.PAGE_NUMBER — нумерации нет."""
+
+        doc = {
+            "footers": {
+                "kix.f1": {
+                    "content": [
+                        {
+                            "paragraph": {
+                                "elements": [
+                                    {"textRun": {"content": "просто текст"}}
+                                ],
+                                "paragraphStyle": {"alignment": "CENTER"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        info = _gdoc_page_numbering_info(doc)
+        self.assertFalse(info["present"])
+        self.assertIsNone(info["position"])
+
+    def test_page_numbering_alignment_start_maps_to_left(self) -> None:
+        doc = {
+            "footers": {
+                "kix.f1": {
+                    "content": [
+                        {
+                            "paragraph": {
+                                "elements": [
+                                    {"autoText": {"type": "PAGE_NUMBER"}}
+                                ],
+                                "paragraphStyle": {"alignment": "START"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        info = _gdoc_page_numbering_info(doc)
+        self.assertEqual(info["position"], "bottom-left")
 
 
 if __name__ == "__main__":

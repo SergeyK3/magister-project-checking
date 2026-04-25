@@ -49,6 +49,7 @@ from magister_checking.dissertation_metrics import (
     analyze_docx_bytes,
     count_pdf_pages_via_drive_export,
 )
+from magister_checking.formatting_rules import load_formatting_rules
 from magister_checking.drive_docx import google_doc_from_drive_file
 from magister_checking.drive_urls import (
     classify_drive_url,
@@ -548,6 +549,7 @@ def run_row_check(
         link_accessibility=link_accessibility,
         link_mime_types=link_mime_types,
         dissertation_metrics=dissertation_metrics,
+        formatting_rules=load_formatting_rules(),
         row_number=row_number,
     )
 

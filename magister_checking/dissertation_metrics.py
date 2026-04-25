@@ -416,6 +416,22 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
     бывает, что URL-абзац идёт без ``numPr``. Возвращает None, если такого
     списка нет (свободная вёрстка как у Танановой) — caller должен сделать
     fallback на text-индексы.
+
+    Дополнительно считает «стрик» подряд идущих нумерованных абзацев с
+    **любым** ``numPr`` (без non-numPr разрывов длиной > 1). Используется
+    только **первый** такой стрик после маркера библиографии — он и есть
+    реальный список источников. Последующие numPr-блоки (нумерованные
+    пункты в приложениях/анкетах) игнорируются.
+
+    Реальный кейс (Камзебаева, row 2): библиография разделена на kz-часть
+    (numId=3, 42 пункта) и en-часть (numId=4, 19 пунктов), идущие впритык
+    без пустых строк — визуально это один сквозной список из 61
+    источника, но per-numPr максимум возвращал 42. Стрик-счётчик
+    суммирует смежные numPr-блоки и даёт 61. После 61-го пункта идёт
+    «Қосымша А» + текстовые строки анкеты (gap > 1) — стрик закрывается
+    и нумерованные блоки анкеты (`('5','0')`, `('6','1')`, …) уже не
+    учитываются. Для документов с одним numId стрик совпадает с
+    per-numPr-максимумом (Гизатова, Досанов).
     """
 
     records = _docx_paragraph_records(doc)
@@ -436,6 +452,8 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
         active: tuple[str, str] | None = None
         active_count = 0
         gap = 0
+        first_streak = 0
+        streak_open = True
         for _, npr in records[start_idx + 1 :]:
             if npr is None:
                 gap += 1
@@ -444,6 +462,8 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
                         run[active] = max(run.get(active, 0), active_count)
                     active = None
                     active_count = 0
+                    if first_streak > 0:
+                        streak_open = False
                 continue
             gap = 0
             if active is None or npr != active:
@@ -453,12 +473,14 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
                 active_count = 1
             else:
                 active_count += 1
+            if streak_open:
+                first_streak += 1
         if active is not None:
             run[active] = max(run.get(active, 0), active_count)
 
         if not run:
             continue
-        candidate = max(run.values())
+        candidate = max(max(run.values()), first_streak)
         # Слишком короткий «список» (1-2 пункта подряд) — это не библиография.
         if candidate < 3:
             continue
@@ -943,9 +965,20 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         _analyze_docx_formatting(doc)
     )
 
-    # pages_total
-    pages_total = _docx_page_count(docx_bytes)
-    approx_pages = pages_total if pages_total and pages_total > 0 else max(1, len(plain) // _CHARS_PER_PAGE_RU)
+    # pages_total: docProps/app.xml у DOCX, экспортированных из Google Docs
+    # (или конвертированных некоторыми редакторами), часто содержит «<Pages>1</Pages>»
+    # — счётчик, который Word-конвертер не пересчитал перед сохранением.
+    # Реальный кейс (Камзебаева): plain ≈ 151k символов (≈68 стр.), но
+    # docProps говорит 1. Безусловно доверять <Pages> нельзя.
+    # Sanity-check: если оценка по символам в 5+ раз превышает значение из
+    # метаданных, считаем метаданные занижёнными и используем оценку.
+    chars_estimate = max(1, len(plain) // _CHARS_PER_PAGE_RU)
+    pages_meta = _docx_page_count(docx_bytes)
+    if pages_meta and pages_meta > 0 and chars_estimate >= 5 * pages_meta:
+        pages_total = chars_estimate
+    else:
+        pages_total = pages_meta
+    approx_pages = pages_total if pages_total and pages_total > 0 else chars_estimate
 
     # review section: find heading then accumulate until next heading
     review_text = ""

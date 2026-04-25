@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import io
 import unittest
+from unittest import mock
 
 from docx import Document  # type: ignore[import-untyped]
 
 from magister_checking.dissertation_metrics import (
+    _docx_bibliography_word_list_count,
     analyze_dissertation,
     analyze_docx_bytes,
 )
@@ -254,6 +256,137 @@ class AnalyzeDocxBytesBibliographyTests(unittest.TestCase):
         ]
         metrics = analyze_docx_bytes(_build_docx_bytes(paragraphs))
         self.assertIsNone(metrics.sources_count)
+
+
+class DocxBibliographyWordListMergeTests(unittest.TestCase):
+    """`_docx_bibliography_word_list_count` суммирует подряд идущие numPr-блоки.
+
+    Реальный кейс — Камзебаева (row 2): библиография разделена в Word на
+    два независимых нумерованных списка (kz numId=3 — 42 пункта, en
+    numId=4 — 19 пунктов), идущих подряд без пустых строк. Per-numPr
+    максимум возвращал 42 — отображалось в листе как `sources_count = 42`,
+    хотя визуально это один сквозной список из 61 источника.
+    """
+
+    @staticmethod
+    def _patch_records(records: list[tuple[str, tuple[str, str] | None]]):
+        return mock.patch(
+            "magister_checking.dissertation_metrics._docx_paragraph_records",
+            return_value=records,
+        )
+
+    def test_merges_adjacent_numpr_runs_with_different_numids(self) -> None:
+        records: list[tuple[str, tuple[str, str] | None]] = [
+            ("ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР", None),
+            *[(f"kz entry {i}", ("3", "0")) for i in range(42)],
+            *[(f"en entry {i}", ("4", "0")) for i in range(19)],
+            ("Қосымша А", None),
+            ("Содержимое приложения", None),
+        ]
+        with self._patch_records(records):
+            self.assertEqual(_docx_bibliography_word_list_count(object()), 61)
+
+    def test_single_numid_run_unchanged(self) -> None:
+        """Документ с одним numId — стрик равен per-numPr-максимуму."""
+
+        records: list[tuple[str, tuple[str, str] | None]] = [
+            ("Список литературы", None),
+            *[(f"src {i}", ("3", "0")) for i in range(106)],
+            ("Приложение А", None),
+        ]
+        with self._patch_records(records):
+            self.assertEqual(_docx_bibliography_word_list_count(object()), 106)
+
+    def test_break_in_numpr_resets_streak(self) -> None:
+        """Длинный gap (>1 абзаца без numPr) разрывает стрик."""
+
+        records: list[tuple[str, tuple[str, str] | None]] = [
+            ("Список литературы", None),
+            *[(f"first {i}", ("3", "0")) for i in range(20)],
+            ("разрывный текст 1", None),
+            ("разрывный текст 2", None),
+            *[(f"second {i}", ("4", "0")) for i in range(15)],
+        ]
+        with self._patch_records(records):
+            self.assertEqual(_docx_bibliography_word_list_count(object()), 20)
+
+    def test_only_first_streak_after_marker_is_used(self) -> None:
+        """Точная регрессия по Камзебаевой: kz=42 + en=19 → 61.
+
+        После 61-го пункта идут 4 текстовые строки приложения
+        (Қосымша А + заголовки анкеты), затем нумерованные блоки самой
+        анкеты с собственными numId — их учитывать нельзя, иначе вернётся
+        70 (длина блока анкеты), а реальная библиография — 61.
+        """
+
+        records: list[tuple[str, tuple[str, str] | None]] = [
+            ("ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР", None),
+            *[(f"kz entry {i}", ("3", "0")) for i in range(42)],
+            *[(f"en entry {i}", ("4", "0")) for i in range(19)],
+            ("Қосымша А", None),
+            ("Сауалнама", None),
+            ("Зерттеу тақырыбы", None),
+            ("1-бөлім. Жалпы мәліметтер", None),
+            *[(f"q {i}", ("5", "0")) for i in range(35)],
+            *[(f"opt {i}", ("5", "1")) for i in range(35)],
+        ]
+        with self._patch_records(records):
+            self.assertEqual(_docx_bibliography_word_list_count(object()), 61)
+
+    def test_no_numpr_returns_none(self) -> None:
+        records: list[tuple[str, tuple[str, str] | None]] = [
+            ("Список литературы", None),
+            ("обычный текст", None),
+            ("ещё текст", None),
+        ]
+        with self._patch_records(records):
+            self.assertIsNone(_docx_bibliography_word_list_count(object()))
+
+
+class DocxPagesSanityCheckTests(unittest.TestCase):
+    """`analyze_docx_bytes` не доверяет заведомо заниженному `<Pages>` из docProps.
+
+    Реальный кейс — Камзебаева (row 2): docx экспортирован из Google Docs,
+    в `docProps/app.xml` зашит `<Pages>1</Pages>` и не пересчитан, при том
+    что plain-текст ≈ 151 162 символа (~68 страниц по эвристике 2200 ch/page).
+    Sanity-check переключается на оценку, если она в 5+ раз больше
+    значения метаданных.
+    """
+
+    def test_underestimating_app_xml_falls_back_to_char_estimate(self) -> None:
+        # ~400000 символов non-space → ~180+ страниц по 2200/стр.
+        paragraphs = ["Очень длинный абзац " * 200] * 200
+        docx = _build_docx_bytes(paragraphs)
+        with mock.patch(
+            "magister_checking.dissertation_metrics._docx_page_count",
+            return_value=1,
+        ):
+            metrics = analyze_docx_bytes(docx)
+        self.assertGreater(metrics.approx_pages, 50)
+
+    def test_consistent_app_xml_is_trusted(self) -> None:
+        """Если <Pages> близко к оценке — берём метаданные, не оценку."""
+
+        paragraphs = ["Короткий абзац " * 5] * 30
+        docx = _build_docx_bytes(paragraphs)
+        with mock.patch(
+            "magister_checking.dissertation_metrics._docx_page_count",
+            return_value=2,
+        ):
+            metrics = analyze_docx_bytes(docx)
+        self.assertEqual(metrics.approx_pages, 2)
+
+    def test_missing_app_xml_uses_char_estimate(self) -> None:
+        """Если <Pages> вообще нет (None) — ведём себя как раньше."""
+
+        paragraphs = ["Текст " * 100] * 50
+        docx = _build_docx_bytes(paragraphs)
+        with mock.patch(
+            "magister_checking.dissertation_metrics._docx_page_count",
+            return_value=None,
+        ):
+            metrics = analyze_docx_bytes(docx)
+        self.assertGreaterEqual(metrics.approx_pages, 1)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,16 @@ class BotConfig:
     log_level: int
     persistence_file: Path
     docx_conversion_folder_id: str = ""
+    """ID папки Google Drive (буфер для конверсии), куда копируются .docx
+    отчёты с преобразованием в Google Doc перед чтением Docs API. Должна
+    лежать в Shared Drive, иначе Service Account упрётся в storageQuota = 0
+    при ``drive.files().copy(...)``. Пустая строка — конверсия отключена,
+    .docx-ссылки будут падать как неподдерживаемый формат.
+
+    Источники в порядке приоритета (см. ``load_config``):
+    ``GOOGLE_DRIVE_BUFFER_FOLDER_URL`` → ``GOOGLE_DRIVE_BUFFER_FOLDER_ID``
+    → ``DOCX_CONVERSION_FOLDER_URL`` → ``DOCX_CONVERSION_FOLDER_ID``."""
+
     log_file: Optional[Path] = None
     """Опциональный путь к файлу лога. Если задан — `configure_logging`
     добавит ``FileHandler`` к корневому логгеру в дополнение к StreamHandler.
@@ -53,15 +63,12 @@ class BotConfig:
     хрупкого PowerShell-пайпа ``2>&1 | Out-File`` (PowerShell 5.x с
     ``$ErrorActionPreference = 'Stop'`` оборачивает каждую stderr-строку
     нативной команды как ``NativeCommandError`` и роняет пайплайн)."""
-    """ID папки Google Drive (буфер для конверсии), куда копируются .docx
-    отчёты с преобразованием в Google Doc перед чтением Docs API. Должна
-    лежать в Shared Drive, иначе Service Account упрётся в storageQuota = 0
-    при ``drive.files().copy(...)``. Пустая строка — конверсия отключена,
-    .docx-ссылки будут падать как неподдерживаемый формат.
 
-    Источники в порядке приоритета (см. ``load_config``):
-    ``GOOGLE_DRIVE_BUFFER_FOLDER_URL`` → ``GOOGLE_DRIVE_BUFFER_FOLDER_ID``
-    → ``DOCX_CONVERSION_FOLDER_URL`` → ``DOCX_CONVERSION_FOLDER_ID``."""
+    alert_chat_ids: tuple[int, ...] = ()
+    """Числовые ``chat_id`` для алертов при необработанных ошибках в хендлерах.
+
+    Источник: env ``BOT_ALERT_CHAT_IDS`` — список через запятую (личный чат,
+    группа или канал). Пусто — только логирование, без рассылки в Telegram."""
 
     @property
     def log_level_name(self) -> str:
@@ -73,6 +80,26 @@ def _read_env(name: str, default: Optional[str] = None) -> Optional[str]:
     if value is None or value.strip() == "":
         return default
     return value.strip()
+
+
+def _parse_alert_chat_ids(raw: Optional[str]) -> tuple[int, ...]:
+    """Парсит BOT_ALERT_CHAT_IDS: «123,-456» → (123, -456). Пусто → ()."""
+
+    if raw is None or not raw.strip():
+        return ()
+    out: list[int] = []
+    for part in raw.split(","):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            out.append(int(s))
+        except ValueError as exc:
+            raise ConfigError(
+                f"Некорректный фрагмент BOT_ALERT_CHAT_IDS: {part!r} "
+                "(ожидаются целые chat_id через запятую)"
+            ) from exc
+    return tuple(out)
 
 
 def _coerce_log_level(raw: str) -> int:
@@ -109,6 +136,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
     persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
     log_file_raw = _read_env("BOT_LOG_FILE")
+    alert_chat_ids_raw = _read_env("BOT_ALERT_CHAT_IDS")
     docx_conv_raw = (
         _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
         or _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_ID")
@@ -140,6 +168,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     )
     log_file = Path(log_file_raw).expanduser() if log_file_raw else None
     docx_conversion_folder_id = _resolve_docx_conversion_folder_id(docx_conv_raw)
+    alert_chat_ids = _parse_alert_chat_ids(alert_chat_ids_raw)
 
     return BotConfig(
         telegram_bot_token=token,  # type: ignore[arg-type]
@@ -151,6 +180,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         persistence_file=persistence_file,
         docx_conversion_folder_id=docx_conversion_folder_id,
         log_file=log_file,
+        alert_chat_ids=alert_chat_ids,
     )
 
 

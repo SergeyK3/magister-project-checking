@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 
 from magister_checking.bot.config import BotConfig
+from magister_checking.bot.error_alerts import on_handler_error
 from magister_checking.bot.handlers import (
     ADMIN_PROJECT_CARD_BUTTON,
     ASK_CONFIRM,
@@ -231,6 +232,7 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(
         CallbackQueryHandler(recheck_button, pattern=f"^{RECHECK_CALLBACK_DATA}$")
     )
+    application.add_error_handler(on_handler_error)
     return application
 
 

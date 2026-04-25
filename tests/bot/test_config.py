@@ -290,6 +290,62 @@ class LoadConfigTests(unittest.TestCase):
                 load_config()
         self.assertIn("некорректно", str(ctx.exception))
 
+    def test_alert_chat_ids_empty_by_default(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.alert_chat_ids, ())
+        finally:
+            os.unlink(sa_path)
+
+    def test_alert_chat_ids_parsed(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "BOT_ALERT_CHAT_IDS": " 111 , -100222 ",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.alert_chat_ids, (111, -100222))
+        finally:
+            os.unlink(sa_path)
+
+    def test_alert_chat_ids_invalid_raises(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "BOT_ALERT_CHAT_IDS": "not-int",
+                    }
+                ),
+                clear=True,
+            ):
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertIn("BOT_ALERT_CHAT_IDS", str(ctx.exception))
+        finally:
+            os.unlink(sa_path)
+
 
 if __name__ == "__main__":
     unittest.main()

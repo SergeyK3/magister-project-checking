@@ -52,6 +52,14 @@ class BuildApplicationPersistenceTests(unittest.TestCase):
             self.assertTrue(getattr(conv, "persistent", False))
             self.assertEqual(getattr(conv, "name", None), "registration")
 
+    def test_error_handler_registered(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+            self.assertTrue(
+                getattr(app, "error_handlers", ()),
+                msg="PTB Application должен иметь error_handlers после B3",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,14 +2,14 @@
 
 **Обновлено:** 2026-04-26  
 **Ветка:** `cursor/tz-tezis-v2-mvp-bot-c14a`  
-**Git:** `HEAD` = `ca5a030` на `origin` (фича + эта передатка). Основной коммит с кодом: `cc2825e`.
+**Git:** `origin` = `c08a31d` (сверху: мелкие правки этой же передатки; основной код фичи — `cc2825e`).
 
 ---
 
 ## Вставь в первое сообщение нового чата (копипаст)
 
 ```
-Проект: magister-project-checking, ветка cursor/tz-tezis-v2-mvp-bot-c14a, origin актуален (последний: ca5a030; фича в cc2825e).
+Проект: magister-project-checking, ветка cursor/tz-tezis-v2-mvp-bot-c14a, origin HEAD c08a31d (код ролей /start: cc2825e).
 
 Контекст по ролям и /start — файл в репозитории:
 docs/handoff_start_roles_supervisor_2026-04-26.md

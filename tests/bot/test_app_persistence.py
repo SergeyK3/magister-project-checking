@@ -8,9 +8,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock
 
-from telegram.ext import ConversationHandler, PicklePersistence
+from telegram.ext import ConversationHandler, MessageHandler, PicklePersistence
 
 from magister_checking.bot.app import _post_init, build_application
+from magister_checking.bot.handlers import on_project_snapshot_json_file
 from magister_checking.bot.config import BotConfig
 
 
@@ -23,6 +24,7 @@ def _make_config(persistence_file: Path) -> BotConfig:
         google_service_account_json=Path("credentials/unused.json"),
         log_level=20,
         persistence_file=persistence_file,
+        project_snapshot_output_folder_urls=(),
     )
 
 
@@ -70,6 +72,17 @@ class BuildApplicationPersistenceTests(unittest.TestCase):
             handlers_m1 = app.handlers.get(-1, [])
             self.assertEqual(len(handlers_m1), 1)
             self.assertIn("help", handlers_m1[0].commands)
+
+    def test_json_snapshot_message_handler_in_group_1(self) -> None:
+        """В group=1: приём .json (project snapshot) админом — см. build_application."""
+
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+            in_g1 = app.handlers.get(1, [])
+            self.assertTrue(in_g1, "ожидается хотя бы один handler в group=1")
+            mh = [h for h in in_g1 if isinstance(h, MessageHandler)]
+            self.assertTrue(mh, "в group=1 ожидается MessageHandler")
+            self.assertIs(mh[0].callback, on_project_snapshot_json_file)
 
     def test_post_init_registers_bot_commands(self) -> None:
         """C1: при старте вызывается set_my_commands."""

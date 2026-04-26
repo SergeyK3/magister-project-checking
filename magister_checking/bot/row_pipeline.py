@@ -198,6 +198,8 @@ class RowCheckReport:
     stage4_cells: list[Stage4CellUpdate] = field(default_factory=list)
     stopped_at: str | None = None
     unchanged: bool = False
+    source_fingerprint: str | None = None
+    """Снимок входов re-check (``row_check_cli``), для provenance в project snapshot."""
     """True, если ``run_row_check(only_if_changed=True)`` обнаружил, что
     с прошлого прогона ничего не поменялось (fingerprint совпал) и
     короткое замыкание сработало: пайплайн не выполнялся, в лист и

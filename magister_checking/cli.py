@@ -178,6 +178,7 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
     from magister_checking.row_check_cli import (
         RowLocator,
         format_report,
+        load_user_enrichment_for_row,
         run_row_check,
     )
 
@@ -204,7 +205,20 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
     # При only_if_changed + unchanged лист не трогали — applied=False,
     # чтобы пометка «(запись в лист выполнена)» не печаталась.
     applied_effective = ns.apply and not report.unchanged
-    print(format_report(report, applied=applied_effective))
+    row = report.row_number or ns.row
+    if not report.unchanged and row is not None:
+        u, ex = load_user_enrichment_for_row(config, row)
+        print(
+            format_report(
+                report,
+                applied=applied_effective,
+                user=u,
+                extra_values=ex,
+                fill_status=None,
+            )
+        )
+    else:
+        print(format_report(report, applied=applied_effective))
     return 0
 
 

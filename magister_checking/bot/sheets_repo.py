@@ -52,6 +52,8 @@ _TELEGRAM_LAST_NAME_COLUMN_INDEX = SHEET_HEADER.index("telegram_last_name")
 _WHITESPACE_RE = re.compile(r"\s+")
 DASHBOARD_WORKSHEET_NAME = "Dashboard"
 ADMINS_WORKSHEET_NAME = "Администраторы"
+SUPERVISORS_WORKSHEET_NAME = "научрук"
+"""Лист с научными руководителями: как у «Администраторы» (``fio``, ``telegram_id``, ``active``)."""
 RECHECK_HISTORY_WORKSHEET_NAME = "История проверок"
 _DASHBOARD_RANGE = "A1:B16"
 
@@ -140,6 +142,7 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "telegram_first_name": ("telegram_first_name", "telegram first name"),
     "telegram_last_name": ("telegram_last_name", "telegram last name"),
     "fio": ("fio", "фио"),
+    "active": ("active", "активен", "вкл"),
     "group_name": ("group_name", "group name", "группа"),
     "workplace": ("workplace", "место работы"),
     "position": ("position", "должность"),
@@ -727,18 +730,14 @@ def _bool_cell(value: str) -> bool:
     return normalized in {"yes", "y", "true", "1", "active", "да"}
 
 
-def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
-    """Проверяет, есть ли Telegram ID в листе `Администраторы`."""
+def _is_telegram_id_active_in_worksheet(
+    worksheet: gspread.Worksheet, telegram_id: str
+) -> bool:
+    """Совпадение ``telegram_id`` в строке; если есть колонка ``active`` — она должна быть «истиной»."""
 
     if not telegram_id or not str(telegram_id).strip():
         return False
-
-    spreadsheet = get_spreadsheet(config)
-    admins_worksheet = get_optional_worksheet(spreadsheet, ADMINS_WORKSHEET_NAME)
-    if admins_worksheet is None:
-        return False
-
-    header = _header_row(admins_worksheet)
+    header = _header_row(worksheet)
     if not header:
         return False
 
@@ -758,9 +757,11 @@ def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
         return False
 
     needle = str(telegram_id).strip()
-    max_rows = max((len(admins_worksheet.col_values(idx + 1)) for idx in range(len(header))), default=0)
+    max_rows = max(
+        (len(worksheet.col_values(idx + 1)) for idx in range(len(header))), default=0
+    )
     for row_number in range(2, max_rows + 1):
-        row = admins_worksheet.row_values(row_number)
+        row = worksheet.row_values(row_number)
         if telegram_col >= len(row):
             continue
         if str(row[telegram_col]).strip() != needle:
@@ -769,6 +770,56 @@ def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
             return True
         return _bool_cell(row[active_col])
     return False
+
+
+def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
+    """Проверяет, есть ли Telegram ID в листе `Администраторы`."""
+
+    if not telegram_id or not str(telegram_id).strip():
+        return False
+    spreadsheet = get_spreadsheet(config)
+    ws = get_optional_worksheet(spreadsheet, ADMINS_WORKSHEET_NAME)
+    if ws is None:
+        return False
+    return _is_telegram_id_active_in_worksheet(ws, telegram_id)
+
+
+def is_supervisor_telegram_id(config: BotConfig, telegram_id: str) -> bool:
+    """Проверяет, есть ли Telegram ID в листе «научрук» (``SUPERVISORS_WORKSHEET_NAME``)."""
+
+    if not telegram_id or not str(telegram_id).strip():
+        return False
+    spreadsheet = get_spreadsheet(config)
+    ws = get_optional_worksheet(spreadsheet, SUPERVISORS_WORKSHEET_NAME)
+    if ws is None:
+        return False
+    return _is_telegram_id_active_in_worksheet(ws, telegram_id)
+
+
+def get_telegram_id_at_row(worksheet: gspread.Worksheet, row_number: int) -> str:
+    """``telegram_id`` в строке (по маппингу заголовка) либо пустая строка."""
+
+    field_map = _field_to_column_map(worksheet)
+    col = field_map.get("telegram_id")
+    if col is None:
+        return ""
+    row = worksheet.row_values(row_number)
+    if col >= len(row):
+        return ""
+    return str(row[col] or "").strip()
+
+
+def fio_text_from_worksheet_row(worksheet: gspread.Worksheet, row_number: int) -> str:
+    """ФИО из строки по колонке ``fio`` (как в ``find_rows_by_fio``)."""
+
+    field_map = _field_to_column_map(worksheet)
+    col = field_map.get("fio")
+    if col is None:
+        return ""
+    row = worksheet.row_values(row_number)
+    if col >= len(row):
+        return ""
+    return str(row[col] or "").strip()
 
 
 def _safe_batch_update_values(

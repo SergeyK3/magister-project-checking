@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -38,6 +39,14 @@ from magister_checking.bot.sheets_repo import (
     load_user,
     read_last_recheck_entry,
 )
+from magister_checking.bot.report_enrichment import build_sheet_enrichment
+from magister_checking.project_snapshot import build_project_snapshot
+from magister_checking.snapshot_render import (
+    render_commission_plaintext,
+    render_commission_telegram_html,
+    render_spravka_telegram,
+    render_spravka_telegram_html,
+)
 from magister_checking.bot.validation import (
     REPORT_URL_WRONG_TARGET_MESSAGE,
     check_report_url,
@@ -55,11 +64,13 @@ from magister_checking.drive_urls import (
     classify_drive_url,
     extract_google_file_id,
 )
+from magister_checking.snapshot_drive import try_upload_project_snapshot_json
 from magister_checking.report_parser import ParsedReport, parse_intermediate_report
 from magister_checking.summary_pipeline import resolve_report_google_doc_id
 
 
 _REGISTRATION_WORKSHEET_NAME = "Регистрация"
+logger = logging.getLogger(__name__)
 
 # MIME-тип .docx-диссертации; дублирует значение из bot.row_pipeline.DOCX_MIME,
 # но импортировать его сюда не имеет смысла (избегаем лишней зависимости
@@ -82,6 +93,17 @@ def _service_account_credentials(config: BotConfig) -> Credentials:
         str(config.google_service_account_json),
         scopes=GOOGLE_SCOPES,
     )
+
+
+def load_user_enrichment_for_row(
+    config: BotConfig, row_number: int
+) -> tuple[UserForm, dict[str, str]]:
+    """Актуальная строка листа + обогащение — для снимка/справки после ``run_row_check``."""
+
+    spreadsheet = get_spreadsheet(config)
+    worksheet = spreadsheet.worksheet(_REGISTRATION_WORKSHEET_NAME)
+    user = load_user(worksheet, row_number)
+    return user, build_sheet_enrichment(config, user)
 
 
 def _resolve_row_number(
@@ -494,6 +516,7 @@ def run_row_check(
                 fio=user.fio or "",
                 row_number=row_number,
                 unchanged=True,
+                source_fingerprint=fingerprint,
             )
 
     # Формальная проверка «папка vs документ» (без сети). Если report_url —
@@ -619,11 +642,47 @@ def run_row_check(
             # основной flow проверки: магистрант увидел результат.
             pass
 
+        try:
+            user_after = load_user(worksheet, row_number)
+            extras = build_sheet_enrichment(config, user_after)
+            drive_snap = build_project_snapshot(
+                user=user_after,
+                report=pipeline_report,
+                extra_values=extras,
+                fill_status=None,
+                trigger="row_check_apply",
+                source_fingerprint=fingerprint,
+            )
+            try_upload_project_snapshot_json(config, drive_snap)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Сохранение JSON-снимка в Google Drive (PROJECT_CARD_OUTPUT_FOLDER_URL)"
+            )
+
+    pipeline_report.source_fingerprint = fingerprint
     return pipeline_report
 
 
-def format_report(report: RowCheckReport, *, applied: bool = False) -> str:
+def format_report(
+    report: RowCheckReport,
+    *,
+    applied: bool = False,
+    user: UserForm | None = None,
+    extra_values: dict[str, str] | None = None,
+    fill_status: str | None = None,
+    trigger: str = "row_check",
+    view: str = "student",
+    as_html: bool = False,
+) -> str:
     """Форматирует отчёт в многострочный текст «справки».
+
+    Строит :class:`ProjectSnapshot` и рендерит через
+    :func:`render_spravka_telegram` / HTML-варианты
+    (см. ``docs/contract_project_snapshot.md``).
+
+    ``view="student"`` — кратко (магистрант); ``view="commission"`` — полный
+    текст для комиссии (как PDF). ``as_html=True`` — разметка для Telegram
+    ``parse_mode=HTML``; в CLI и печати оставляйте ``False``.
 
     ``applied=True`` дописывает пометку о том, что результаты этапов 2-4
     записаны в лист; иначе выводит пометку dry-run.
@@ -633,41 +692,20 @@ def format_report(report: RowCheckReport, *, applied: bool = False) -> str:
     поменялось и ни лист, ни история не тронуты.
     """
 
-    if report.unchanged:
-        fio = report.fio or "(без ФИО)"
-        row = report.row_number or "?"
-        return (
-            f"Магистрант: {fio}\n"
-            f"Строка: {row}\n\n"
-            "С прошлой проверки входы не менялись (--only-if-changed).\n"
-            "Лист и история проверок не тронуты."
-        )
-
-    lines = report.spravka_lines()
-    if report.stage3_cells:
-        lines.append("")
-        lines.append("Извлечённые ссылки (L/M/N/O):")
-        for cell in report.stage3_cells:
-            mark = " [зачёркнута]" if cell.strikethrough else ""
-            lines.append(f"  {cell.column_key}: {cell.value}{mark}")
-    if report.stage4.executed:
-        lines.append("")
-        lines.append("Содержательный разбор диссертации (Stage 4):")
-        pages = report.stage4.pages_total
-        sources = report.stage4.sources_count
-        lines.append(f"  страниц всего: {pages if pages is not None else '—'}")
-        lines.append(f"  источников: {sources if sources is not None else '—'}")
-        lines.append(
-            f"  оформление: {compliance_to_text(report.stage4.compliance)}"
-        )
-    elif report.stage4.skipped_reason:
-        lines.append("")
-        lines.append(
-            f"Stage 4 пропущен: {report.stage4.skipped_reason}"
-        )
-    lines.append("")
-    if applied:
-        lines.append("(запись в лист выполнена: J/K/L/M/N/O + Stage 4)")
-    else:
-        lines.append("(dry-run: лист не изменён — добавьте --apply для записи)")
-    return "\n".join(lines)
+    u = user if user is not None else UserForm(fio=report.fio or "")
+    snap = build_project_snapshot(
+        user=u,
+        report=report,
+        extra_values=extra_values or {},
+        fill_status=fill_status,
+        trigger=trigger,
+    )
+    if view not in ("student", "commission"):
+        raise ValueError("view: ожидается 'student' или 'commission'")
+    if view == "commission":
+        if as_html:
+            return render_commission_telegram_html(snap)
+        return render_commission_plaintext(snap)
+    if as_html:
+        return render_spravka_telegram_html(snap, applied=applied)
+    return render_spravka_telegram(snap, applied=applied)

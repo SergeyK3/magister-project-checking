@@ -26,8 +26,11 @@ from magister_checking.bot.sheets_repo import (
     find_rows_by_fio,
     format_dashboard_telegram_message,
     get_or_create_worksheet,
+    get_telegram_id_at_row,
     is_admin_telegram_id,
+    is_supervisor_telegram_id,
     load_user,
+    SUPERVISORS_WORKSHEET_NAME,
     read_last_recheck_entry,
     save_user_to_row_with_extras,
     normalize_fio,
@@ -668,6 +671,37 @@ class AdminSheetTests(unittest.TestCase):
             self.assertTrue(is_admin_telegram_id(cfg, "300398364"))
             self.assertFalse(is_admin_telegram_id(cfg, "999"))
             self.assertFalse(is_admin_telegram_id(cfg, "123"))
+
+    def test_is_supervisor_telegram_id_checks_supervisor_sheet(self) -> None:
+        registration = FakeWorksheet([list(SHEET_HEADER)])
+        sup = FakeWorksheet(
+            [
+                ["fio", "telegram_id", "active"],
+                ["Петров П.П.", "400", "да"],
+            ]
+        )
+        spreadsheet = FakeSpreadsheet(
+            {
+                "Регистрация": registration,
+                SUPERVISORS_WORKSHEET_NAME: sup,
+            }
+        )
+        with patch(
+            "magister_checking.bot.sheets_repo.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            cfg = MagicMock()
+            self.assertTrue(is_supervisor_telegram_id(cfg, "400"))
+            self.assertFalse(is_supervisor_telegram_id(cfg, "999"))
+
+    def test_get_telegram_id_at_row_reads_column(self) -> None:
+        ws = FakeWorksheet(
+            [
+                ["fio", "telegram_id", "active"],
+                ["A", "42", "yes"],
+            ]
+        )
+        self.assertEqual(get_telegram_id_at_row(ws, 2), "42")
 
 
 class ApplyRowCheckUpdatesTests(unittest.TestCase):

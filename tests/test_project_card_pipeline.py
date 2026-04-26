@@ -51,9 +51,12 @@ class ProjectCardPipelineTests(unittest.TestCase):
         ) as mock_dashboard, patch(
             "magister_checking.project_card_pipeline._render_pdf",
             return_value=b"%PDF-1.4 test",
-        ):
+        ), patch(
+            "magister_checking.project_card_pipeline.try_upload_project_snapshot_json",
+        ) as mock_snap:
             result = generate_project_card_pdf(config=config, row_number=2)
 
+        mock_snap.assert_called_once()
         mock_save.assert_called_once()
         mock_dashboard.assert_called_once_with(config)
         self.assertEqual(result.row_number, 2)
@@ -92,6 +95,8 @@ class ProjectCardPipelineTests(unittest.TestCase):
         ), patch(
             "magister_checking.project_card_pipeline._render_pdf",
             return_value=b"",
+        ), patch(
+            "magister_checking.project_card_pipeline.try_upload_project_snapshot_json",
         ):
             with self.assertRaises(RuntimeError):
                 generate_project_card_pdf(config=config, row_number=2)

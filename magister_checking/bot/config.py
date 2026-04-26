@@ -70,9 +70,42 @@ class BotConfig:
     Источник: env ``BOT_ALERT_CHAT_IDS`` — список через запятую (личный чат,
     группа или канал). Пусто — только логирование, без рассылки в Telegram."""
 
+    telegram_force_ipv4: bool = False
+    """Если True — HTTP-клиент PTB подключается с ``local_address=0.0.0.0`` (IPv4).
+
+    На части конфигураций Windows это обходит поломанный IPv6/DNS для
+    ``api.telegram.org``. Источник: env ``BOT_TELEGRAM_FORCE_IPV4`` (1/true/yes/on)."""
+
+    project_snapshot_output_folder_urls: tuple[str, ...] = ()
+    """Полные URL папок Drive: JSON project snapshot пишется в **каждую**.
+
+    Сборка: ``PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS`` (через запятую) или, если
+    пусто, одна папка ``PROJECT_CARD_OUTPUT_FOLDER_URL`` (см. load_config)."""
+
     @property
     def log_level_name(self) -> str:
         return logging.getLevelName(self.log_level)
+
+
+def _parse_project_snapshot_output_folder_urls(
+    multi_raw: str, legacy_card: str
+) -> tuple[str, ...]:
+    """Папки для JSON snapshot: явный список или одна папка из legacy."""
+    s_multi = (multi_raw or "").strip()
+    if s_multi:
+        seen: set[str] = set()
+        out: list[str] = []
+        for p in s_multi.split(","):
+            t = p.strip()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+        return tuple(out)
+    s_card = (legacy_card or "").strip()
+    if s_card:
+        return (s_card,)
+    return ()
 
 
 def _read_env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -100,6 +133,12 @@ def _parse_alert_chat_ids(raw: Optional[str]) -> tuple[int, ...]:
                 "(ожидаются целые chat_id через запятую)"
             ) from exc
     return tuple(out)
+
+
+def _parse_env_bool(raw: Optional[str], *, default: bool = False) -> bool:
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _coerce_log_level(raw: str) -> int:
@@ -132,11 +171,22 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     sa_path_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON")
     sa_content_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
     worksheet_name = _read_env("WORKSHEET_NAME", DEFAULT_WORKSHEET_NAME) or DEFAULT_WORKSHEET_NAME
-    project_card_output_folder_url = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
+    project_card_raw = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
+    multi_raw = _read_env("PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS", "") or ""
+    project_snapshot_output_folder_urls = _parse_project_snapshot_output_folder_urls(
+        multi_raw,
+        project_card_raw,
+    )
+    project_card_output_folder_url = (
+        project_snapshot_output_folder_urls[0]
+        if project_snapshot_output_folder_urls
+        else ""
+    )
     log_level_raw = _read_env("LOG_LEVEL", DEFAULT_LOG_LEVEL) or DEFAULT_LOG_LEVEL
     persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
     log_file_raw = _read_env("BOT_LOG_FILE")
     alert_chat_ids_raw = _read_env("BOT_ALERT_CHAT_IDS")
+    force_ipv4_raw = _read_env("BOT_TELEGRAM_FORCE_IPV4")
     docx_conv_raw = (
         _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
         or _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_ID")
@@ -181,6 +231,8 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         docx_conversion_folder_id=docx_conversion_folder_id,
         log_file=log_file,
         alert_chat_ids=alert_chat_ids,
+        telegram_force_ipv4=_parse_env_bool(force_ipv4_raw, default=False),
+        project_snapshot_output_folder_urls=project_snapshot_output_folder_urls,
     )
 
 

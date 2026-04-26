@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
 from magister_checking.bot.handlers import CONFIG_BOT_DATA_KEY
@@ -60,7 +61,21 @@ def format_handler_error_html(update: object, context: ContextTypes.DEFAULT_TYPE
 async def on_handler_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Логирует исключение и рассылает его в ``BotConfig.alert_chat_ids`` (если заданы)."""
 
-    logger.error("Exception while handling an update", exc_info=context.error)
+    err = context.error
+    if err is None:
+        return
+
+    # run_polling передаёт сюда ошибки long polling с update=None (см. PTB Application.run_polling).
+    # Для них не пишем ERROR «while handling an update» и не шлём алерты — polling сам повторяет.
+    if update is None and isinstance(err, (NetworkError, TimedOut)):
+        logger.warning(
+            "Сбой сети при опросе Telegram (%s: %s). Повтор запроса выполнит библиотека.",
+            type(err).__name__,
+            err,
+        )
+        return
+
+    logger.error("Exception while handling an update", exc_info=err)
 
     cfg: BotConfig | None = context.application.bot_data.get(CONFIG_BOT_DATA_KEY)
     if cfg is None or not cfg.alert_chat_ids:

@@ -892,7 +892,10 @@ class CliCheckRowFlagsTests(unittest.TestCase):
         ), patch(
             "magister_checking.row_check_cli.run_row_check",
             return_value=fake_report,
-        ) as run:
+        ) as run, patch(
+            "magister_checking.row_check_cli.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="X Y"), {}),
+        ):
             code = cli.main(argv)
         return code, run
 

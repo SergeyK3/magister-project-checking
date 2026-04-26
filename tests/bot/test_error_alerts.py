@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from telegram import Chat, Message, Update, User
+from telegram.error import NetworkError
 from telegram.ext import ContextTypes
 
 from magister_checking.bot.app import build_application
@@ -27,6 +28,7 @@ def _minimal_config(*, alert: tuple[int, ...] = (999,)) -> BotConfig:
         log_level=20,
         persistence_file=Path("state/x.pickle"),
         alert_chat_ids=alert,
+        project_snapshot_output_folder_urls=(),
     )
 
 
@@ -94,6 +96,23 @@ class OnHandlerErrorTests(unittest.TestCase):
             self.assertEqual(send_mock.await_count, 2)
             chats = [c.kwargs["chat_id"] for c in send_mock.await_args_list]
             self.assertEqual(chats, [111, 222])
+
+        asyncio.run(_run())
+
+    def test_polling_network_error_skips_alerts(self) -> None:
+        """PTB передаёт update=None при ошибке get_updates; не спамим алертами."""
+
+        async def _run() -> None:
+            cfg = _minimal_config(alert=(111,))
+            application = build_application(cfg)
+            send_mock = AsyncMock()
+            ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+            ctx.application = application
+            ctx.bot = MagicMock()
+            ctx.bot.send_message = send_mock
+            ctx.error = NetworkError("httpx.ConnectError: [Errno 11001] getaddrinfo failed")
+            await on_handler_error(None, ctx)
+            send_mock.assert_not_awaited()
 
         asyncio.run(_run())
 

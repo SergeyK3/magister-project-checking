@@ -49,9 +49,10 @@ class LoadConfigTests(unittest.TestCase):
                 _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
                 clear=True,
             ):
-                cfg = load_config()
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
             self.assertEqual(str(cfg.google_service_account_json), sa_path)
             self.assertEqual(cfg.project_card_output_folder_url, "")
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, ())
             self.assertEqual(cfg.persistence_file, DEFAULT_PERSISTENCE_FILE)
         finally:
             os.unlink(sa_path)
@@ -75,7 +76,7 @@ class LoadConfigTests(unittest.TestCase):
                     ),
                     clear=True,
                 ):
-                    cfg = load_config()
+                    cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
                 self.assertEqual(cfg.persistence_file, custom)
         finally:
             os.unlink(sa_path)
@@ -223,11 +224,62 @@ class LoadConfigTests(unittest.TestCase):
                 ),
                 clear=True,
             ):
-                cfg = load_config()
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
             self.assertEqual(
                 cfg.project_card_output_folder_url,
                 "https://drive.google.com/drive/folders/abc123",
             )
+            self.assertEqual(
+                cfg.project_snapshot_output_folder_urls,
+                ("https://drive.google.com/drive/folders/abc123",),
+            )
+        finally:
+            os.unlink(sa_path)
+
+    def test_project_snapshot_output_folder_urls_two(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            a = "https://drive.google.com/drive/folders/aaa"
+            b = "https://drive.google.com/drive/folders/bbb"
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS": f"{a} , {b} ",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.project_card_output_folder_url, a)
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, (a, b))
+        finally:
+            os.unlink(sa_path)
+
+    def test_multi_snapshot_urls_override_legacy_card_only(self) -> None:
+        """PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS задаёт список; PROJECT_CARD не склеивается."""
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            a = "https://drive.google.com/drive/folders/onlyMulti"
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_CARD_OUTPUT_FOLDER_URL": "https://drive.google.com/drive/folders/ignored",
+                        "PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS": a,
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, (a,))
+            self.assertEqual(cfg.project_card_output_folder_url, a)
         finally:
             os.unlink(sa_path)
 
@@ -237,7 +289,7 @@ class LoadConfigTests(unittest.TestCase):
             _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT": json.dumps(_SAMPLE_JSON)}),
             clear=True,
         ):
-            cfg = load_config()
+            cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
         try:
             self.assertTrue(cfg.google_service_account_json.is_file())
             data = json.loads(cfg.google_service_account_json.read_text(encoding="utf-8"))
@@ -253,7 +305,7 @@ class LoadConfigTests(unittest.TestCase):
             _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": json.dumps(_SAMPLE_JSON)}),
             clear=True,
         ):
-            cfg = load_config()
+            cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
         try:
             self.assertTrue(cfg.google_service_account_json.is_file())
         finally:
@@ -277,7 +329,7 @@ class LoadConfigTests(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaises(ConfigError) as ctx:
-                    load_config()
+                    load_config(dotenv_path=Path("__missing_test_env__.env"))
             self.assertIn("не найден", str(ctx.exception))
 
     def test_invalid_json_content(self) -> None:
@@ -287,7 +339,7 @@ class LoadConfigTests(unittest.TestCase):
             clear=True,
         ):
             with self.assertRaises(ConfigError) as ctx:
-                load_config()
+                load_config(dotenv_path=Path("__missing_test_env__.env"))
         self.assertIn("некорректно", str(ctx.exception))
 
     def test_alert_chat_ids_empty_by_default(self) -> None:

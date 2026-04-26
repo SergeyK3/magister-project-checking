@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -19,6 +20,7 @@ from telegram.ext import (
     PicklePersistence,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.error_alerts import on_handler_error
@@ -28,26 +30,38 @@ from magister_checking.bot.handlers import (
     ASK_FIELD,
     BIND_ASK_FIO,
     BIND_CONFIRM,
+    CLAIM_ASK_FIO,
+    CLAIM_CONFIRM,
     CONFIG_BOT_DATA_KEY,
     PROJECT_CARD_ASK_TARGET,
     RECHECK_CALLBACK_DATA,
+    SPRAVKA_ASK_TARGET,
+    SPRAVKA_MENU,
+    ROLE_PICK,
     admin_menu,
     admin_stats,
     admin_sync_dashboard,
     ask_confirm,
     cancel,
     confirm_bind,
+    confirm_claim,
     default_bot_commands,
     help_command,
     project_card_receive_target,
     project_card_start,
     receive_bind_fio,
+    receive_claim_fio,
     receive_field,
     recheck,
     recheck_button,
     skip_bind,
     skip_field,
+    spravka_choose,
+    on_project_snapshot_json_file,
+    spravka_receive_target,
+    spravka_start,
     start,
+    start_role_callback,
 )
 
 logger = logging.getLogger("magistrcheckbot")
@@ -178,13 +192,30 @@ def build_application(config: BotConfig) -> Application:
     """
 
     persistence = _build_persistence(config)
-    application = (
+    builder = (
         Application.builder()
         .token(config.telegram_bot_token)
         .persistence(persistence)
         .post_init(_post_init)
-        .build()
     )
+    if config.telegram_force_ipv4:
+        # Отдельные транспорты: независимые пулы для обычных запросов и long polling.
+        builder = (
+            builder.request(
+                HTTPXRequest(
+                    httpx_kwargs={
+                        "transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+                    }
+                )
+            ).get_updates_request(
+                HTTPXRequest(
+                    httpx_kwargs={
+                        "transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+                    }
+                )
+            )
+        )
+    application = builder.build()
     application.bot_data[CONFIG_BOT_DATA_KEY] = config
 
     application.add_handler(CommandHandler("help", help_command), group=-1)
@@ -202,34 +233,57 @@ def build_application(config: BotConfig) -> Application:
         project_card_receive_target,
     )
 
+    spravka_callback = CallbackQueryHandler(
+        spravka_choose, pattern=r"^spravka:(telegram|pdf|commission)$"
+    )
+    start_role_callback_handler = CallbackQueryHandler(
+        start_role_callback, pattern=r"^start:"
+    )
+    claim_fio_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND, receive_claim_fio
+    )
+    claim_confirm_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND, confirm_claim
+    )
+    spravka_target_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        spravka_receive_target,
+    )
     conv_handler = ConversationHandler(
         name="registration",
         persistent=True,
         entry_points=[
             CommandHandler("start", start),
             CommandHandler("project_card", project_card_start),
+            CommandHandler("spravka", spravka_start),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
                 project_card_start,
             ),
         ],
         states={
+            ROLE_PICK: [start_role_callback_handler],
             BIND_ASK_FIO: [
                 CommandHandler("skip", skip_bind),
                 bind_fio_message_handler,
             ],
             BIND_CONFIRM: [bind_confirm_message_handler],
+            CLAIM_ASK_FIO: [claim_fio_message_handler],
+            CLAIM_CONFIRM: [claim_confirm_message_handler],
             ASK_FIELD: [
                 CommandHandler("skip", skip_field),
                 field_message_handler,
             ],
             ASK_CONFIRM: [confirm_message_handler],
             PROJECT_CARD_ASK_TARGET: [project_card_target_handler],
+            SPRAVKA_MENU: [spravka_callback],
+            SPRAVKA_ASK_TARGET: [spravka_target_handler],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("start", start),
             CommandHandler("project_card", project_card_start),
+            CommandHandler("spravka", spravka_start),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
                 project_card_start,
@@ -239,6 +293,14 @@ def build_application(config: BotConfig) -> Application:
     )
 
     application.add_handler(conv_handler)
+
+    application.add_handler(
+        MessageHandler(
+            filters.Document.FileExtension("json"),
+            on_project_snapshot_json_file,
+        ),
+        group=1,
+    )
 
     application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("stats", admin_stats))

@@ -19,9 +19,12 @@ from magister_checking.bot.handlers import (
     ASK_FIELD,
     BIND_ASK_FIO,
     BIND_CONFIRM,
+    CLAIM_ASK_FIO,
     PROJECT_CARD_ASK_TARGET,
     RECHECK_BUTTON_LABEL,
     RECHECK_CALLBACK_DATA,
+    ROLE_PICK,
+    help_reply_for_user,
     admin_menu,
     admin_stats,
     admin_sync_dashboard,
@@ -39,7 +42,10 @@ from magister_checking.bot.handlers import (
     recheck_button,
     skip_bind,
     skip_field,
+    spravka_choose,
+    spravka_start,
     start,
+    start_role_callback,
 )
 from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.models import SHEET_HEADER, UserForm
@@ -71,6 +77,7 @@ def _make_update(
     update.message.text = text
     update.message.reply_text = AsyncMock()
     update.message.reply_document = AsyncMock()
+    update.effective_message = update.message
     return update
 
 
@@ -93,19 +100,30 @@ def _patch_admin_check(value: bool):
     return patch("magister_checking.bot.handlers.is_admin_telegram_id", return_value=value)
 
 
+def _patch_supervisor_check(value: bool):
+    return patch(
+        "magister_checking.bot.handlers.is_supervisor_telegram_id", return_value=value
+    )
+
+
 class StartHandlerTests(unittest.TestCase):
-    def test_start_unknown_user_offers_binding(self) -> None:
+    def test_start_unknown_user_offers_role_picker(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
         update = _make_update()
 
-        with _patch_worksheet(ws):
+        with _patch_worksheet(ws), _patch_admin_check(False), _patch_supervisor_check(
+            False
+        ):
             state = _run(start(update, ctx))
 
-        self.assertEqual(state, BIND_ASK_FIO)
+        self.assertEqual(state, ROLE_PICK)
         form = ctx.user_data[handlers.USER_DATA_FORM_KEY]
         self.assertEqual(form.telegram_id, "111")
-        self.assertEqual(form.last_action, "ask_bind_fio")
+        update.message.reply_text.assert_awaited()
+        km = update.message.reply_text.await_args.kwargs.get("reply_markup")
+        self.assertIsNotNone(km)
+        self.assertEqual(len(km.inline_keyboard), 3)
 
     def test_start_existing_user_with_missing_only_asks_missing(self) -> None:
         ws = FakeWorksheet(
@@ -130,7 +148,9 @@ class StartHandlerTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_update()
 
-        with _patch_worksheet(ws):
+        with _patch_worksheet(ws), _patch_admin_check(False), _patch_supervisor_check(
+            False
+        ):
             state = _run(start(update, ctx))
 
         self.assertEqual(state, ASK_FIELD)
@@ -139,6 +159,36 @@ class StartHandlerTests(unittest.TestCase):
         self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "position")
         pending = ctx.user_data[handlers.USER_DATA_PENDING_KEY]
         self.assertEqual(pending, ["report_url"])
+
+    def test_start_role_pick_admin_sets_claim_state(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(callback_data="start:pick:admin")
+        state = _run(start_role_callback(update, ctx))
+        self.assertEqual(state, CLAIM_ASK_FIO)
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_CLAIM_TARGET_KEY], "admin"
+        )
+        update.callback_query.message.reply_text.assert_awaited()
+
+    def test_start_role_mag_new_asks_fio(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(callback_data="start:mag:new")
+        with _patch_worksheet(ws):
+            state = _run(start_role_callback(update, ctx))
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+
+    def test_start_role_mag_bind_sends_bind_flow(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(callback_data="start:mag:bind")
+        state = _run(start_role_callback(update, ctx))
+        self.assertEqual(state, BIND_ASK_FIO)
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_FORM_KEY].last_action, "ask_bind_fio"
+        )
 
 
 class ReceiveFieldTests(unittest.TestCase):
@@ -637,8 +687,20 @@ class BindFlowTests(unittest.TestCase):
     def _start_in_bind_state(self, ws: FakeWorksheet) -> _FakeContext:
         ctx = _FakeContext(ws)
         update = _make_update()
-        with _patch_worksheet(ws):
+        with (
+            _patch_worksheet(ws),
+            _patch_admin_check(False),
+            _patch_supervisor_check(False),
+        ):
             state = _run(start(update, ctx))
+        self.assertEqual(state, ROLE_PICK)
+        cb = _make_callback_update(callback_data="start:mag:bind")
+        with (
+            _patch_worksheet(ws),
+            _patch_admin_check(False),
+            _patch_supervisor_check(False),
+        ):
+            state = _run(start_role_callback(cb, ctx))
         self.assertEqual(state, BIND_ASK_FIO)
         return ctx
 
@@ -795,6 +857,7 @@ class HelpAndCommandsTests(unittest.TestCase):
                 "cancel",
                 "admin",
                 "project_card",
+                "spravka",
                 "stats",
                 "sync_dashboard",
             ],
@@ -805,12 +868,91 @@ class HelpAndCommandsTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_update(text="/help")
         update.effective_message = update.message
-        _run(help_command(update, ctx))
+        with _patch_admin_check(False), _patch_supervisor_check(False):
+            _run(help_command(update, ctx))
         update.message.reply_text.assert_awaited_once()
         text = update.message.reply_text.await_args.args[0]
+        self.assertIn("магистрант", text)
         self.assertIn("/start", text)
         self.assertIn("/recheck", text)
+        self.assertNotIn("/stats", text)
+        self.assertNotIn("/admin", text)
+
+    def test_help_command_admin_includes_privileged_slugs(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/help")
+        update.effective_message = update.message
+        with _patch_admin_check(True), _patch_supervisor_check(False):
+            _run(help_command(update, ctx))
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("администратор", text)
         self.assertIn("/stats", text)
+        self.assertIn("/admin", text)
+
+    def test_help_reply_for_user_routing(self) -> None:
+        self.assertIn("/stats", help_reply_for_user(is_admin=True))
+        self.assertNotIn("/stats", help_reply_for_user(is_admin=False))
+        self.assertIn("научный руководитель", help_reply_for_user(is_admin=False, is_supervisor=True).lower())
+        self.assertIn("/stats", help_reply_for_user(is_admin=True, is_supervisor=True))
+
+
+class SpravkaHandlerTests(unittest.TestCase):
+    """/spravka — меню: короткий текст или PDF."""
+
+    def test_spravka_start_sends_menu_with_two_callbacks(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/spravka")
+        with _patch_admin_check(False):
+            state = _run(spravka_start(update, ctx))
+        self.assertEqual(state, handlers.SPRAVKA_MENU)
+        km = update.message.reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(len(km.inline_keyboard), 2)
+        self.assertEqual(
+            km.inline_keyboard[0][0].callback_data, handlers.SPRAVKA_CALLBACK_TELEGRAM
+        )
+        self.assertEqual(
+            km.inline_keyboard[1][0].callback_data, handlers.SPRAVKA_CALLBACK_PDF
+        )
+
+    def test_spravka_pdf_callback_denies_non_admin(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(
+            user_id=111, callback_data=handlers.SPRAVKA_CALLBACK_PDF
+        )
+        with _patch_admin_check(False), _patch_worksheet(ws):
+            state = _run(spravka_choose(update, ctx))
+        self.assertEqual(state, handlers.SPRAVKA_MENU)
+        update.callback_query.answer.assert_awaited_once()
+        self.assertTrue(update.callback_query.answer.await_args.kwargs.get("show_alert"))
+
+    def test_spravka_telegram_non_admin_runs_dorecheck(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(
+            user_id=111, callback_data=handlers.SPRAVKA_CALLBACK_TELEGRAM
+        )
+        with _patch_admin_check(False), _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            state = _run(spravka_choose(update, ctx))
+        self.assertEqual(state, ConversationHandler.END)
+        m_do.assert_awaited_once()
+        self.assertTrue(m_do.call_args.kwargs.get("skip_status_message"))
+        self.assertFalse(m_do.call_args.kwargs.get("only_if_changed"))
+
+    def test_spravka_pdf_admin_goes_to_ask_target(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(
+            user_id=111, callback_data=handlers.SPRAVKA_CALLBACK_PDF
+        )
+        with _patch_admin_check(True), _patch_worksheet(ws):
+            state = _run(spravka_choose(update, ctx))
+        self.assertEqual(state, handlers.SPRAVKA_ASK_TARGET)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_SPRAVKA_MODE], "pdf")
 
 
 class AdminStatsTests(unittest.TestCase):
@@ -1018,7 +1160,10 @@ class RecheckHandlerTests(unittest.TestCase):
         with _patch_worksheet(ws), patch(
             "magister_checking.bot.handlers.run_row_check",
             return_value=fake_report,
-        ) as run:
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Иванов И.И."), {}),
+        ):
             _run(recheck(update, ctx))
 
         run.assert_called_once()
@@ -1103,6 +1248,7 @@ def _make_callback_update(
     query.data = callback_data
     query.answer = AsyncMock()
     query.edit_message_reply_markup = AsyncMock()
+    query.edit_message_text = AsyncMock()
     query.message.reply_text = AsyncMock()
     update.callback_query = query
     return update
@@ -1137,7 +1283,10 @@ class RecheckButtonTests(unittest.TestCase):
         with _patch_worksheet(ws), patch(
             "magister_checking.bot.handlers.run_row_check",
             return_value=fake_report,
-        ) as run:
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Иванов И.И."), {}),
+        ):
             _run(recheck_button(update, ctx))
 
         update.callback_query.answer.assert_awaited_once()
@@ -1190,7 +1339,10 @@ class RecheckButtonTests(unittest.TestCase):
         with _patch_worksheet(ws), patch(
             "magister_checking.bot.handlers.run_row_check",
             return_value=fake_report,
-        ) as run:
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Иванов И.И."), {}),
+        ):
             _run(recheck_button(update, ctx))
 
         run.assert_called_once()

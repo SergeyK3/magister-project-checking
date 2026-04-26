@@ -17,6 +17,25 @@ from magister_checking.bot.app import (
 )
 
 
+def _is_windows_nul_file_handler(h: logging.Handler) -> bool:
+    """FileHandler на ``\\\\.\\nul`` — не от ``configure_logging``, часто от pytest/Windows."""
+    if not isinstance(h, logging.FileHandler):
+        return False
+    bf = getattr(h, "baseFilename", None)
+    if not bf:
+        return False
+    low = str(bf).lower().replace("/", "\\")
+    return low in (r"\\.\nul", "nul") or low.endswith("\\nul")
+
+
+def _user_file_handlers() -> list[logging.FileHandler]:
+    return [
+        h
+        for h in logging.getLogger().handlers
+        if isinstance(h, logging.FileHandler) and not _is_windows_nul_file_handler(h)
+    ]
+
+
 class ConfigureLoggingTests(unittest.TestCase):
     def setUp(self) -> None:
         # configure_logging мутирует root logger глобально; сохраняем и
@@ -57,9 +76,7 @@ class ConfigureLoggingTests(unittest.TestCase):
 
         configure_logging(logging.INFO)
 
-        file_handlers = [
-            h for h in logging.getLogger().handlers if isinstance(h, logging.FileHandler)
-        ]
+        file_handlers = _user_file_handlers()
         self.assertEqual(file_handlers, [], msg="Не должно быть FileHandler без BOT_LOG_FILE")
 
     def test_configure_logging_with_file_writes_records_to_file(self) -> None:
@@ -79,11 +96,7 @@ class ConfigureLoggingTests(unittest.TestCase):
                     msg="configure_logging должен создавать каталог под log_file",
                 )
 
-                file_handlers = [
-                    h
-                    for h in logging.getLogger().handlers
-                    if isinstance(h, logging.FileHandler)
-                ]
+                file_handlers = _user_file_handlers()
                 self.assertEqual(
                     len(file_handlers), 1, msg="Ожидаем ровно один FileHandler"
                 )
@@ -119,11 +132,7 @@ class ConfigureLoggingTests(unittest.TestCase):
             try:
                 configure_logging(logging.INFO, log_file=log_path)
 
-                file_handlers = [
-                    h
-                    for h in logging.getLogger().handlers
-                    if isinstance(h, logging.FileHandler)
-                ]
+                file_handlers = _user_file_handlers()
                 self.assertEqual(len(file_handlers), 1)
                 handler = file_handlers[0]
                 self.assertIsInstance(
@@ -177,9 +186,8 @@ class ConfigureLoggingTests(unittest.TestCase):
                 except RuntimeError:
                     logger.exception("operation failed")
 
-                for h in logging.getLogger().handlers:
-                    if isinstance(h, logging.FileHandler):
-                        h.flush()
+                for h in _user_file_handlers():
+                    h.flush()
 
                 lines = [
                     line
@@ -203,7 +211,11 @@ def _close_file_handlers() -> None:
     пока хендлер держит на него открытый дескриптор."""
 
     root = logging.getLogger()
-    for h in [h for h in root.handlers if isinstance(h, logging.FileHandler)]:
+    for h in [
+        h
+        for h in root.handlers
+        if isinstance(h, logging.FileHandler) and not _is_windows_nul_file_handler(h)
+    ]:
         root.removeHandler(h)
         h.close()
 

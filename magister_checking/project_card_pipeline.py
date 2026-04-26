@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,12 +16,16 @@ from reportlab.pdfgen import canvas
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import UserForm
 from magister_checking.bot.report_enrichment import build_sheet_enrichment
+from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.sheets_repo import (
     get_spreadsheet,
     load_user,
     save_user_to_row_with_extras,
     sync_registration_dashboard,
 )
+from magister_checking.project_snapshot import build_project_snapshot
+from magister_checking.snapshot_drive import try_upload_project_snapshot_json
+from magister_checking.snapshot_render import render_commission_plaintext
 
 _PAGE_WIDTH, _PAGE_HEIGHT = A4
 _MARGIN_X = 50
@@ -65,50 +68,6 @@ def _project_card_font_name() -> str:
         except Exception:  # noqa: BLE001
             continue
     return _DEFAULT_FONT_NAME
-
-
-def _build_project_card_text(
-    *,
-    user: UserForm,
-    extra_values: dict[str, str],
-    generated_at: str,
-    row_number: int,
-) -> str:
-    def v(name: str) -> str:
-        return str(extra_values.get(name) or "—")
-
-    lines = [
-        "Карточка проекта магистранта",
-        "",
-        f"Дата формирования: {generated_at}",
-        f"Строка в таблице: {row_number}",
-        "",
-        "Данные магистранта",
-        f"ФИО: {user.fio or '—'}",
-        f"Группа: {user.group_name or '—'}",
-        f"Место работы: {user.workplace or '—'}",
-        f"Должность: {user.position or '—'}",
-        f"Телефон: {user.phone or '—'}",
-        f"Научный руководитель: {user.supervisor or '—'}",
-        "",
-        "Ссылки",
-        f"Промежуточный отчет: {user.report_url or '—'}",
-        f"Папка проекта: {v('project_folder_url')}",
-        f"Заключение ЛКБ: {v('lkb_url')}",
-        f"Диссертация: {v('dissertation_url')}",
-        "",
-        "Данные по анализу диссертации",
-        f"Число страниц: {v('pages_total')}",
-        f"Число источников: {v('sources_count')}",
-        f"Соответствие оформлению: {v('compliance')}",
-        "",
-        "Первичная проверка ссылки на отчет",
-        f"Формат URL: {user.report_url_valid or '—'}",
-        f"Доступ открыт: {user.report_url_accessible or '—'}",
-        "",
-        "Карточка сформирована автоматически на основе данных анкеты, промежуточного отчета и анализа диссертации.",
-    ]
-    return "\n".join(lines) + "\n"
 
 
 def _split_long_word(word: str, *, font_name: str, font_size: int, max_width: float) -> list[str]:
@@ -204,20 +163,26 @@ def generate_project_card_pdf(
     )
     sync_registration_dashboard(config)
 
-    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     base_name = _sanitize_filename(
         f"Карточка проекта - {user.fio or f'строка {row_number}'}",
         fallback=f"Карточка проекта - строка {row_number}",
     )
     pdf_name = f"{base_name}.pdf"
-    pdf_bytes = _render_pdf(
-        title=base_name,
-        body_text=_build_project_card_text(
-            user=user,
-            extra_values=extra_values,
-            generated_at=timestamp,
+    snapshot = build_project_snapshot(
+        user=user,
+        report=RowCheckReport(
+            fio=user.fio or "",
             row_number=row_number,
         ),
+        extra_values=extra_values,
+        fill_status=user.fill_status or "",
+        trigger="manual_regenerate",
+    )
+    body_text = render_commission_plaintext(snapshot)
+    try_upload_project_snapshot_json(config, snapshot)
+    pdf_bytes = _render_pdf(
+        title=base_name,
+        body_text=body_text,
     )
     if not pdf_bytes:
         raise RuntimeError("Не удалось сформировать PDF-карточку проекта.")

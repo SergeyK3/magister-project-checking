@@ -656,13 +656,18 @@ def _iter_users(worksheet: gspread.Worksheet) -> List[UserForm]:
     if not header:
         return []
 
-    max_rows = max((len(worksheet.col_values(idx + 1)) for idx in range(len(header))), default=0)
+    # Один values.get на весь лист вместо len(header) вызовов col_values и
+    # по одному row_values на строку — снижает риск 429 (Read requests/min).
+    all_values = worksheet.get_all_values()
+    if len(all_values) < 2:
+        return []
     users: List[UserForm] = []
-    for row_number in range(2, max_rows + 1):
-        row = worksheet.row_values(row_number)
+    n_header = len(header)
+    for row in all_values[1:]:
         if not any(str(value).strip() for value in row):
             continue
-        users.append(_row_to_user(header, row))
+        padded = (list(row) + [""] * n_header)[:n_header]
+        users.append(_row_to_user(header, padded))
     return users
 
 

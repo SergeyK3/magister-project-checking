@@ -21,6 +21,11 @@ _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 FIO_INVALID_MESSAGE = "В поле «ФИО» введена фраза, не похожая на имя"
 PHONE_INVALID_MESSAGE = "В поле «Телефон» введён неверный номер"
 REPORT_URL_WRONG_TARGET_MESSAGE = "Ссылка на промежуточный отчёт неверна"
+REPORT_URL_HTTP_INACCESSIBLE_MESSAGE = (
+    "По ссылке бот не смог открыть страницу (часто так бывает, если документ "
+    "доступен только вам). В Google Docs или Drive: «Настроить доступ» → "
+    "для пункта «Все, у кого есть ссылка» выберите «Читатель»."
+)
 REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE = (
     "Ссылка на промежуточный отчет содержит адрес папки, а не документа. "
     "Пожалуйста, исправьте!"
@@ -37,7 +42,11 @@ _CYRILLIC_NAME_WORD = re.compile(
 )
 _CYRILLIC_INITIALS = re.compile(rf"^(?:[{_CYRILLIC_UPPER_CLASS}]\.){{1,3}}$")
 _LATIN_LETTER = re.compile(r"[A-Za-z]")
-_INTERIM_REPORT_MARKER = re.compile(r"промежуточн\w*\s+отчет", re.IGNORECASE)
+# «отчёт» / «отчет»; латинская «e» в «отчет» часто при копировании из Word/Docs.
+_INTERIM_REPORT_MARKER = re.compile(
+    r"промежуточн\w*\s+отч(?:ёт|[еe]т)",
+    re.IGNORECASE | re.UNICODE,
+)
 
 _REQUEST_TIMEOUT_SECONDS = 15
 _USER_AGENT = "Mozilla/5.0 (compatible; magistrcheckbot/1.0)"
@@ -152,9 +161,19 @@ def _document_plain_text(document: Any) -> str:
 
 
 def is_interim_report_document(document: Any) -> bool:
-    """True, если тело документа содержит фразу «Промежуточный отчёт»."""
+    """True, если в документе есть маркер «промежуточн… отчёт».
 
-    plain = _document_plain_text(document).replace("ё", "е")
+    Учитывается :attr:`title` из ответа Docs API (часто только там) и первые
+    символы тела; допускается латинская «e» в «отчет».
+    """
+
+    parts: list[str] = []
+    if isinstance(document, dict):
+        title = document.get("title")
+        if title:
+            parts.append(str(title))
+    parts.append(_document_plain_text(document))
+    plain = "".join(parts).replace("ё", "е").replace("Ё", "Е")
     return bool(_INTERIM_REPORT_MARKER.search(plain))
 
 

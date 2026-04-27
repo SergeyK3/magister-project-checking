@@ -25,6 +25,7 @@ from magister_checking.bot.row_pipeline import (
 from magister_checking.bot.validation import (
     FIO_INVALID_MESSAGE,
     PHONE_INVALID_MESSAGE,
+    REPORT_URL_HTTP_INACCESSIBLE_MESSAGE,
     REPORT_URL_WRONG_TARGET_MESSAGE,
 )
 from magister_checking.dissertation_metrics import DissertationMetrics
@@ -72,12 +73,12 @@ class Stage2Tests(unittest.TestCase):
     def test_invalid_url_format_fails(self) -> None:
         result = run_stage2(report_url="not-a-url", url_probe=("no", "no"))
         self.assertFalse(result.passed)
-        self.assertEqual(result.issues, ["Ссылка не открыта"])
+        self.assertEqual(result.issues, [REPORT_URL_HTTP_INACCESSIBLE_MESSAGE])
 
     def test_valid_url_but_not_accessible_fails(self) -> None:
         result = run_stage2(report_url=REPORT_URL, url_probe=("yes", "no"))
         self.assertFalse(result.passed)
-        self.assertEqual(result.issues, ["Ссылка не открыта"])
+        self.assertEqual(result.issues, [REPORT_URL_HTTP_INACCESSIBLE_MESSAGE])
 
     def test_empty_url_specific_message(self) -> None:
         result = run_stage2(report_url="", url_probe=("", ""))
@@ -479,7 +480,7 @@ class RunRowPipelineTests(unittest.TestCase):
             row_number=3,
         )
         self.assertEqual(report.stopped_at, "stage2")
-        self.assertIn("Ссылка не открыта", report.stage2.issues)
+        self.assertIn(REPORT_URL_HTTP_INACCESSIBLE_MESSAGE, report.stage2.issues)
         self.assertFalse(report.stage3.executed)
 
     def test_full_pass_with_all_links(self) -> None:

@@ -279,6 +279,15 @@ class InterimReportMarkerTests(unittest.TestCase):
         }
         self.assertTrue(is_interim_report_document(doc))
 
+    def test_marker_only_in_api_title(self) -> None:
+        doc = {"title": "Промежуточный отчёт — Хайтбаева", "body": {"content": []}}
+        self.assertTrue(is_interim_report_document(doc))
+
+    def test_latin_e_in_otchet(self) -> None:
+        # Латинская U+0065 в слове «отчет» (частый артефакт копирования).
+        doc = _doc_with_text("Промежуточный отч" + "\u0065" + "т\n")
+        self.assertTrue(is_interim_report_document(doc))
+
     def test_empty_document_rejected(self) -> None:
         self.assertFalse(is_interim_report_document({}))
         self.assertFalse(is_interim_report_document(None))

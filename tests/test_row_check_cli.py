@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from magister_checking.bot.models import UserForm
+from magister_checking.bot.validation import REPORT_URL_HTTP_INACCESSIBLE_MESSAGE
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.report_parser import ParsedReport
 from magister_checking.bot.row_pipeline import RowCheckReport
@@ -209,7 +210,7 @@ class RunRowCheckTests(unittest.TestCase):
         ):
             report = run_row_check(config, RowLocator(row_number=3))
         self.assertEqual(report.stopped_at, "stage2")
-        self.assertIn("Ссылка не открыта", report.stage2.issues)
+        self.assertIn(REPORT_URL_HTTP_INACCESSIBLE_MESSAGE, report.stage2.issues)
 
     def test_full_stage3_with_mixed_accessibility(self) -> None:
         report_url = "https://docs.google.com/document/d/report/edit"

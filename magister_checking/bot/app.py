@@ -46,6 +46,7 @@ from magister_checking.bot.handlers import (
     confirm_bind,
     confirm_claim,
     default_bot_commands,
+    group_start_use_private_chat,
     help_command,
     project_card_receive_target,
     project_card_start,
@@ -218,60 +219,75 @@ def build_application(config: BotConfig) -> Application:
     application = builder.build()
     application.bot_data[CONFIG_BOT_DATA_KEY] = config
 
-    application.add_handler(CommandHandler("help", help_command), group=-1)
+    private = filters.ChatType.PRIVATE
 
-    field_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, receive_field)
-    confirm_message_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, ask_confirm)
+    application.add_handler(CommandHandler("help", help_command, filters=private), group=-1)
+
+    application.add_handler(
+        CommandHandler(
+            "start",
+            group_start_use_private_chat,
+            filters=filters.ChatType.GROUPS,
+        ),
+    )
+
+    field_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private, receive_field
+    )
+    confirm_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private, ask_confirm
+    )
     bind_fio_message_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND, receive_bind_fio
+        filters.TEXT & ~filters.COMMAND & private, receive_bind_fio
     )
     bind_confirm_message_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND, confirm_bind
+        filters.TEXT & ~filters.COMMAND & private, confirm_bind
     )
     project_card_target_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
+        filters.TEXT & ~filters.COMMAND & private,
         project_card_receive_target,
     )
 
     spravka_callback = CallbackQueryHandler(
-        spravka_choose, pattern=r"^spravka:(telegram|pdf|commission)$"
+        spravka_choose,
+        pattern=r"^spravka:(telegram|pdf|commission)$",
     )
     start_role_callback_handler = CallbackQueryHandler(
         start_role_callback, pattern=r"^start:"
     )
     claim_fio_message_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND, receive_claim_fio
+        filters.TEXT & ~filters.COMMAND & private, receive_claim_fio
     )
     claim_confirm_message_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND, confirm_claim
+        filters.TEXT & ~filters.COMMAND & private, confirm_claim
     )
     spravka_target_handler = MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
+        filters.TEXT & ~filters.COMMAND & private,
         spravka_receive_target,
     )
     conv_handler = ConversationHandler(
         name="registration",
         persistent=True,
         entry_points=[
-            CommandHandler("start", start),
-            CommandHandler("project_card", project_card_start),
-            CommandHandler("spravka", spravka_start),
+            CommandHandler("start", start, filters=private),
+            CommandHandler("project_card", project_card_start, filters=private),
+            CommandHandler("spravka", spravka_start, filters=private),
             MessageHandler(
-                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
+                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
             ),
         ],
         states={
             ROLE_PICK: [start_role_callback_handler],
             BIND_ASK_FIO: [
-                CommandHandler("skip", skip_bind),
+                CommandHandler("skip", skip_bind, filters=private),
                 bind_fio_message_handler,
             ],
             BIND_CONFIRM: [bind_confirm_message_handler],
             CLAIM_ASK_FIO: [claim_fio_message_handler],
             CLAIM_CONFIRM: [claim_confirm_message_handler],
             ASK_FIELD: [
-                CommandHandler("skip", skip_field),
+                CommandHandler("skip", skip_field, filters=private),
                 field_message_handler,
             ],
             ASK_CONFIRM: [confirm_message_handler],
@@ -280,12 +296,12 @@ def build_application(config: BotConfig) -> Application:
             SPRAVKA_ASK_TARGET: [spravka_target_handler],
         },
         fallbacks=[
-            CommandHandler("cancel", cancel),
-            CommandHandler("start", start),
-            CommandHandler("project_card", project_card_start),
-            CommandHandler("spravka", spravka_start),
+            CommandHandler("cancel", cancel, filters=private),
+            CommandHandler("start", start, filters=private),
+            CommandHandler("project_card", project_card_start, filters=private),
+            CommandHandler("spravka", spravka_start, filters=private),
             MessageHandler(
-                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$"),
+                filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
             ),
         ],
@@ -296,16 +312,18 @@ def build_application(config: BotConfig) -> Application:
 
     application.add_handler(
         MessageHandler(
-            filters.Document.FileExtension("json"),
+            filters.Document.FileExtension("json") & private,
             on_project_snapshot_json_file,
         ),
         group=1,
     )
 
-    application.add_handler(CommandHandler("admin", admin_menu))
-    application.add_handler(CommandHandler("stats", admin_stats))
-    application.add_handler(CommandHandler("sync_dashboard", admin_sync_dashboard))
-    application.add_handler(CommandHandler("recheck", recheck))
+    application.add_handler(CommandHandler("admin", admin_menu, filters=private))
+    application.add_handler(CommandHandler("stats", admin_stats, filters=private))
+    application.add_handler(
+        CommandHandler("sync_dashboard", admin_sync_dashboard, filters=private)
+    )
+    application.add_handler(CommandHandler("recheck", recheck, filters=private))
     application.add_handler(
         CallbackQueryHandler(recheck_button, pattern=f"^{RECHECK_CALLBACK_DATA}$")
     )

@@ -13,6 +13,7 @@ from typing import Any
 
 from magister_checking.bot.models import FillStatus, UserForm, compute_fill_status
 from magister_checking.bot.stage_checks import run_stage1_checks
+from magister_checking.bot.validation import REPORT_URL_HTTP_INACCESSIBLE_MESSAGE
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.drive_urls import DriveUrlKind, classify_drive_url
 from magister_checking.formatting_rules import (
@@ -251,7 +252,7 @@ def run_stage2(
         return result
     valid, accessible = url_probe
     if valid != "yes" or accessible != "yes":
-        result.issues.append("Ссылка не открыта")
+        result.issues.append(REPORT_URL_HTTP_INACCESSIBLE_MESSAGE)
         return result
     result.passed = True
     return result

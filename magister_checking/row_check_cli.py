@@ -17,6 +17,7 @@ from typing import Any
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from magister_checking.bot.config import BotConfig
@@ -131,32 +132,42 @@ def _try_load_report_document(
     docs_service: Any,
     drive_service: Any,
     docx_conversion_folder_id: str = "",
-) -> Any | None:
+) -> tuple[Any | None, bool]:
     """Пытается получить тело Google Doc по ссылке на отчёт.
 
     Если по ссылке лежит .docx, временно копирует его в
     ``docx_conversion_folder_id`` с конверсией в Google Doc, читает через
     Docs API и удаляет копию.
 
-    Возвращает dict документа или None при любой ошибке (неподдерживаемый
-    формат, нет доступа, папка без отчёта, нет папки для конверсии и т.п.).
+    Возвращает ``(document | None, permission_denied)``.
+    ``permission_denied`` — True, если Drive/Docs API ответили 401/403 для
+    служебного аккаунта (файл не расшарен на бота).
     """
 
     if not report_url:
-        return None
+        return None, False
     try:
         doc_id = resolve_report_google_doc_id(report_url, drive_service=drive_service)
     except Exception:  # noqa: BLE001
-        return None
+        return None, False
     try:
         with google_doc_from_drive_file(
             drive_service,
             doc_id,
             conversion_folder_id=docx_conversion_folder_id,
         ) as loadable_id:
-            return docs_service.documents().get(documentId=loadable_id).execute()
+            doc = docs_service.documents().get(documentId=loadable_id).execute()
+            return doc, False
+    except HttpError as exc:
+        status = getattr(exc.resp, "status", None)
+        try:
+            code = int(status) if status is not None else 0
+        except (TypeError, ValueError):
+            code = 0
+        denied = code in (403, 401)
+        return None, denied
     except Exception:  # noqa: BLE001
-        return None
+        return None, False
 
 
 def _try_parse_report(document: Any) -> ParsedReport | None:
@@ -483,7 +494,7 @@ def run_row_check(
     docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    report_document = _try_load_report_document(
+    report_document, report_doc_permission_denied = _try_load_report_document(
         report_url=report_url,
         docs_service=docs_service,
         drive_service=drive_service,
@@ -582,6 +593,7 @@ def run_row_check(
     if (
         report_url
         and report_document is None
+        and not report_doc_permission_denied
         and url_probe
         and url_probe == ("yes", "yes")
         and REPORT_URL_WRONG_TARGET_MESSAGE not in pipeline_report.stage1.issues
@@ -590,6 +602,24 @@ def run_row_check(
         pipeline_report.stage1.passed = False
         if pipeline_report.stopped_at is None:
             pipeline_report.stopped_at = "stage1"
+
+    if report_doc_permission_denied and report_url:
+        sa_email = getattr(creds, "service_account_email", None) or "служебного аккаунта бота"
+        clarify = (
+            "Документ по ссылке недоступен боту для проверки (у служебного аккаунта нет прав). "
+            "В Google: «Настроить доступ» → «Все, у кого есть ссылка» — роль «Читатель», "
+            f"либо добавьте в доступ к файлу: {sa_email}."
+        )
+        issues = [
+            i
+            for i in pipeline_report.stage1.issues
+            if i != REPORT_URL_WRONG_TARGET_MESSAGE
+        ]
+        if clarify not in issues:
+            issues.insert(0, clarify)
+        pipeline_report.stage1.issues = issues
+        pipeline_report.stage1.passed = False
+        pipeline_report.stopped_at = "stage1"
 
     # Folder-вместо-документа в report_url — отдельное более конкретное
     # сообщение (см. ``check_report_url_target_kind``). Перезаписывает

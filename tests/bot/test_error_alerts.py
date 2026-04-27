@@ -99,6 +99,23 @@ class OnHandlerErrorTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_google_sheets_429_skips_alerts(self) -> None:
+        """Временный лимит Google (429) — только warning, без рассылки админам."""
+
+        async def _run() -> None:
+            cfg = _minimal_config(alert=(111,))
+            application = build_application(cfg)
+            send_mock = AsyncMock()
+            ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+            ctx.application = application
+            ctx.bot = MagicMock()
+            ctx.bot.send_message = send_mock
+            ctx.error = RuntimeError("APIError: [429]: Quota exceeded")
+            await on_handler_error(MagicMock(), ctx)
+            send_mock.assert_not_awaited()
+
+        asyncio.run(_run())
+
     def test_polling_network_error_skips_alerts(self) -> None:
         """PTB передаёт update=None при ошибке get_updates; не спамим алертами."""
 

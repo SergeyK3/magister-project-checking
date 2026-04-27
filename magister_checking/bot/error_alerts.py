@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
+from magister_checking.bot.google_api_errors import is_google_sheets_rate_limit
 from magister_checking.bot.handlers import CONFIG_BOT_DATA_KEY
 
 if TYPE_CHECKING:
@@ -71,6 +72,13 @@ async def on_handler_error(update: object, context: ContextTypes.DEFAULT_TYPE) -
         logger.warning(
             "Сбой сети при опросе Telegram (%s: %s). Повтор запроса выполнит библиотека.",
             type(err).__name__,
+            err,
+        )
+        return
+
+    if is_google_sheets_rate_limit(err):
+        logger.warning(
+            "Временный лимит Google Sheets/API (429); алерт админам не отправляем: %s",
             err,
         )
         return

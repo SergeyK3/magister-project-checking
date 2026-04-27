@@ -17,11 +17,16 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
 
 from magister_checking.bot.config import BotConfig
+from magister_checking.bot.google_api_errors import (
+    GOOGLE_SHEETS_RATE_LIMIT_ADMIN_NOTE,
+    GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE,
+    is_google_sheets_rate_limit,
+)
 from magister_checking.bot.models import (
     FIELD_LABELS,
     FIELD_PROMPTS,
@@ -79,6 +84,26 @@ from magister_checking.row_check_cli import (
 
 logger = logging.getLogger("magistrcheckbot")
 _REGISTRATION_SHEETS_LOCK = asyncio.Lock()
+
+
+def _is_private_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    return chat is not None and chat.type == ChatType.PRIVATE
+
+
+async def group_start_use_private_chat(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """В группах и супергруппах регистрация не ведётся — ответ в тот же чат с подсказкой."""
+
+    msg = update.effective_message
+    if msg is None:
+        return
+    me = await context.bot.get_me()
+    uname = f"@{me.username}" if me.username else "бота"
+    await msg.reply_text(
+        f"Регистрация только в личном чате. Откройте диалог с {uname} и нажмите /start."
+    )
 
 ASK_FIELD, ASK_CONFIRM, BIND_ASK_FIO, BIND_CONFIRM, PROJECT_CARD_ASK_TARGET = range(5)
 SPRAVKA_MENU, SPRAVKA_ASK_TARGET = 5, 6
@@ -179,6 +204,20 @@ def _format_user_visible_exc(exc: BaseException, *, limit: int = 480) -> str:
     if len(first) > limit:
         return first[: limit - 1] + "…"
     return first
+
+
+def _user_message_for_api_failure(
+    exc: BaseException, *, audience: str = "student", limit: int = 480
+) -> str:
+    """Текст ошибки API для чата: при 429 — дружелюбное объяснение про лимит Google."""
+
+    if is_google_sheets_rate_limit(exc):
+        return (
+            GOOGLE_SHEETS_RATE_LIMIT_ADMIN_NOTE
+            if audience == "admin"
+            else GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
+        )
+    return _format_user_visible_exc(exc, limit=limit)
 
 
 def _bot_config(context: ContextTypes.DEFAULT_TYPE) -> BotConfig:
@@ -595,6 +634,12 @@ async def start_role_callback(
     query = update.callback_query
     if query is None:
         return ConversationHandler.END
+    if not _is_private_chat(update):
+        try:
+            await query.answer("Регистрация только в личном чате с ботом.", show_alert=True)
+        except BadRequest:
+            pass
+        return ConversationHandler.END
     data = (query.data or "").strip()
     user_form = _get_user_form(context)
     _set_telegram_identity(user_form, update)
@@ -853,7 +898,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось сформировать /stats")
         await update.message.reply_text(
-            f"Не удалось получить сводку. Кратко: {_format_user_visible_exc(exc)}"
+            "Не удалось получить сводку.\n\n"
+            f"{_user_message_for_api_failure(exc, audience='admin')}"
         )
         return
 
@@ -877,7 +923,8 @@ async def admin_sync_dashboard(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as exc:  # noqa: BLE001
         logger.exception("Не удалось обновить Dashboard (sync)")
         await update.message.reply_text(
-            f"Не удалось обновить лист «Dashboard».\n\nКратко: {_format_user_visible_exc(exc)}"
+            "Не удалось обновить лист «Dashboard».\n\n"
+            f"{_user_message_for_api_failure(exc, audience='admin')}"
         )
         return
 
@@ -951,7 +998,7 @@ async def project_card_receive_target(
         logger.exception("Не удалось сформировать карточку проекта для строки %s", row_number)
         await update.message.reply_text(
             "Не удалось сформировать карточку проекта.\n\n"
-            f"Кратко: {_format_user_visible_exc(exc)}\n\n"
+            f"{_user_message_for_api_failure(exc, audience='admin')}\n\n"
             "Подробности — в логе бота (для администратора).",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -1030,6 +1077,12 @@ async def spravka_choose(
     query = update.callback_query
     if query is None or not query.data:
         return SPRAVKA_MENU
+    if not _is_private_chat(update):
+        try:
+            await query.answer("Только в личном чате с ботом.", show_alert=True)
+        except BadRequest:
+            pass
+        return ConversationHandler.END
     data = query.data
     is_admin = _is_admin(update, context)
 
@@ -1136,7 +1189,7 @@ async def spravka_receive_target(
             logger.exception("spravka PDF: не удалось для строки %s", row_number)
             await update.message.reply_text(
                 "Не удалось сформировать PDF.\n\n"
-                f"Кратко: {_format_user_visible_exc(exc)}\n\n"
+                f"{_user_message_for_api_failure(exc, audience='admin')}\n\n"
                 "Подробности — в логе бота.",
                 reply_markup=ReplyKeyboardRemove(),
             )
@@ -1184,7 +1237,8 @@ async def spravka_receive_target(
         await _try_mark_recheck_error(cfg, row_number)
         await _reply_spravka_to_message(
             update.message,
-            "Не удалось выполнить проверку.\n\n" f"Причина: {exc}",
+            "Не удалось выполнить проверку.\n\n"
+            f"{_user_message_for_api_failure(exc, audience='admin')}",
         )
         return ConversationHandler.END
 
@@ -1374,15 +1428,25 @@ async def receive_field(
 ) -> int:
     """Сохраняет ответ пользователя в текущее активное поле."""
 
+    msg = update.effective_message
     field_key = _current_field(context)
     if not field_key:
-        await update.message.reply_text(
-            "Не вижу активного вопроса. Нажмите /start, чтобы начать заново."
-        )
+        if msg:
+            await msg.reply_text(
+                "Не вижу активного вопроса. Нажмите /start, чтобы начать заново."
+            )
         return ConversationHandler.END
 
+    if msg is None or msg.text is None:
+        if msg:
+            await msg.reply_text(
+                "Нужен текстовый ответ. Если открыта клавиатура с кнопками — "
+                "используйте личный чат с ботом."
+            )
+        return ASK_FIELD
+
     user_form = _get_user_form(context)
-    raw = update.message.text or ""
+    raw = msg.text or ""
     if _is_skip_text(raw):
         value = getattr(user_form, field_key)
     else:
@@ -1410,7 +1474,7 @@ async def receive_field(
                 user_form.report_url_accessible = ""
                 _refresh_status(user_form)
                 _record_action(user_form, "report_url_folder_retry")
-                await update.message.reply_text(
+                await msg.reply_text(
                     target_msg
                     + "\n\nПришлите, пожалуйста, правильную ссылку на сам "
                     "документ промежуточного отчёта (Google Docs / DOCX в "
@@ -1423,7 +1487,7 @@ async def receive_field(
             user_form.report_url_valid = valid
             user_form.report_url_accessible = accessible
             if previous_was_folder_warning and valid == "yes":
-                await update.message.reply_text(
+                await msg.reply_text(
                     "Ссылка принята. Продолжаю регистрацию."
                 )
         else:
@@ -1441,10 +1505,12 @@ async def skip_field(
     """Команда /skip: пропустить текущее поле."""
 
     field_key = _current_field(context)
+    msg = update.effective_message
     if not field_key:
-        await update.message.reply_text(
-            "Сейчас нет активного вопроса. Нажмите /start, чтобы начать."
-        )
+        if msg:
+            await msg.reply_text(
+                "Сейчас нет активного вопроса. Нажмите /start, чтобы начать."
+            )
         return ConversationHandler.END
 
     user_form = _get_user_form(context)
@@ -1463,16 +1529,22 @@ async def ask_confirm(
 ) -> int:
     """Подтверждение сохранения и запись в Sheets."""
 
-    answer = (update.message.text or "").strip().lower()
+    msg = update.effective_message
+    if msg is None or msg.text is None:
+        if msg:
+            await msg.reply_text("Нужен текстовый ответ: да или нет.")
+        return ASK_CONFIRM
+
+    answer = (msg.text or "").strip().lower()
     user_form = _get_user_form(context)
 
     if answer not in {"да", "нет", "yes", "no"}:
-        await update.message.reply_text("Введите: да или нет")
+        await msg.reply_text("Введите: да или нет")
         return ASK_CONFIRM
 
     if answer in {"нет", "no"}:
         _record_action(user_form, "requested_correction")
-        await update.message.reply_text(
+        await msg.reply_text(
             "Хорошо, давайте исправим данные.\n\n"
             f"Сейчас я пройду все поля заново. Для верных значений отправляйте {SKIP_TOKEN}, "
             "а неверный ответ перепишите."
@@ -1511,32 +1583,37 @@ async def ask_confirm(
             )
         else:
             row_num = await _call_blocking(upsert_user, worksheet, user_form)
+        dashboard_rate_note = ""
         try:
             await _call_blocking(sync_registration_dashboard, cfg)
-        except Exception:  # noqa: BLE001
+        except Exception as sync_exc:  # noqa: BLE001
             logger.exception(
                 "Не удалось обновить Dashboard для spreadsheet_id=%s",
                 cfg.spreadsheet_id,
             )
+            if is_google_sheets_rate_limit(sync_exc):
+                dashboard_rate_note = "\n\n" + GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
 
     missing = get_missing_fields(user_form)
     if missing:
-        await update.message.reply_text(
+        await msg.reply_text(
             "Данные сохранены.\n\n"
             f"Строка в таблице: {row_num}\n"
             f"Статус: {user_form.fill_status}\n"
             f"Ещё не заполнено: {', '.join(missing)}\n\n"
             "Спасибо. Регистрация сохранена.\n"
             "Позже вы можете снова нажать /start и продолжить."
+            + dashboard_rate_note
         )
     else:
-        await update.message.reply_text(
+        await msg.reply_text(
             "Данные сохранены.\n\n"
             f"Строка в таблице: {row_num}\n"
             f"Статус: {user_form.fill_status}\n"
             "Спасибо. Регистрация завершена.\n\n"
             "Чтобы запустить проверку вашего отчёта прямо сейчас — "
-            "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /recheck.",
+            "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /recheck."
+            + dashboard_rate_note,
             reply_markup=build_recheck_keyboard(),
         )
 
@@ -1708,7 +1785,7 @@ async def _do_recheck(
         await _send_recheck_reply(
             update,
             "Не удалось выполнить повторную проверку.\n\n"
-            f"Причина: {exc}",
+            f"{_user_message_for_api_failure(exc, audience='student')}",
             reply_markup=build_recheck_keyboard(),
         )
         return
@@ -1757,6 +1834,12 @@ async def recheck_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     query = update.callback_query
     if query is None:
+        return
+    if not _is_private_chat(update):
+        try:
+            await query.answer("Только в личном чате с ботом.", show_alert=True)
+        except BadRequest:
+            pass
         return
 
     await query.answer()

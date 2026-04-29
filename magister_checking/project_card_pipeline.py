@@ -34,6 +34,71 @@ _FONT_SIZE = 11
 _LINE_HEIGHT = 16
 _DEFAULT_FONT_NAME = "Helvetica"
 _UNICODE_FONT_NAME = "ProjectCardUnicode"
+# Токены с пробелами в URL в карточке не переносим словами — см. обёртку строк.
+_LINK_IN_TEXT_RE = re.compile(r"https?://\S+")
+_PUNCT_AFTER_URL = frozenset(".,;:!?)]}'\"«»")
+
+
+def _strip_url_trailing_punct(url: str) -> str:
+    """Сохранённый якорь ссылки без хвостовой пунктуации после URL в тексте."""
+
+    U = url
+    while len(U) > 1 and U[-1] in _PUNCT_AFTER_URL:
+        U = U[:-1]
+    return U
+
+
+def _draw_wrapped_physical_line_with_links(
+    pdf: canvas.Canvas,
+    *,
+    x0: float,
+    y: float,
+    line: str,
+    font_name: str,
+    font_size: int,
+) -> None:
+    """Рисует одну уже уложенную по ширине строку: русский текст чёрным, ``https://…`` синим + URI."""
+
+    line = _pdf_safe_text(line)
+    if not line:
+        return
+
+    if _LINK_IN_TEXT_RE.search(line) is None:
+        pdf.setFillColorRGB(0.0, 0.0, 0.0)
+        pdf.drawString(x0, y, line)
+        return
+
+    black = (0.0, 0.0, 0.0)
+    link_blue = (0.06, 0.27, 0.65)
+
+    pdf.setFillColorRGB(*black)
+    x = x0
+    last = 0
+    for m in _LINK_IN_TEXT_RE.finditer(line):
+        prefix = line[last : m.start()]
+        if prefix:
+            pdf.drawString(x, y, prefix)
+            x += pdfmetrics.stringWidth(prefix, font_name, font_size)
+
+        visible = m.group(0)
+        pdf.setFillColorRGB(*link_blue)
+        pdf.drawString(x, y, visible)
+        sw = pdfmetrics.stringWidth(visible, font_name, font_size)
+        href = _strip_url_trailing_punct(visible)
+        if href.startswith(("http://", "https://")):
+            pdf.linkURL(
+                href,
+                (x, y - 3.0, x + sw, y + font_size + 4.0),
+                relative=0,
+            )
+        pdf.setFillColorRGB(*black)
+        x += sw
+        last = m.end()
+
+    suffix = line[last:]
+    if suffix:
+        pdf.drawString(x, y, suffix)
+
 
 @dataclass(frozen=True)
 class ProjectCardResult:
@@ -71,6 +136,7 @@ def _project_card_font_name() -> str:
 
 
 def _split_long_word(word: str, *, font_name: str, font_size: int, max_width: float) -> list[str]:
+    word = _pdf_safe_text(word)
     chunks: list[str] = []
     current = ""
     for char in word:
@@ -85,7 +151,18 @@ def _split_long_word(word: str, *, font_name: str, font_size: int, max_width: fl
     return chunks or [word]
 
 
+def _pdf_safe_text(value: object) -> str:
+    """ReportLab ждёт str; из Sheets теоретически могут прийти числа или bytes."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, bytearray):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
 def _wrap_line(line: str, *, font_name: str, font_size: int, max_width: float) -> list[str]:
+    line = _pdf_safe_text(line)
     if not line.strip():
         return [""]
 
@@ -112,6 +189,8 @@ def _wrap_line(line: str, *, font_name: str, font_size: int, max_width: float) -
 
 def _render_pdf(*, title: str, body_text: str) -> bytes:
     font_name = _project_card_font_name()
+    body_text = _pdf_safe_text(body_text)
+    title = _pdf_safe_text(title).replace("\x00", "")
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
     pdf.setTitle(title)
@@ -132,7 +211,14 @@ def _render_pdf(*, title: str, body_text: str) -> bytes:
                 pdf.showPage()
                 pdf.setFont(font_name, _FONT_SIZE)
                 y = _PAGE_HEIGHT - _MARGIN_Y
-            pdf.drawString(_MARGIN_X, y, line)
+            _draw_wrapped_physical_line_with_links(
+                pdf,
+                x0=_MARGIN_X,
+                y=y,
+                line=_pdf_safe_text(line),
+                font_name=font_name,
+                font_size=_FONT_SIZE,
+            )
             y -= _LINE_HEIGHT
         if raw_line == "":
             y -= _LINE_HEIGHT // 3

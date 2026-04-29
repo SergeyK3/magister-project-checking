@@ -19,17 +19,33 @@ class HyperlinkRecord:
     context_path: str
 
 
+def table_cell_content_blocks(cell: dict[str, Any]) -> list[dict[str, Any]]:
+    """Тело ячейки таблицы: ``content`` в ответе Docs API может быть ``null``.
+
+    ``cell.get(\"content\", [])`` при ключе ``\"content\": null`` даёт ``None``, из-за
+    чего обход падал с ``TypeError``.
+    """
+    raw = cell.get("content") if isinstance(cell, dict) else None
+    if isinstance(raw, list):
+        return raw  # type: ignore[return-value]
+    return []
+
+
 def extract_plain_text(document: dict[str, Any]) -> str:
     """Весь видимый текст документа в порядке следования в API (включая ячейки таблиц)."""
     parts: list[str] = []
-    content = document.get("body", {}).get("content", [])
+    content = document.get("body", {}).get("content") or []
+    if not isinstance(content, list):
+        content = []
     _append_text_from_content(content, parts)
     return "".join(parts)
 
 
 def iter_hyperlinks(document: dict[str, Any]) -> Iterator[HyperlinkRecord]:
     """Итерация по внешним URL в textRun (link.url). Внутренние headingId/bookmarkId пропускаются."""
-    content = document.get("body", {}).get("content", [])
+    content = document.get("body", {}).get("content") or []
+    if not isinstance(content, list):
+        content = []
     yield from _iter_hyperlinks_in_content(content, "body")
 
 
@@ -41,7 +57,7 @@ def _append_text_from_content(content: list[dict[str, Any]], parts: list[str]) -
             table = element["table"]
             for row in table.get("tableRows", []):
                 for cell in row.get("tableCells", []):
-                    nested = cell.get("content", [])
+                    nested = table_cell_content_blocks(cell)
                     _append_text_from_content(nested, parts)
         # sectionBreak, tableOfContents — без текстового содержимого в body
 
@@ -72,7 +88,7 @@ def _iter_hyperlinks_in_content(
             for ri, row in enumerate(table.get("tableRows", [])):
                 for ci, cell in enumerate(row.get("tableCells", [])):
                     cell_path = f"{path}/table[{ri},{ci}]"
-                    nested = cell.get("content", [])
+                    nested = table_cell_content_blocks(cell)
                     yield from _iter_hyperlinks_in_content(nested, cell_path)
 
 

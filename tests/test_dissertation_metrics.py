@@ -11,12 +11,14 @@ from docx import Document  # type: ignore[import-untyped]
 from magister_checking.dissertation_metrics import (
     _docx_bibliography_word_list_count,
     _dominant_margins,
+    _estimate_sources_count,
     _gdoc_collect_section_margins,
     _gdoc_page_numbering_info,
     _jc_to_horizontal,
     _twips_to_cm,
     analyze_dissertation,
     analyze_docx_bytes,
+    bibliography_heading_issue_note,
 )
 
 
@@ -582,6 +584,27 @@ class GoogleDocMarginsAndNumberingTests(unittest.TestCase):
         }
         info = _gdoc_page_numbering_info(doc)
         self.assertEqual(info["position"], "bottom-left")
+
+
+class WrongBibliographyHeadingBaikyatalovTests(unittest.TestCase):
+    """Якорь «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ» + предупреждение по методичке."""
+
+    def test_genitive_heading_counts_numbered_sources(self) -> None:
+        plain = (
+            "Введение\n\nСПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ\n\n"
+            + "\n".join(f"{i}. Источник {i}" for i in range(1, 80))
+        )
+        self.assertEqual(_estimate_sources_count(plain), 79)
+
+    def test_genitive_heading_sets_issue_note_without_approved_phrase(self) -> None:
+        plain = "СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ\n1. A\n"
+        msg = bibliography_heading_issue_note(plain)
+        self.assertIsNotNone(msg)
+        self.assertIn("ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", msg)
+
+    def test_approved_heading_only_no_issue_note(self) -> None:
+        plain = "СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ\n1. A\n"
+        self.assertIsNone(bibliography_heading_issue_note(plain))
 
 
 if __name__ == "__main__":

@@ -299,6 +299,16 @@ def evaluate_formatting_compliance(
             f"нумерация страниц: {position_human_ru(rules.page_numbering_position)}"
         )
 
+    if getattr(metrics, "bibliography_heading_warning", None):
+        has_any_metric = True
+        issues.append("bibliography_heading")
+        found_lines.append(
+            "заголовок списка литературы: «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ»"
+        )
+        needed_lines.append(
+            "«СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» (утверждённое название)"
+        )
+
     if not has_any_metric:
         return ComplianceReport(compliance=None, text="—", warnings=())
 
@@ -317,4 +327,21 @@ def evaluate_formatting_compliance(
 
     return ComplianceReport(
         compliance=compliance, text=text, warnings=tuple(warnings)
+    )
+
+
+def compliance_report_from_docx_bytes(
+    data: bytes,
+    *,
+    rules: FormattingRules | None = None,
+) -> ComplianceReport:
+    """Считает метрики по байтам .docx и формирует отчёт оформления (как Stage 4).
+
+    Удобно при ручной записи полей в лист без полного ``check-row``: тот же
+    :func:`evaluate_formatting_compliance`, что и в ``run_stage4``."""
+    from magister_checking.dissertation_metrics import analyze_docx_bytes
+
+    metrics = analyze_docx_bytes(data)
+    return evaluate_formatting_compliance(
+        metrics, load_formatting_rules() if rules is None else rules
     )

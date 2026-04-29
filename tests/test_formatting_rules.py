@@ -33,6 +33,7 @@ def _metrics(
     numbering_position: str | None = "bottom-right",
     sections_with_footer: int | None = None,
     sections_total: int | None = None,
+    bibliography_heading_warning: str | None = None,
 ) -> DissertationMetrics:
     return DissertationMetrics(
         approx_pages=60,
@@ -53,6 +54,7 @@ def _metrics(
         page_numbering_position=numbering_position,
         page_numbering_sections_with_footer=sections_with_footer,
         page_numbering_sections_total=sections_total,
+        bibliography_heading_warning=bibliography_heading_warning,
     )
 
 
@@ -200,6 +202,17 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         report = evaluate_formatting_compliance(m, self.rules)
         self.assertIsNone(report.compliance)
         self.assertEqual(report.text, "—")
+
+    def test_bibliography_wrong_heading_blocks_compliance(self) -> None:
+        warn = (
+            "Заголовок списка литературы: по методичке используйте «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» "
+            "(в документе указано «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ»)."
+        )
+        m = _metrics(bibliography_heading_warning=warn)
+        report = evaluate_formatting_compliance(m, self.rules)
+        self.assertFalse(report.compliance)
+        self.assertIn("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", report.text)
+        self.assertIn("не соответствует", report.text)
 
     def test_position_human_ru(self) -> None:
         self.assertEqual(position_human_ru("bottom-right"), "внизу справа")

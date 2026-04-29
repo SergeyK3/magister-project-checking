@@ -11,21 +11,40 @@ from googleapiclient.http import MediaIoBaseDownload
 from docx import Document  # type: ignore[import-untyped]
 from docx.enum.text import WD_LINE_SPACING  # type: ignore[import-untyped]
 
-from magister_checking.docs_extract import extract_plain_text
+from magister_checking.docs_extract import extract_plain_text, table_cell_content_blocks
 
 
 # Порядок важен: более длинные фразы раньше (подстрочные совпадения в lower()).
 # В т.ч. типичные заголовки: «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» (Гизатова),
+# «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ» (ошибочный род — см. _bibliography_heading_issue_note),
 # «ПАЙДАЛАНЫЛҒАН ӘДЕБИЕТТЕР» (қазақша).
 # Без отдельного «литература» / «references» как подстрок: их поиск цепляется
 # к «в литературе…» / «…references…»; отдельная строка — в _all_bibliography_section_starts.
 _BIB_MARKERS = (
+    "список использованной литературы",
     "список использованных источников",
     "пайдаланылған әдебиеттер",
     "список литературы",
     "использованная литература",
     "библиографический список",
 )
+
+_APPROVED_BIB_HEADING_LOWER = "список использованных источников"
+_WRONG_GENITIVE_LITERATURE_HEADING_LOWER = "список использованной литературы"
+
+
+def bibliography_heading_issue_note(plain: str) -> str | None:
+    """Если в тексте есть неверный заголовок без утверждённого — предупреждение для Stage 4."""
+
+    low = plain.lower()
+    if _WRONG_GENITIVE_LITERATURE_HEADING_LOWER not in low:
+        return None
+    if _APPROVED_BIB_HEADING_LOWER in low:
+        return None
+    return (
+        "Заголовок списка литературы: по методичке используйте «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» "
+        "(в документе указано «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ»)."
+    )
 
 _CHARS_PER_PAGE_RU = 2200
 
@@ -81,11 +100,15 @@ class DissertationMetrics:
     """Кол-во ``<w:sectPr>`` с явным footerReference (DOCX). Для Google Doc — None."""
     page_numbering_sections_total: int | None = None
     """Всего ``<w:sectPr>`` в документе (DOCX). Для Google Doc — None."""
+    bibliography_heading_warning: str | None = None
+    """Несовпадение с утверждённым названием раздела списка литературы (только текст предупреждения)."""
 
 
 def iter_heading_texts(document: dict[str, Any]) -> Iterator[str]:
     """Тексты абзацев со стилем HEADING_* (включая ячейки таблиц)."""
-    content = document.get("body", {}).get("content", [])
+    content = document.get("body", {}).get("content") or []
+    if not isinstance(content, list):
+        content = []
     yield from _headings_in_content(content)
 
 
@@ -102,7 +125,7 @@ def _headings_in_content(content: list[dict[str, Any]]) -> Iterator[str]:
         elif "table" in element:
             for row in element["table"].get("tableRows", []):
                 for cell in row.get("tableCells", []):
-                    yield from _headings_in_content(cell.get("content", []))
+                    yield from _headings_in_content(table_cell_content_blocks(cell))
 
 
 def _paragraph_text(paragraph: dict[str, Any]) -> str:
@@ -121,13 +144,17 @@ def _iter_paragraphs_in_content(content: list[dict[str, Any]]) -> Iterator[dict[
         elif "table" in element:
             for row in element["table"].get("tableRows", []):
                 for cell in row.get("tableCells", []):
-                    yield from _iter_paragraphs_in_content(cell.get("content", []))
+                    yield from _iter_paragraphs_in_content(
+                        table_cell_content_blocks(cell)
+                    )
 
 
 def iter_paragraphs(document: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Итерирует все paragraph-элементы документа, включая таблицы."""
 
-    content = document.get("body", {}).get("content", [])
+    content = document.get("body", {}).get("content") or []
+    if not isinstance(content, list):
+        content = []
     yield from _iter_paragraphs_in_content(content)
 
 
@@ -1096,6 +1123,10 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     if formatting_compliance is None:
         notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
+    bib_heading_warn = bibliography_heading_issue_note(plain)
+    if bib_heading_warn:
+        notes.append(bib_heading_warn)
+
     margins_list = _gdoc_collect_section_margins(document)
     page_margins, page_margins_secondary = _dominant_margins(margins_list)
     numbering_info = _gdoc_page_numbering_info(document)
@@ -1121,6 +1152,7 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
         page_numbering_position=numbering_info.get("position"),
         page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
         page_numbering_sections_total=numbering_info.get("sections_total"),
+        bibliography_heading_warning=bib_heading_warn,
     )
 
 
@@ -1510,6 +1542,10 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
     if formatting_compliance is None:
         notes.append("Соответствие оформлению не оценено (не хватило данных по стилям).")
 
+    bib_heading_warn = bibliography_heading_issue_note(plain)
+    if bib_heading_warn:
+        notes.append(bib_heading_warn)
+
     margins_list = _docx_collect_section_margins(doc)
     page_margins, page_margins_secondary = _dominant_margins(margins_list)
     numbering_info = _docx_page_numbering_info(doc, docx_bytes)
@@ -1535,6 +1571,7 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         page_numbering_position=numbering_info.get("position"),
         page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
         page_numbering_sections_total=numbering_info.get("sections_total"),
+        bibliography_heading_warning=bib_heading_warn,
     )
 
 

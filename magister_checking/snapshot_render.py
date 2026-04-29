@@ -11,7 +11,133 @@ from magister_checking.project_snapshot import (
     PHASE_STAGE3,
     PHASE_STAGE4,
     ProjectSnapshot,
+    SnapshotLinks,
 )
+
+# Префиксы ««…»» из row_pipeline._FieldPolicy.issue_title — длинные первыми.
+_STAGE3_ISSUE_PREFIX_TO_COLUMN: tuple[tuple[str, str], ...] = (
+    ("«Папка «Магистерский проект»»", "project_folder_url"),
+    ("«Промежуточный отчёт»", "report_url"),
+    ("«Заключение ЛКБ»", "lkb_url"),
+    ("«Диссертация»", "dissertation_url"),
+    ("«Публикация»", "publication_url"),
+)
+
+
+def _stage3_issue_column_key(issue: str) -> str | None:
+    """Ключ колонки Stage 3 по тексту предупреждения (или None)."""
+
+    for prefix, key in _STAGE3_ISSUE_PREFIX_TO_COLUMN:
+        if issue.startswith(prefix):
+            return key
+    return None
+
+
+def _partition_stage3_warnings(
+    warnings: tuple[str, ...],
+) -> tuple[dict[str, list[str]], list[str]]:
+    """Сопоставляет предупреждения Stage 3 колонкам L/M/N/O и списку «прочее»."""
+
+    by_col: dict[str, list[str]] = {}
+    rest: list[str] = []
+    for w in warnings:
+        ck = _stage3_issue_column_key(w)
+        if ck:
+            by_col.setdefault(ck, []).append(w)
+        else:
+            rest.append(w)
+    return by_col, rest
+
+# Подписи в ячейках обогащения (report_enrichment._link_column_error) совпадают с этими
+# или расширены — иначе при рендере «Папка проекта: …» получается двойная подпись.
+_COMMISSION_STRIP_PREFIXES: dict[str, tuple[str, ...]] = {
+    "Папка проекта": ("Папка проекта",),
+    "ЛКБ": ("ЛКБ",),
+    "Диссертация": ("Диссертация (ссылка в промежуточном отчёте)", "Диссертация"),
+    "Публикация": ("Публикация или статья", "Публикация"),
+}
+
+
+def _normalize_cell_for_commission_pdf(value: str | None) -> str:
+    """Убирает разрывы строк в URL и в длинных текстах из листа — иначе PDF рвёт «usp» / «=sharing»."""
+
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("http://") or v.startswith("https://"):
+        return "".join(v.split())
+    return " ".join(v.split())
+
+
+def _strip_duplicate_field_prefix(display_label: str, normalized_value: str) -> str:
+    """Если значение уже «Поле: …» из листа — оставляем только хвост."""
+
+    if not normalized_value:
+        return ""
+    v = normalized_value.strip()
+    prefixes = (display_label,) + _COMMISSION_STRIP_PREFIXES.get(display_label, ())
+    for pref in sorted(prefixes, key=len, reverse=True):
+        p = pref + ":"
+        if v.startswith(p):
+            return v[len(p) :].strip()
+    return v
+
+
+def _commission_link_display_line(display_label: str, raw: str) -> str:
+    norm = _normalize_cell_for_commission_pdf(raw)
+    if not norm:
+        return f"  {display_label}: —"
+    body = _strip_duplicate_field_prefix(display_label, norm)
+    return f"  {display_label}: {body}"
+
+
+def _commission_links_block_lines(links: SnapshotLinks) -> list[str]:
+    """Четыре поля со ссылками из листа — каждое своей строкой («Папка» / ЛКБ / …)."""
+
+    report_disp = _normalize_cell_for_commission_pdf(links.report_url) or "—"
+    lines: list[str] = [
+        "Ссылки и извлечённые данные",
+        f"  Промежуточный отчёт: {report_disp}",
+    ]
+
+    lines.append(_commission_link_display_line("Папка проекта", links.project_folder_url))
+    lines.append(_commission_link_display_line("ЛКБ", links.lkb_url))
+    lines.append(_commission_link_display_line("Диссертация", links.dissertation_url))
+    lines.append(_commission_link_display_line("Публикация", links.publication_url))
+    lines.append(
+        f"  Проверка URL отчёта: валидность={links.report_url_valid or '—'}, "
+        f"доступ={links.report_url_accessible or '—'}"
+    )
+    return lines
+
+
+def _commission_links_block_html(links: SnapshotLinks) -> list[str]:
+    """То же соглашение, что :func:`_commission_links_block_lines`, в HTML для Telegram."""
+
+    lines: list[str] = [
+        "<b>Документы и ссылки</b>",
+        f"Промежуточный отчёт: {_href(links.report_url)}",
+        _html_commission_link_line("Папка проекта", links.project_folder_url),
+        _html_commission_link_line("ЛКБ", links.lkb_url),
+        _html_commission_link_line("Диссертация", links.dissertation_url),
+        _html_commission_link_line("Публикация", links.publication_url),
+    ]
+    lines.append(
+        f"URL отчёта: валидность {escape_tg_html(links.report_url_valid) or '—'}, "
+        f"доступ {escape_tg_html(links.report_url_accessible) or '—'}"
+    )
+    return lines
+
+
+def _html_commission_link_line(display_label: str, raw: str) -> str:
+    norm = _normalize_cell_for_commission_pdf(raw)
+    body = _strip_duplicate_field_prefix(display_label, norm)
+    if not norm:
+        return f"{display_label}: —"
+    disp = body if body else norm
+    if disp.startswith("http://") or disp.startswith("https://"):
+        return f"{display_label}: {_href(disp)}"
+    return f"{display_label}: {escape_tg_html(disp)}"
 
 
 def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
@@ -34,14 +160,20 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
     if snapshot.row_number is not None:
         lines.append(f"Строка в листе «Регистрация»: {snapshot.row_number}")
     by_id = {p.id: p for p in snapshot.phases}
-    all_issues: list[str] = []
-    for p in snapshot.phases:
-        all_issues.extend(p.warnings)
-    if not all_issues:
+    p1w = list(by_id[PHASE_STAGE1].warnings)
+    p2w = list(by_id[PHASE_STAGE2].warnings)
+    column_notes, leftover_s3 = _partition_stage3_warnings(
+        by_id[PHASE_STAGE3].warnings
+    )
+    p4w = list(by_id[PHASE_STAGE4].warnings)
+
+    results_issues = p1w + p2w + leftover_s3
+
+    if not results_issues:
         lines.append("Нарушений не найдено.")
     else:
         lines.append("Найдены отклонения:")
-        for issue in all_issues:
+        for issue in results_issues:
             lines.append(f"- {issue}")
     if snapshot.stopped_at:
         lines.append(f"Проверка остановлена на этапе: {snapshot.stopped_at}")
@@ -51,6 +183,8 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         for cell in snapshot.stage3_extracted:
             mark = " [зачёркнута]" if cell.strikethrough else ""
             lines.append(f"  {cell.column_key}: {cell.value}{mark}")
+            for note in column_notes.get(cell.column_key, []):
+                lines.append(f"    ↳ {note}")
     s4 = by_id[PHASE_STAGE4]
     if s4.status != "skipped" and snapshot.metrics is not None:
         m = snapshot.metrics
@@ -73,6 +207,11 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         lines.append(
             "(dry-run: лист не изменён — добавьте --apply для записи)"
         )
+    if p4w:
+        lines.append("")
+        lines.append("Оформление (подробно):")
+        for w in p4w:
+            lines.append(w)
     return "\n".join(lines)
 
 
@@ -97,15 +236,8 @@ def render_commission_plaintext(snapshot: ProjectSnapshot) -> str:
         f"  Телефон: {snapshot.identity.phone or '—'}",
         f"  Научный руководитель: {snapshot.identity.supervisor or '—'}",
         "",
-        "Ссылки и извлечённые данные",
-        f"  Промежуточный отчёт: {snapshot.links.report_url or '—'}",
-        f"  Папка проекта: {snapshot.links.project_folder_url or '—'}",
-        f"  ЛКБ: {snapshot.links.lkb_url or '—'}",
-        f"  Диссертация: {snapshot.links.dissertation_url or '—'}",
-        f"  Публикация: {snapshot.links.publication_url or '—'}",
-        f"  Проверка URL отчёта: валидность={snapshot.links.report_url_valid or '—'}, "
-        f"доступ={snapshot.links.report_url_accessible or '—'}",
     ]
+    lines.extend(_commission_links_block_lines(snapshot.links))
     if snapshot.links.dissertation_title or snapshot.links.dissertation_language:
         lines.extend(
             [
@@ -164,6 +296,7 @@ def _href(url: str) -> str:
     if not u or u in ("—", "–", "-"):
         return "—"
     if re.match(r"^https?://", u, re.I):
+        u = "".join(u.split())
         return f'<a href="{html.escape(u, quote=True)}">открыть</a>'
     return escape_tg_html(u)
 
@@ -193,15 +326,21 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
             f"<b>Строка в «Регистрация»</b>\n{snapshot.row_number}"
         )
     by_id = {p.id: p for p in snapshot.phases}
-    all_issues: list[str] = []
-    for p in snapshot.phases:
-        all_issues.extend(p.warnings)
+    p1w = list(by_id[PHASE_STAGE1].warnings)
+    p2w = list(by_id[PHASE_STAGE2].warnings)
+    column_notes, leftover_s3 = _partition_stage3_warnings(
+        by_id[PHASE_STAGE3].warnings
+    )
+    p4w = list(by_id[PHASE_STAGE4].warnings)
+
+    results_issues = p1w + p2w + leftover_s3
+
     lines.append("<b>Результаты</b>")
-    if not all_issues:
+    if not results_issues:
         lines.append("Нарушений не найдено.")
     else:
         lines.append("Найдены отклонения:")
-        for issue in all_issues:
+        for issue in results_issues:
             lines.append(f"• {escape_tg_html(issue)}")
     if snapshot.stopped_at:
         lines.append(
@@ -214,6 +353,8 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
             lines.append(
                 f"{escape_tg_html(cell.column_key)}: {escape_tg_html(cell.value)}{mark}"
             )
+            for note in column_notes.get(cell.column_key, []):
+                lines.append(f"   <i>{escape_tg_html(note)}</i>")
     s4 = by_id[PHASE_STAGE4]
     if s4.status != "skipped" and snapshot.metrics is not None:
         m = snapshot.metrics
@@ -239,6 +380,11 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         lines.append(
             "<i>Dry-run: лист не изменён — в CLI укажите --apply</i>"
         )
+    if p4w:
+        lines.append("")
+        lines.append("<b>Оформление (подробно)</b>")
+        for w in p4w:
+            lines.append(escape_tg_html(w))
     return "\n".join(lines)
 
 
@@ -263,15 +409,8 @@ def render_commission_telegram_html(snapshot: ProjectSnapshot) -> str:
         f"Телефон: {escape_tg_html(snapshot.identity.phone) or '—'}",
         f"Руководитель: {escape_tg_html(snapshot.identity.supervisor) or '—'}",
         "",
-        "<b>Документы и ссылки</b>",
-        f"Промежуточный отчёт: {_href(snapshot.links.report_url)}",
-        f"Папка проекта: {_href(snapshot.links.project_folder_url)}",
-        f"ЛКБ: {_href(snapshot.links.lkb_url)}",
-        f"Диссертация: {_href(snapshot.links.dissertation_url)}",
-        f"Публикация: {_href(snapshot.links.publication_url)}",
-        f"URL отчёта: валидность {escape_tg_html(snapshot.links.report_url_valid) or '—'}, "
-        f"доступ {escape_tg_html(snapshot.links.report_url_accessible) or '—'}",
     ]
+    lines.extend(_commission_links_block_html(snapshot.links))
     if snapshot.links.dissertation_title or snapshot.links.dissertation_language:
         lines.extend(
             [

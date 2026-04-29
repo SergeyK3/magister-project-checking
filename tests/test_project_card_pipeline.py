@@ -6,10 +6,20 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from magister_checking.bot.models import UserForm
-from magister_checking.project_card_pipeline import generate_project_card_pdf
+from magister_checking.project_card_pipeline import _render_pdf, generate_project_card_pdf
 
 
 class ProjectCardPipelineTests(unittest.TestCase):
+    def test_render_pdf_embeds_hyperlink_annotation_for_https(self) -> None:
+        """Подстроки ``https://...`` — синий текст + объект аннотации ``/URI`` в PDF."""
+
+        buf = _render_pdf(
+            title="t",
+            body_text="Подпись: https://docs.google.com/document/d/x/edit текст.\n",
+        )
+        self.assertTrue(buf.startswith(b"%PDF"))
+        self.assertIn(b"/URI", buf)
+
     def test_generate_project_card_pdf_updates_sheet_and_returns_bytes(self) -> None:
         config = MagicMock()
         config.spreadsheet_id = "sheet-id"

@@ -51,6 +51,25 @@ class TestExtractTables(unittest.TestCase):
         self.assertEqual(len(tables[0][1][0].links), 1)
         self.assertIn("document/d/xx", tables[0][1][0].links[0].url)
 
+    def test_table_cell_content_null_does_not_raise(self) -> None:
+        """Google Docs API может отдать ``\"content\": null`` вместо []."""
+        doc = {
+            "body": {
+                "content": [
+                    {
+                        "table": {
+                            "tableRows": [
+                                {"tableCells": [{"content": None}]},
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        tables = extract_tables(doc)
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(tables[0][0][0].text, "")
+
 
 if __name__ == "__main__":
     unittest.main()

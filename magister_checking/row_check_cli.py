@@ -39,6 +39,8 @@ from magister_checking.bot.sheets_repo import (
     get_spreadsheet,
     load_user,
     read_last_recheck_entry,
+    read_sheet_link_overrides_for_row,
+    write_dissertation_meta_columns,
 )
 from magister_checking.bot.report_enrichment import build_sheet_enrichment
 from magister_checking.project_snapshot import build_project_snapshot
@@ -53,6 +55,13 @@ from magister_checking.bot.validation import (
     check_report_url,
     check_report_url_target_kind,
 )
+from magister_checking.dissertation_meta import (
+    detect_dissertation_language_from_docx_bytes,
+    detect_dissertation_language_from_gdoc,
+    detect_dissertation_title_from_docx_bytes,
+    detect_dissertation_title_from_gdoc,
+    warn_if_unusual_language,
+)
 from magister_checking.dissertation_metrics import (
     DissertationMetrics,
     analyze_dissertation,
@@ -60,6 +69,7 @@ from magister_checking.dissertation_metrics import (
     count_pdf_pages_via_drive_export,
 )
 from magister_checking.formatting_rules import load_formatting_rules
+from magister_checking.drive_acl import drive_file_has_anyone_with_link_permission
 from magister_checking.drive_docx import google_doc_from_drive_file
 from magister_checking.drive_urls import (
     classify_drive_url,
@@ -78,6 +88,20 @@ logger = logging.getLogger(__name__)
 # CLI ↔ pipeline). Стандартизованный OOXML mime, не меняется.
 _DOCX_MIME_FOR_DISSERTATION = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
+
+# Stage 1: HttpError 401/403 при загрузке отчёта — тексты зависят от ACL в Drive.
+REPORT_DRIVE_ACL_DENIED_MESSAGE = (
+    "Промежуточный отчёт недоступен для проверки (бот не смог открыть файл в Google). "
+    "Откройте доступ на чтение для всех по ссылке: в Google Drive — «Настроить доступ» → "
+    "«Все, у кого есть ссылка» → роль «Читатель»."
+)
+REPORT_DRIVE_ANYONE_LINK_BUT_BOT_FAILED_MESSAGE = (
+    "Промежуточный отчёт не удалось обработать через API бота (конвертация PDF/DOCX "
+    "или чтение текста документа), хотя доступ «Все, у кого есть ссылка» уже включён. "
+    "Администратору: буферная папка Shared Drive для конвертации "
+    "(переменные GOOGLE_DRIVE_BUFFER_FOLDER_* / DOCX_CONVERSION_*), роль сервисного "
+    "аккаунта на ней, включение Google Docs API — см. лог бота и руководство администратора."
 )
 
 
@@ -140,8 +164,9 @@ def _try_load_report_document(
     Docs API и удаляет копию.
 
     Возвращает ``(document | None, permission_denied)``.
-    ``permission_denied`` — True, если Drive/Docs API ответили 401/403 для
-    служебного аккаунта (файл не расшарен на бота).
+    ``permission_denied`` — True при HTTP 401/403 от Drive/Docs API при загрузке
+    отчёта (причина уточняется в ``run_row_check``: доступ по ACL или сбой
+    конвертации/буфера при уже открытой ссылке).
     """
 
     if not report_url:
@@ -179,10 +204,117 @@ def _try_parse_report(document: Any) -> ParsedReport | None:
         return None
 
 
-def _collect_stage3_urls(parsed: ParsedReport) -> list[str]:
+def _normalize_manual_sheet_link(value: str) -> str:
+    """Приводит текст ячейки к одному URL для ручного ввода в лист.
+
+    Поддержка частых ошибок: пробелы/переносы из копипасты, ссылки без схемы
+    ``https://`` для доменов Google.
+    """
+
+    s = (value or "").strip().replace("\ufeff", "").strip()
+    if not s:
+        return ""
+    s = " ".join(s.split())
+    if len(s) > 4000:
+        return ""
+    lower = s.lower()
+    if not (s.startswith("http://") or s.startswith("https://")):
+        if lower.startswith("docs.google.com/") or lower.startswith("drive.google.com/"):
+            s = "https://" + s
+    if not (s.startswith("http://") or s.startswith("https://")):
+        return ""
+    return s
+
+
+def _plausible_manual_sheet_link(value: str) -> str:
+    """Нормализованный URL или пустая строка, если значение — не доверяемая ссылка."""
+
+    s = _normalize_manual_sheet_link(value)
+    if not s:
+        return ""
+    low = s.lower()
+    needles = (
+        "google docs api",
+        "не удалось получить текст",
+        "url отсутствует",
+        "url недоступен",
+        "не заполнено из текста",
+        "service_disabled",
+        "has not been used",
+    )
+    if any(n in low for n in needles):
+        return ""
+    return s
+
+
+def _is_plausible_manual_link_cell(value: str) -> bool:
+    """True, если ячейка похожа на URL, введённый человеком (не текст ошибки бота)."""
+
+    return bool(_plausible_manual_sheet_link(value))
+
+
+def _merge_parsed_report_with_sheet_links(
+    parsed: ParsedReport | None,
+    overrides: dict[str, str],
+) -> ParsedReport | None:
+    """Подставляет ссылки из листа поверх (или вместо) результата парсера отчёта.
+
+    Значения из таблицы учитываются только если они проходят
+    :func:`_is_plausible_manual_link_cell` — чтобы не трактовать старые
+    сообщения об ошибках как URL."""
+
+    plausible: dict[str, str] = {}
+    for key in (
+        "project_folder_url",
+        "lkb_url",
+        "dissertation_url",
+        "publication_url",
+    ):
+        raw = (overrides.get(key) or "").strip()
+        link = _plausible_manual_sheet_link(raw)
+        if link:
+            plausible[key] = link
+
+    if parsed is None:
+        if not plausible:
+            return None
+        return ParsedReport(
+            lkb_status="да" if plausible.get("lkb_url") else "?",
+            lkb_url=plausible.get("lkb_url"),
+            dissertation_url=plausible.get("dissertation_url"),
+            review_article_url=None,
+            review_article_note="",
+            results_article_url=None,
+            project_folder_url=plausible.get("project_folder_url"),
+            publication_url=plausible.get("publication_url"),
+        )
+
+    cur = parsed
+    if plausible.get("project_folder_url"):
+        cur = replace(cur, project_folder_url=plausible["project_folder_url"])
+    if plausible.get("lkb_url"):
+        cur = replace(cur, lkb_url=plausible["lkb_url"], lkb_status="да")
+    if plausible.get("dissertation_url"):
+        cur = replace(cur, dissertation_url=plausible["dissertation_url"])
+    if plausible.get("publication_url"):
+        cur = replace(cur, publication_url=plausible["publication_url"])
+    return cur
+
+
+def _collect_stage3_urls(
+    parsed: ParsedReport,
+    *,
+    registration_report_url: str,
+) -> list[str]:
     urls: list[str] = []
+    rreg = (registration_report_url or "").strip()
+    if rreg:
+        urls.append(rreg)
     for key, _label in _LINK_FIELDS:
-        url = _extract_link(parsed, key)
+        url = _extract_link(
+            parsed, key, registration_report_url=registration_report_url
+        )
+        url = url.strip()
         if url and url not in urls:
             urls.append(url)
     return urls
@@ -231,6 +363,80 @@ def _download_drive_file_bytes_all_drives(
         return None
 
 
+def _try_load_dissertation_metrics_and_meta(
+    *,
+    dissertation_url: str,
+    docs_service: Any,
+    drive_service: Any,
+) -> tuple[DissertationMetrics | None, str, str]:
+    """Загружает диссертацию: метрики Stage 4 + название и язык для листа.
+
+    Один проход по Docs API / скачиванию байт — без повторного чтения файла."""
+
+    if not dissertation_url:
+        return None, "", ""
+
+    kind = classify_drive_url(dissertation_url)
+    try:
+        file_id = extract_google_file_id(dissertation_url)
+    except ValueError:
+        return None, "", ""
+
+    if kind == "google_doc":
+        try:
+            doc = docs_service.documents().get(documentId=file_id).execute()
+        except Exception:  # noqa: BLE001
+            data = _download_drive_file_bytes_all_drives(
+                drive_service=drive_service, file_id=file_id
+            )
+            if not data:
+                return None, "", ""
+            try:
+                metrics = analyze_docx_bytes(data)
+            except Exception:  # noqa: BLE001
+                return None, "", ""
+            title = detect_dissertation_title_from_docx_bytes(data)
+            language = detect_dissertation_language_from_docx_bytes(data)
+            warn_if_unusual_language(
+                language, context=f"dissertation_url={dissertation_url}"
+            )
+            return metrics, title, language
+        try:
+            metrics = analyze_dissertation(doc)
+        except Exception:  # noqa: BLE001
+            return None, "", ""
+        pdf_pages = count_pdf_pages_via_drive_export(
+            drive_service=drive_service, file_id=file_id
+        )
+        if pdf_pages is not None and pdf_pages > 0:
+            metrics = replace(metrics, pdf_pages=pdf_pages)
+        title = detect_dissertation_title_from_gdoc(doc)
+        language = detect_dissertation_language_from_gdoc(doc)
+        warn_if_unusual_language(
+            language, context=f"dissertation_url={dissertation_url}"
+        )
+        return metrics, title, language
+
+    if kind == "drive_file":
+        data = _download_drive_file_bytes_all_drives(
+            drive_service=drive_service, file_id=file_id
+        )
+        if not data:
+            return None, "", ""
+        try:
+            metrics = analyze_docx_bytes(data)
+        except Exception:  # noqa: BLE001
+            return None, "", ""
+        title = detect_dissertation_title_from_docx_bytes(data)
+        language = detect_dissertation_language_from_docx_bytes(data)
+        warn_if_unusual_language(
+            language, context=f"dissertation_url={dissertation_url}"
+        )
+        return metrics, title, language
+
+    return None, "", ""
+
+
 def _try_load_dissertation_metrics(
     *,
     dissertation_url: str,
@@ -256,59 +462,12 @@ def _try_load_dissertation_metrics(
     дополнительной валидации формата.
     """
 
-    if not dissertation_url:
-        return None
-
-    kind = classify_drive_url(dissertation_url)
-    try:
-        file_id = extract_google_file_id(dissertation_url)
-    except ValueError:
-        return None
-
-    if kind == "google_doc":
-        try:
-            doc = docs_service.documents().get(documentId=file_id).execute()
-        except Exception:  # noqa: BLE001
-            # Fallback: классификация по URL может ошибиться, если Drive
-            # viewer URL .docx-файла прошёл в эту ветку без маркера rtpof
-            # (например, магистрант руками выкинул query-параметры). Docs
-            # API на .docx отвечает HTTP 400 «not supported for this
-            # document» — пробуем тот же путь, что и для drive_file:
-            # download bytes → analyze_docx_bytes. Если файл всё-таки
-            # нативный Google Doc — get_media вернёт ошибку и мы вернём
-            # None так же, как и без fallback.
-            data = _download_drive_file_bytes_all_drives(
-                drive_service=drive_service, file_id=file_id
-            )
-            if not data:
-                return None
-            try:
-                return analyze_docx_bytes(data)
-            except Exception:  # noqa: BLE001
-                return None
-        try:
-            metrics = analyze_dissertation(doc)
-        except Exception:  # noqa: BLE001
-            return None
-        pdf_pages = count_pdf_pages_via_drive_export(
-            drive_service=drive_service, file_id=file_id
-        )
-        if pdf_pages is not None and pdf_pages > 0:
-            metrics = replace(metrics, pdf_pages=pdf_pages)
-        return metrics
-
-    if kind == "drive_file":
-        data = _download_drive_file_bytes_all_drives(
-            drive_service=drive_service, file_id=file_id
-        )
-        if not data:
-            return None
-        try:
-            return analyze_docx_bytes(data)
-        except Exception:  # noqa: BLE001
-            return None
-
-    return None
+    metrics, _title, _lang = _try_load_dissertation_metrics_and_meta(
+        dissertation_url=dissertation_url,
+        docs_service=docs_service,
+        drive_service=drive_service,
+    )
+    return metrics
 
 
 def _prefetch_drive_file_mimes(
@@ -487,6 +646,7 @@ def run_row_check(
     worksheet = spreadsheet.worksheet(_REGISTRATION_WORKSHEET_NAME)
     row_number = _resolve_row_number(worksheet, locator)
     user: UserForm = load_user(worksheet, row_number)
+    sheet_link_overrides = read_sheet_link_overrides_for_row(worksheet, row_number)
 
     report_url = (user.report_url or "").strip()
 
@@ -502,12 +662,18 @@ def run_row_check(
     )
 
     parsed_report = _try_parse_report(report_document) if report_document else None
+    effective_parsed = _merge_parsed_report_with_sheet_links(
+        parsed_report, sheet_link_overrides
+    )
 
     # Re-check (Stage 4 (c)) fingerprint: вход коротко-замыкающего флага
     # ``--only-if-changed`` (handoff §8). Считаем СРАЗУ после парсинга
     # отчёта — раньше HTTP-пробы report_url, mime-prefetch и Stage 4
     # IO, чтобы при совпадении с прошлым прогоном вообще ничего тяжёлого
     # не делать (короткое замыкание = «без прогона пайплайна»).
+    # Четыре ссылки Stage 3 берутся из ``effective_parsed``: парсер отчёта
+    # и/или вручную введённые в лист URL (временный обход недоступного
+    # Docs API / разбора).
     report_file_id = _resolve_report_file_id(
         report_url=report_url, drive_service=drive_service
     )
@@ -517,7 +683,7 @@ def run_row_check(
     fingerprint = _compute_recheck_fingerprint(
         report_url=report_url,
         report_modified_time=report_modified_time,
-        parsed=parsed_report,
+        parsed=effective_parsed,
     )
 
     if only_if_changed:
@@ -543,8 +709,10 @@ def run_row_check(
 
     link_accessibility: dict[str, bool] | None = None
     link_mime_types: dict[str, str] | None = None
-    if parsed_report is not None:
-        stage3_urls = _collect_stage3_urls(parsed_report)
+    if effective_parsed is not None:
+        stage3_urls = _collect_stage3_urls(
+            effective_parsed, registration_report_url=report_url
+        )
         if not skip_http:
             link_accessibility = _build_accessibility_map(stage3_urls)
         # MIME-prefetch — Drive API call, но не HTTP-проба «open url»; делаем
@@ -561,15 +729,21 @@ def run_row_check(
     # drive_file с DOCX (другие kinds Stage 3 hard-fail). Дешёвая
     # проверка по URL без сети, чтобы не делать лишний Drive call.
     dissertation_metrics: DissertationMetrics | None = None
-    if parsed_report is not None:
-        diss_url = (parsed_report.dissertation_url or "").strip()
+    dissertation_title_for_sheet = ""
+    dissertation_language_for_sheet = ""
+    if effective_parsed is not None:
+        diss_url = (effective_parsed.dissertation_url or "").strip()
         diss_kind = classify_drive_url(diss_url) if diss_url else "other"
         diss_mime_ok = True
         if diss_kind == "drive_file":
             mime = (link_mime_types or {}).get(diss_url, "")
             diss_mime_ok = mime == _DOCX_MIME_FOR_DISSERTATION
         if diss_url and diss_kind in {"google_doc", "drive_file"} and diss_mime_ok:
-            dissertation_metrics = _try_load_dissertation_metrics(
+            (
+                dissertation_metrics,
+                dissertation_title_for_sheet,
+                dissertation_language_for_sheet,
+            ) = _try_load_dissertation_metrics_and_meta(
                 dissertation_url=diss_url,
                 docs_service=docs_service,
                 drive_service=drive_service,
@@ -579,7 +753,7 @@ def run_row_check(
         user,
         report_document=report_document,
         url_probe=url_probe,
-        parsed_report=parsed_report,
+        parsed_report=effective_parsed,
         link_accessibility=link_accessibility,
         link_mime_types=link_mime_types,
         dissertation_metrics=dissertation_metrics,
@@ -604,12 +778,15 @@ def run_row_check(
             pipeline_report.stopped_at = "stage1"
 
     if report_doc_permission_denied and report_url:
-        sa_email = getattr(creds, "service_account_email", None) or "служебного аккаунта бота"
-        clarify = (
-            "Документ по ссылке недоступен боту для проверки (у служебного аккаунта нет прав). "
-            "В Google: «Настроить доступ» → «Все, у кого есть ссылка» — роль «Читатель», "
-            f"либо добавьте в доступ к файлу: {sa_email}."
-        )
+        anyone_link = False
+        if report_file_id:
+            anyone_link = drive_file_has_anyone_with_link_permission(
+                drive_service, report_file_id
+            )
+        if anyone_link:
+            clarify = REPORT_DRIVE_ANYONE_LINK_BUT_BOT_FAILED_MESSAGE
+        else:
+            clarify = REPORT_DRIVE_ACL_DENIED_MESSAGE
         issues = [
             i
             for i in pipeline_report.stage1.issues
@@ -650,10 +827,27 @@ def run_row_check(
             row_number,
             report_url_valid=report_url_valid,
             report_url_accessible=report_url_accessible,
+            stage3_executed=pipeline_report.stage3.executed,
             stage3_cells=pipeline_report.stage3_cells,
             stage4_cells=pipeline_report.stage4_cells,
             fill_status=fill_status_update,
         )
+        if pipeline_report.stage4.executed and (
+            dissertation_title_for_sheet or dissertation_language_for_sheet
+        ):
+            try:
+                write_dissertation_meta_columns(
+                    worksheet,
+                    row_number,
+                    title=dissertation_title_for_sheet,
+                    language=dissertation_language_for_sheet,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Не удалось записать dissertation_title/dissertation_language "
+                    "после row check (строка %s)",
+                    row_number,
+                )
         # Запись в историю — только при реальной записи в лист, чтобы
         # dry-run не «нагружал» историю шумовыми записями. Источник
         # (cli/bot) попадает в одноимённую колонку.

@@ -12,9 +12,13 @@ from magister_checking.report_parser import ParsedReport
 from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.sheets_repo import RecheckHistoryEntry
 from magister_checking.row_check_cli import (
+    REPORT_DRIVE_ACL_DENIED_MESSAGE,
+    REPORT_DRIVE_ANYONE_LINK_BUT_BOT_FAILED_MESSAGE,
     RowLocator,
     _build_history_entry,
     _compute_recheck_fingerprint,
+    _is_plausible_manual_link_cell,
+    _merge_parsed_report_with_sheet_links,
     _try_load_dissertation_metrics,
     format_report,
     run_row_check,
@@ -116,6 +120,8 @@ def _install_io_mocks(
 
     effective_drive = drive_service or _make_native_doc_drive_service()
 
+    creds_mock = MagicMock()
+
     patches = [
         patch(
             "magister_checking.row_check_cli.get_spreadsheet",
@@ -126,12 +132,16 @@ def _install_io_mocks(
             return_value=user,
         ),
         patch(
+            "magister_checking.row_check_cli.read_sheet_link_overrides_for_row",
+            return_value={},
+        ),
+        patch(
             "magister_checking.row_check_cli.find_rows_by_fio",
             return_value=matched_rows if matched_rows is not None else [2],
         ),
         patch(
             "magister_checking.row_check_cli._service_account_credentials",
-            return_value=MagicMock(),
+            return_value=creds_mock,
         ),
         patch(
             "magister_checking.row_check_cli.build",
@@ -151,6 +161,8 @@ def _install_io_mocks(
         ),
     ]
 
+    _BUILD_PATCH_INDEX = 5
+
     class _Manager:
         def __enter__(self) -> None:
             for p in patches:
@@ -162,7 +174,7 @@ def _install_io_mocks(
                 )
             else:
                 docs_service.documents.return_value.get.return_value.execute.return_value = document
-            patches[4].stop()
+            patches[_BUILD_PATCH_INDEX].stop()
             self._build_patch = patch(
                 "magister_checking.row_check_cli.build",
                 side_effect=[docs_service, effective_drive],
@@ -171,7 +183,9 @@ def _install_io_mocks(
 
         def __exit__(self, *args: object) -> None:
             self._build_patch.stop()
-            for p in patches[:4] + patches[5:]:
+            for p in (
+                patches[:_BUILD_PATCH_INDEX] + patches[_BUILD_PATCH_INDEX + 1 :]
+            ):
                 p.stop()
 
     return _Manager()
@@ -241,8 +255,15 @@ class RunRowCheckTests(unittest.TestCase):
             c for c in report.stage3_cells if c.column_key == "lkb_url"
         )
         self.assertTrue(lkb_cell.strikethrough)
-        self.assertIn("Ссылка на заключение ЛКБ не открывается", report.stage3.issues)
-        self.assertIn("Ссылка на магистерский проект отсутствует", report.stage3.issues)
+        self.assertTrue(
+            any(
+                "«Заключение ЛКБ»" in i and "HTTPS" in i
+                for i in report.stage3.issues
+            )
+        )
+        self.assertTrue(
+            any("«Папка «Магистерский проект»»" in i for i in report.stage3.issues)
+        )
 
     def test_fio_locator_resolves_single_row(self) -> None:
         user = UserForm(
@@ -280,8 +301,8 @@ class RunRowCheckTests(unittest.TestCase):
             parsed=parsed,
             url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
         ), patch(
-            "magister_checking.row_check_cli._try_load_dissertation_metrics",
-            return_value=metrics,
+            "magister_checking.row_check_cli._try_load_dissertation_metrics_and_meta",
+            return_value=(metrics, "", ""),
         ) as load_metrics:
             report = run_row_check(config, RowLocator(row_number=3), apply=False)
 
@@ -313,8 +334,8 @@ class RunRowCheckTests(unittest.TestCase):
             parsed=parsed,
             url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
         ), patch(
-            "magister_checking.row_check_cli._try_load_dissertation_metrics",
-            return_value=None,
+            "magister_checking.row_check_cli._try_load_dissertation_metrics_and_meta",
+            return_value=(None, "", ""),
         ):
             report = run_row_check(config, RowLocator(row_number=3))
 
@@ -336,7 +357,7 @@ class RunRowCheckTests(unittest.TestCase):
             parsed=parsed,
             url_probe_map={report_url: ("yes", "yes"), diss_url: ("yes", "yes")},
         ), patch(
-            "magister_checking.row_check_cli._try_load_dissertation_metrics"
+            "magister_checking.row_check_cli._try_load_dissertation_metrics_and_meta"
         ) as load_metrics:
             report = run_row_check(config, RowLocator(row_number=9))
 
@@ -392,6 +413,50 @@ class RunRowCheckTests(unittest.TestCase):
             report.stage1.issues,
         )
         self.assertEqual(report.stopped_at, "stage1")
+
+    def test_stage1_permission_denied_anyone_link_message(self) -> None:
+        """При type=anyone в ACL текст адресует админу (буфер/API), без SA-email."""
+
+        report_url = "https://docs.google.com/document/d/report/edit"
+        user = UserForm(fio="Тест У.", phone="+7", report_url=report_url)
+        parsed = _parsed()
+        config = MagicMock()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        with _install_io_mocks(user=user, document=good_doc, parsed=parsed), patch(
+            "magister_checking.row_check_cli._try_load_report_document",
+            return_value=(None, True),
+        ), patch(
+            "magister_checking.row_check_cli.drive_file_has_anyone_with_link_permission",
+            return_value=True,
+        ):
+            report = run_row_check(config, RowLocator(row_number=3))
+
+        self.assertFalse(report.stage1.passed)
+        self.assertEqual(report.stopped_at, "stage1")
+        self.assertEqual(report.stage1.issues[0], REPORT_DRIVE_ANYONE_LINK_BUT_BOT_FAILED_MESSAGE)
+
+    def test_stage1_permission_denied_strict_acl_message(self) -> None:
+        """Без «любой по ссылке» — сообщение для магистранта про доступ по ссылке."""
+
+        report_url = "https://docs.google.com/document/d/report/edit"
+        user = UserForm(fio="Тест У.", phone="+7", report_url=report_url)
+        parsed = _parsed()
+        config = MagicMock()
+        good_doc = _doc_with_text("Промежуточный отчёт")
+        with _install_io_mocks(
+            user=user,
+            document=good_doc,
+            parsed=parsed,
+        ), patch(
+            "magister_checking.row_check_cli._try_load_report_document",
+            return_value=(None, True),
+        ), patch(
+            "magister_checking.row_check_cli.drive_file_has_anyone_with_link_permission",
+            return_value=False,
+        ):
+            report = run_row_check(config, RowLocator(row_number=3))
+
+        self.assertEqual(report.stage1.issues[0], REPORT_DRIVE_ACL_DENIED_MESSAGE)
 
     def test_format_report_includes_links_block(self) -> None:
         user = UserForm(
@@ -743,6 +808,83 @@ class BuildHistoryEntryTests(unittest.TestCase):
         self.assertEqual(entry.source, "bot")
 
 
+class SheetLinkBypassMergeTests(unittest.TestCase):
+    """Обход: вручную введённые в лист URL для Stage 3–4."""
+
+    def test_plausible_rejects_error_blob_and_accepts_drive_url(self) -> None:
+        self.assertFalse(
+            _is_plausible_manual_link_cell("url отсутствует"),
+        )
+        self.assertFalse(
+            _is_plausible_manual_link_cell(
+                "Промежуточный отчёт бот читает только через Google Docs API"
+            ),
+        )
+        self.assertTrue(
+            _is_plausible_manual_link_cell(
+                "https://docs.google.com/document/d/abc123/edit"
+            ),
+        )
+
+    def test_plausible_accepts_scheme_less_and_whitespace(self) -> None:
+        self.assertTrue(
+            _is_plausible_manual_link_cell(
+                "docs.google.com/document/d/abc123/edit"
+            ),
+        )
+        self.assertTrue(
+            _is_plausible_manual_link_cell(
+                "https://docs.google.com/document/d/abc123/edit\n"
+            ),
+        )
+
+    def test_merge_none_plus_sheet_builds_parsed(self) -> None:
+        merged = _merge_parsed_report_with_sheet_links(
+            None,
+            {
+                "project_folder_url": "https://drive.google.com/drive/folders/x",
+                "lkb_url": "https://drive.google.com/file/d/lkb/view",
+                "dissertation_url": "https://docs.google.com/document/d/d1/edit",
+                "publication_url": "https://drive.google.com/file/d/p/view",
+            },
+        )
+        self.assertIsNotNone(merged)
+        assert merged is not None
+        self.assertEqual(merged.dissertation_url, "https://docs.google.com/document/d/d1/edit")
+        self.assertEqual(merged.lkb_status, "да")
+
+    def test_merge_none_normalizes_scheme_less_dissertation_url(self) -> None:
+        merged = _merge_parsed_report_with_sheet_links(
+            None,
+            {
+                "dissertation_url": "docs.google.com/document/d/d1/edit",
+            },
+        )
+        self.assertIsNotNone(merged)
+        assert merged is not None
+        self.assertEqual(
+            merged.dissertation_url,
+            "https://docs.google.com/document/d/d1/edit",
+        )
+
+    def test_merge_overrides_parsed_dissertation_only(self) -> None:
+        base = _parsed(
+            dissertation_url="https://docs.google.com/document/d/old/edit",
+        )
+        merged = _merge_parsed_report_with_sheet_links(
+            base,
+            {
+                "dissertation_url": "https://docs.google.com/document/d/new/edit",
+            },
+        )
+        self.assertIsNotNone(merged)
+        assert merged is not None
+        self.assertEqual(
+            merged.dissertation_url,
+            "https://docs.google.com/document/d/new/edit",
+        )
+
+
 class OnlyIfChangedTests(unittest.TestCase):
     """Поведение run_row_check(only_if_changed=True) с историей."""
 
@@ -922,6 +1064,60 @@ class CliCheckRowFlagsTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(run.call_args.kwargs["apply"])
         self.assertTrue(run.call_args.kwargs["only_if_changed"])
+
+    def test_notify_student_without_apply_exits_2(self) -> None:
+        from magister_checking import cli
+
+        with patch(
+            "magister_checking.bot.config.load_config", return_value=MagicMock()
+        ):
+            code = cli.main(["check-row", "--row", "4", "--notify-student"])
+        self.assertEqual(code, 2)
+
+    def test_notify_student_with_apply_calls_notifier(self) -> None:
+        from magister_checking import cli
+
+        fake_report = RowCheckReport(fio="X Y", row_number=4)
+        with patch(
+            "magister_checking.bot.config.load_config", return_value=MagicMock()
+        ), patch(
+            "magister_checking.row_check_cli.run_row_check", return_value=fake_report
+        ), patch(
+            "magister_checking.row_check_cli.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="X Y"), {}),
+        ), patch(
+            "magister_checking.bot.student_row_notify.notify_student_after_manual_row_apply",
+            return_value=(True, "sent"),
+        ) as notify:
+            code = cli.main(
+                ["check-row", "--row", "4", "--apply", "--notify-student"]
+            )
+        self.assertEqual(code, 0)
+        notify.assert_called_once()
+
+    def test_notify_student_unchanged_skips_notifier(self) -> None:
+        from magister_checking import cli
+
+        fake_report = RowCheckReport(fio="X Y", row_number=4, unchanged=True)
+        with patch(
+            "magister_checking.bot.config.load_config", return_value=MagicMock()
+        ), patch(
+            "magister_checking.row_check_cli.run_row_check", return_value=fake_report
+        ), patch(
+            "magister_checking.bot.student_row_notify.notify_student_after_manual_row_apply",
+        ) as notify:
+            code = cli.main(
+                [
+                    "check-row",
+                    "--row",
+                    "4",
+                    "--apply",
+                    "--only-if-changed",
+                    "--notify-student",
+                ]
+            )
+        self.assertEqual(code, 0)
+        notify.assert_not_called()
 
 
 class FormatReportUnchangedTests(unittest.TestCase):

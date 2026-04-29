@@ -10,12 +10,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from magister_checking.bot.models import FillStatus, UserForm, compute_fill_status
 from magister_checking.bot.stage_checks import run_stage1_checks
-from magister_checking.bot.validation import REPORT_URL_HTTP_INACCESSIBLE_MESSAGE
+from magister_checking.bot.validation import (
+    REPORT_URL_HTTP_INACCESSIBLE_MESSAGE,
+)
 from magister_checking.dissertation_metrics import DissertationMetrics
-from magister_checking.drive_urls import DriveUrlKind, classify_drive_url
+from magister_checking.drive_urls import (
+    DriveUrlKind,
+    classify_drive_url,
+    is_google_drive_folder_url,
+)
 from magister_checking.formatting_rules import (
     FormattingRules,
     evaluate_formatting_compliance,
@@ -36,66 +43,64 @@ COMPLIANCE_TEXT_UNKNOWN = "—"
 
 @dataclass(frozen=True)
 class _FieldPolicy:
-    """Описание ожиданий по типу ссылки в одной колонке.
-
-    ``accepted_kinds`` — допустимые DriveUrlKind. Если фактический
-    kind не входит в этот набор, Stage 3 пишет в справку warning и
-    помечает ячейку зачёркиванием.
-
-    ``required_mime_for_drive_file`` — если фактический kind ==
-    ``drive_file`` и mime известен, требуется совпадение с этим
-    значением; иначе warning + зачёркивание. Для google_doc этот
-    параметр игнорируется (тип сам по себе достаточен).
-
-    ``fail_stage_on_mismatch`` — если True, mismatch (тип или mime)
-    делает Stage 3 не passed (``stopped_at='stage3'``). Используется
-    только для диссертации, без которой Stage 4 (содержательный
-    разбор) невозможен. Для остальных полей mismatch — мягкий warning.
-
-    ``human_expected`` — формулировка ожидания для текста справки
-    («должна вести на …»).
-    """
+    """Описание ожиданий по типу ссылки в одной колонке."""
 
     column_key: str
+    """Ключ столбца в листе (``report_url``, ``project_folder_url``, …)."""
     label: str
+    """Внутренний короткий идентификатор поля (сообщения)."""
+    issue_title: str
+    """Заголовок в сообщении магистранту («…» перед двоеточием)."""
     accepted_kinds: tuple[DriveUrlKind, ...]
-    required_mime_for_drive_file: str | None
-    fail_stage_on_mismatch: bool
+    required_mime_for_drive_file: str | tuple[str, ...] | None
     human_expected: str
+    """Подпись типа («папка Google Drive», …) — для текста ошибки типа/формата."""
 
 
 _FIELD_POLICIES: tuple[_FieldPolicy, ...] = (
     _FieldPolicy(
+        column_key="report_url",
+        label="промежуточный отчёт",
+        issue_title="Промежуточный отчёт",
+        accepted_kinds=("google_doc", "drive_file"),
+        required_mime_for_drive_file=(DOCX_MIME, PDF_MIME),
+        human_expected=(
+            "документ Google (ссылка на Google Doc) или файл .docx / PDF на Google Drive"
+        ),
+    ),
+    _FieldPolicy(
         column_key="project_folder_url",
-        label="магистерский проект",
+        label="папку магистерского проекта",
+        issue_title='Папка «Магистерский проект»',
         accepted_kinds=("drive_folder",),
         required_mime_for_drive_file=None,
-        fail_stage_on_mismatch=False,
-        human_expected="на папку Google Drive",
+        human_expected="папка Google Drive",
     ),
     _FieldPolicy(
         column_key="lkb_url",
         label="заключение ЛКБ",
-        accepted_kinds=("drive_file",),
+        issue_title="Заключение ЛКБ",
+        accepted_kinds=("google_doc", "drive_file"),
         required_mime_for_drive_file=PDF_MIME,
-        fail_stage_on_mismatch=False,
-        human_expected="на PDF-файл в Google Drive",
+        human_expected=(
+            "Google Doc или файл PDF на Google Drive"
+        ),
     ),
     _FieldPolicy(
         column_key="dissertation_url",
         label="диссертацию",
+        issue_title="Диссертация",
         accepted_kinds=("google_doc", "drive_file"),
         required_mime_for_drive_file=DOCX_MIME,
-        fail_stage_on_mismatch=True,
-        human_expected="на Google-документ или .docx-файл в Google Drive",
+        human_expected="Google Doc или файл .docx на Google Drive",
     ),
     _FieldPolicy(
         column_key="publication_url",
         label="публикацию",
-        accepted_kinds=("drive_file",),
+        issue_title="Публикация",
+        accepted_kinds=("google_doc", "drive_file"),
         required_mime_for_drive_file=PDF_MIME,
-        fail_stage_on_mismatch=False,
-        human_expected="на PDF-файл в Google Drive",
+        human_expected="Google Doc или файл PDF на Google Drive",
     ),
 )
 
@@ -271,11 +276,82 @@ def _pick_publication_url(parsed: ParsedReport) -> str:
     ).strip()
 
 
-def _extract_link(parsed: ParsedReport, key: str) -> str:
+def _extract_link(
+    parsed: ParsedReport,
+    key: str,
+    *,
+    registration_report_url: str = "",
+) -> str:
+    if key == "report_url":
+        return (registration_report_url or "").strip()
     if key == "publication_url":
         return _pick_publication_url(parsed)
     value = getattr(parsed, key, None)
     return (value or "").strip()
+
+
+def _kind_mismatch_human(kind: DriveUrlKind) -> str:
+    """Пояснение «что оказалось по ссылке» для ошибки типа."""
+    kh = _KIND_HUMAN[kind]
+    if kind == "drive_folder":
+        return f"{kh} (ссылка на папку; частая ошибка — вместо документа указана папка или наоборот)"
+    if kind == "google_doc":
+        return f"{kh}"
+    if kind == "drive_file":
+        return f"{kh} (общая ссылка на файл без открытия в Docs)"
+    if kind == "google_sheet":
+        return f"{kh}; для этого поля обычно нужен документ, а не таблица"
+    return kh
+
+
+def _folder_word_in_google_url(url: str) -> bool:
+    """Подстрока «folder» в URL Google — типичный признак ссылки на каталог Drive."""
+
+    if "folder" not in url.casefold():
+        return False
+    netloc = (urlparse(url.strip()).netloc or "").lower()
+    return netloc.endswith("google.com") or netloc.endswith("googleusercontent.com")
+
+
+def _extra_kind_mismatch_hints(
+    policy: _FieldPolicy,
+    *,
+    kind: DriveUrlKind,
+    url: str,
+) -> str:
+    """Дополнительные пояснения к ошибке типа ссылки (политика полей Stage 3)."""
+
+    parts: list[str] = []
+    pk = policy.column_key
+
+    if pk == "lkb_url" and kind == "drive_folder":
+        parts.append(
+            " для ЛКБ нужно указывать ссылку не на папку, "
+            "а на конкретный pdf файл."
+        )
+
+    if pk == "report_url":
+        if kind == "drive_folder" or _folder_word_in_google_url(url):
+            parts.append(
+                " Слово folder в адресе допустимо только для поля "
+                "«Папка «Магистерский проект»»; для промежуточного отчёта "
+                "укажите ссылку на документ Google или файл .docx/PDF на Drive, а не на папку."
+            )
+
+    if pk == "project_folder_url":
+        if kind in ("google_doc", "drive_file"):
+            parts.append(
+                " Для этого поля нужна ссылка именно на папку Google Drive "
+                "(в адресе есть …/folders/…), а не на файл или документ."
+            )
+        elif not is_google_drive_folder_url(url):
+            parts.append(
+                " Обычно ссылка на папку содержит фрагмент …/folders/… в адресе; если его "
+                "нет, возможно, указан файл или страница не того типа — замените ссылку "
+                "на каталог магистерского проекта."
+            )
+
+    return "".join(parts)
 
 
 def _check_url_kind_and_mime(
@@ -284,85 +360,83 @@ def _check_url_kind_and_mime(
     policy: _FieldPolicy,
     link_mime_types: dict[str, str] | None,
 ) -> tuple[bool, list[str]]:
-    """Возвращает ``(ok, warnings)`` для одной ссылки.
-
-    ``ok`` — соответствует ли ссылка ожидаемому типу (и MIME для file).
-    ``warnings`` — человеко-читаемые формулировки для справки магистранта.
-    Если ``ok=False`` — caller помечает ячейку зачёркиванием.
-
-    Mime-проверка применяется только если фактический kind == drive_file
-    и policy требует MIME. Если mime неизвестен (caller не сделал prefetch
-    или drive.files().get упал) — это warning «не удалось проверить MIME»,
-    ячейка зачёркивается. Иначе магистрант мог бы залить, например, .jpeg
-    под видом PDF, и проверка молча пропустила бы.
-    """
+    """Возвращает ``(ok, warnings)`` для одной ссылки."""
 
     warnings: list[str] = []
+    ht = policy.issue_title
     kind = classify_drive_url(url)
     if kind not in policy.accepted_kinds:
         warnings.append(
-            f"Ссылка на {policy.label} должна вести {policy.human_expected}, "
-            f"а указана {_KIND_HUMAN[kind]}. "
-            "Поле в листе помечено зачёркиванием — обновите ссылку в отчёте."
+            f"«{ht}»: неверный тип ссылки — ожидалось {policy.human_expected}; "
+            f"фактически: {_kind_mismatch_human(kind)}. "
+            "Поле в листе помечено зачёркиванием — поправьте ссылку в промежуточном отчёте."
+            f"{_extra_kind_mismatch_hints(policy, kind=kind, url=url)}"
         )
         return False, warnings
 
-    if kind == "drive_file" and policy.required_mime_for_drive_file:
-        expected_mime = policy.required_mime_for_drive_file
+    if kind == "drive_file" and policy.required_mime_for_drive_file is not None:
+        spec = policy.required_mime_for_drive_file
+        allowed: tuple[str, ...] = (spec,) if isinstance(spec, str) else tuple(spec)
         if link_mime_types is None:
             return True, warnings
         actual_mime = link_mime_types.get(url, "")
         if not actual_mime:
             warnings.append(
-                f"Не удалось определить формат файла по ссылке на {policy.label}. "
-                "Поле в листе помечено зачёркиванием — проверьте доступ или укажите "
-                f"корректную ссылку (ожидается формат {expected_mime})."
+                f"«{ht}»: не удалось определить MIME файла для проверки формата (нет ответа "
+                "Drive API — часто из-за доступа только для владельца). "
+                f"Ожидалось содержимое как у {policy.human_expected}. "
+                "Поле в листе зачёркнуто."
             )
             return False, warnings
-        if actual_mime != expected_mime:
+        if actual_mime not in allowed:
             warnings.append(
-                f"Ссылка на {policy.label} ведёт на файл формата {actual_mime}, "
-                f"а ожидается {expected_mime}. Поле в листе помечено зачёркиванием — "
-                "обновите ссылку в отчёте."
+                f"«{ht}»: неверный формат хранящегося файла (MIME «{actual_mime}»; "
+                f"ожидался тип документа как у {policy.human_expected}). "
+                "Частая причина — загружен не тот файл. Поле в листе зачёркнуто."
             )
             return False, warnings
 
     return True, warnings
 
 
+def _issue_unreachable(*, policy: _FieldPolicy) -> str:
+    """Сеть/HTTP не открывает ссылку (частая причина — закрыт доступ только владельцу)."""
+    return (
+        f"«{policy.issue_title}»: ссылку не удалось проверить (не открывается по HTTPS с "
+        "сервера — как «страница недоступна»). Откройте доступ на чтение для всех по ссылке: "
+        "«Настроить доступ» → «Все, у кого есть ссылка» → роль «Читатель»."
+    )
+
+
 def run_stage3(
     *,
     parsed: ParsedReport,
+    registration_report_url: str = "",
     accessibility: dict[str, bool] | None = None,
     link_mime_types: dict[str, str] | None = None,
 ) -> tuple[StageResult, list[Stage3CellUpdate]]:
-    """Третий этап: извлечение ссылок из отчёта и их валидация.
+    """Третий этап: пять контролируемых ссылок (промежуточный отчёт + блок из Прил. 1).
 
-    Проверяет три уровня:
-      1) ссылка указана (не пустая) — иначе issue «отсутствует»;
-      2) тип ссылки соответствует ожиданию (folder / Doc / file) — см.
-         ``_FIELD_POLICIES`` и ``classify_drive_url``;
-      3) для drive_file — MIME совпадает с требуемым (PDF / DOCX) —
-         использует ``link_mime_types`` (caller заполняет через
-         ``drive.files().get(fields='mimeType')``);
-      4) URL открывается по HTTP (через ``accessibility``).
+    По каждому полю сообщения описывают: отсутствие ссылки, неверный тип (папка вместо
+    документа и наоборот), недоступность по HTTPS (доступ для бота/проверки), ошибку
+    формата файла для ``drive_file`` (MIME через Drive API при наличии).
 
-    Любое нарушение по пунктам 2–4 пишет ссылку в лист с
-    зачёркиванием и добавляет warning в справку. ``fail_stage_on_mismatch``
-    из политики (только для диссертации) делает Stage 3 не passed —
-    дальнейшие этапы пайплайна не запускаются, пока магистрант не
-    исправит отчёт. Для остальных полей пайплайн продолжает работу.
+    ``registration_report_url`` — ссылка на промежуточный отчёт из строки регистрации
+    (тот же URL, что Stage 2 проверил по формату/HTTP для доступа как к странице).
+    Колонку ``report_url`` в листе бот затем записывает с результатом этого шага.
 
-    ``accessibility`` / ``link_mime_types``: ``None`` — соответствующая
-    проверка отключена (используется в тестах без сети).
+    ``accessibility`` / ``link_mime_types``: ``None`` — проверка отключена (тесты без сети).
     """
 
     result = StageResult("stage3", executed=True)
     cells: list[Stage3CellUpdate] = []
-    diss_mismatch = False
 
     for policy in _FIELD_POLICIES:
-        url = _extract_link(parsed, policy.column_key)
+        url = _extract_link(
+            parsed,
+            policy.column_key,
+            registration_report_url=registration_report_url,
+        )
         if not url:
             cells.append(
                 Stage3CellUpdate(
@@ -371,7 +445,10 @@ def run_stage3(
                     strikethrough=False,
                 )
             )
-            result.issues.append(f"Ссылка на {policy.label} отсутствует")
+            result.issues.append(
+                f"«{policy.issue_title}»: в промежуточном отчёте не указана ссылка "
+                "(поле из списка пяти обязательных ссылок пустое или не найдено парсером)."
+            )
             continue
 
         type_ok, type_warnings = _check_url_kind_and_mime(
@@ -383,7 +460,7 @@ def run_stage3(
         if accessibility is not None:
             reachable = bool(accessibility.get(url, True))
         if not reachable:
-            result.issues.append(f"Ссылка на {policy.label} не открывается")
+            result.issues.append(_issue_unreachable(policy=policy))
 
         cell_strike = (not type_ok) or (not reachable)
         cells.append(
@@ -394,17 +471,17 @@ def run_stage3(
             )
         )
 
-        if policy.fail_stage_on_mismatch and not type_ok:
-            diss_mismatch = True
-
     diss_cell = next(
         (c for c in cells if c.column_key == "dissertation_url"), None
     )
+    rep_cell = next((c for c in cells if c.column_key == "report_url"), None)
     result.passed = bool(
         diss_cell
         and diss_cell.value != LINK_MISSING_VALUE
         and not diss_cell.strikethrough
-        and not diss_mismatch
+        and rep_cell
+        and rep_cell.value != LINK_MISSING_VALUE
+        and not rep_cell.strikethrough
     )
     return result, cells
 
@@ -601,6 +678,7 @@ def run_row_pipeline(
 
     stage3_result, cells = run_stage3(
         parsed=parsed_report,
+        registration_report_url=user_form.report_url or "",
         accessibility=link_accessibility,
         link_mime_types=link_mime_types,
     )

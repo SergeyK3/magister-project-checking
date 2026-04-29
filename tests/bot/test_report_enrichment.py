@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 from magister_checking.bot.models import UserForm
 from magister_checking.bot.report_enrichment import (
     URL_MISSING,
-    URL_UNAVAILABLE,
+    _exc_detail_blob_text,
+    _human_google_docs_report_read_failure,
     build_sheet_enrichment,
 )
 from magister_checking.report_parser import ParsedReport
@@ -289,6 +290,23 @@ class PublicationUrlTests(unittest.TestCase):
         self.assertEqual(result["publication_url"], URL_MISSING)
 
 
+class HumanDocsFailureTests(unittest.TestCase):
+    """``HttpError.content`` от googleapiclient — bytes; не должен падать при разборе."""
+
+    def test_detail_blob_handles_bytes_content(self) -> None:
+        exc = RuntimeError("outer")
+        exc.content = b'{"reason":"SERVICE_DISABLED","service":"docs.googleapis.com"}'  # type: ignore[attr-defined]
+        text = _exc_detail_blob_text(exc)
+        self.assertIn("SERVICE_DISABLED", text)
+        self.assertIn("docs.googleapis.com", text)
+
+    def test_human_failure_no_typeerror_when_content_bytes(self) -> None:
+        exc = RuntimeError("docs fail")
+        exc.content = b"has not been used in project X before or it is disabled"  # type: ignore[attr-defined]
+        msg = _human_google_docs_report_read_failure(exc)
+        self.assertIn("Google Docs", msg)
+
+
 class PlaceholderColumnsTests(unittest.TestCase):
     """Заглушки для колонок, которые наполняются в более поздних фазах."""
 
@@ -314,7 +332,10 @@ class PlaceholderColumnsTests(unittest.TestCase):
             side_effect=RuntimeError("no access"),
         ):
             result = build_sheet_enrichment(config, user_form)
-        self.assertEqual(result["publication_url"], URL_UNAVAILABLE)
+        self.assertIn("Папка проекта", result["project_folder_url"])
+        self.assertIn("no access", result["project_folder_url"])
+        self.assertIn("ЛКБ:", result["lkb_url"])
+        self.assertIn("Публикация", result["publication_url"])
         self.assertEqual(result["dissertation_title"], "")
         self.assertEqual(result["dissertation_language"], "")
 

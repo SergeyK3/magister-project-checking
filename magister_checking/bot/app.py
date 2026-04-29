@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,11 @@ from magister_checking.bot.config import BotConfig
 from magister_checking.bot.error_alerts import on_handler_error
 from magister_checking.bot.handlers import (
     ADMIN_PROJECT_CARD_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
+    ADMSTUB_CALLBACK_CONFIRM_PATTERN,
+    ADMSTU_CALLBACK_CONFIRM_PATTERN,
+    ADMSTU_CALLBACK_TEMPLATE_PATTERN,
     ASK_CONFIRM,
     ASK_FIELD,
     BIND_ASK_FIO,
@@ -34,11 +40,19 @@ from magister_checking.bot.handlers import (
     CLAIM_CONFIRM,
     CONFIG_BOT_DATA_KEY,
     PROJECT_CARD_ASK_TARGET,
-    RECHECK_CALLBACK_DATA,
+    RECHECK_CALLBACK_PATTERN,
+    ROLE_PICK,
     SPRAVKA_ASK_TARGET,
     SPRAVKA_MENU,
-    ROLE_PICK,
+    STUDENT_MSG_ASK_CUSTOM,
+    STUDENT_MSG_ASK_EXTRA,
+    STUDENT_MSG_ASK_TARGET,
+    STUDENT_MSG_BULK_ASK_ROWS,
+    STUDENT_MSG_BULK_CONFIRM,
+    STUDENT_MSG_CONFIRM,
+    STUDENT_MSG_PICK_KIND,
     admin_menu,
+    admin_recheck_pending_receive,
     admin_stats,
     admin_sync_dashboard,
     ask_confirm,
@@ -63,6 +77,15 @@ from magister_checking.bot.handlers import (
     spravka_start,
     start,
     start_role_callback,
+    student_message_bulk_start,
+    student_reminder_bulk_confirm_callback,
+    student_reminder_bulk_receive_rows,
+    student_reminder_confirm_callback,
+    student_reminder_receive_custom,
+    student_reminder_receive_extra,
+    student_reminder_receive_target,
+    student_reminder_pick_template,
+    student_reminder_start,
 )
 
 logger = logging.getLogger("magistrcheckbot")
@@ -158,6 +181,12 @@ def configure_logging(level: int, log_file: Optional[Path] = None) -> None:
     for name in _NOISY_LOGGERS_WITH_TOKEN:
         logging.getLogger(name).setLevel(noisy_level)
 
+    # Каждый 403 к Google пишет WARNING в консоль — при частых вызовах «рвёт»
+    # строки в PowerShell из‑за нескольких процессов/потоков. Оставляем только
+    # ERROR+ здесь; успехи/коды ответа по-прежнему видны в вашем коде (magistrcheckbot,
+    # report_enrichment) и в файле JSON при LOG_FILE.
+    logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)
+
 
 def _build_persistence(config: BotConfig) -> PicklePersistence:
     """Готовит PicklePersistence: создаёт каталог и возвращает объект.
@@ -247,6 +276,34 @@ def build_application(config: BotConfig) -> Application:
         filters.TEXT & ~filters.COMMAND & private,
         project_card_receive_target,
     )
+    student_reminder_target_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private,
+        student_reminder_receive_target,
+    )
+    student_reminder_template_cb_handler = CallbackQueryHandler(
+        student_reminder_pick_template,
+        pattern=ADMSTU_CALLBACK_TEMPLATE_PATTERN,
+    )
+    student_reminder_extra_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private,
+        student_reminder_receive_extra,
+    )
+    student_reminder_custom_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private,
+        student_reminder_receive_custom,
+    )
+    student_reminder_confirm_cb_handler = CallbackQueryHandler(
+        student_reminder_confirm_callback,
+        pattern=ADMSTU_CALLBACK_CONFIRM_PATTERN,
+    )
+    student_bulk_rows_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private,
+        student_reminder_bulk_receive_rows,
+    )
+    student_bulk_confirm_cb_handler = CallbackQueryHandler(
+        student_reminder_bulk_confirm_callback,
+        pattern=ADMSTUB_CALLBACK_CONFIRM_PATTERN,
+    )
 
     spravka_callback = CallbackQueryHandler(
         spravka_choose,
@@ -271,10 +328,21 @@ def build_application(config: BotConfig) -> Application:
         entry_points=[
             CommandHandler("start", start, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
+            CommandHandler("student_message", student_reminder_start, filters=private),
+            CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
+            ),
+            MessageHandler(
+                filters.Regex(f"^{ADMIN_STUDENT_MESSAGE_BUTTON}$") & private,
+                student_reminder_start,
+            ),
+            MessageHandler(
+                filters.Regex("^" + re.escape(ADMIN_STUDENT_MESSAGE_BULK_BUTTON) + "$")
+                & private,
+                student_message_bulk_start,
             ),
         ],
         states={
@@ -292,6 +360,13 @@ def build_application(config: BotConfig) -> Application:
             ],
             ASK_CONFIRM: [confirm_message_handler],
             PROJECT_CARD_ASK_TARGET: [project_card_target_handler],
+            STUDENT_MSG_ASK_TARGET: [student_reminder_target_handler],
+            STUDENT_MSG_PICK_KIND: [student_reminder_template_cb_handler],
+            STUDENT_MSG_ASK_EXTRA: [student_reminder_extra_handler],
+            STUDENT_MSG_ASK_CUSTOM: [student_reminder_custom_handler],
+            STUDENT_MSG_CONFIRM: [student_reminder_confirm_cb_handler],
+            STUDENT_MSG_BULK_ASK_ROWS: [student_bulk_rows_handler],
+            STUDENT_MSG_BULK_CONFIRM: [student_bulk_confirm_cb_handler],
             SPRAVKA_MENU: [spravka_callback],
             SPRAVKA_ASK_TARGET: [spravka_target_handler],
         },
@@ -299,10 +374,21 @@ def build_application(config: BotConfig) -> Application:
             CommandHandler("cancel", cancel, filters=private),
             CommandHandler("start", start, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
+            CommandHandler("student_message", student_reminder_start, filters=private),
+            CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
+            ),
+            MessageHandler(
+                filters.Regex(f"^{ADMIN_STUDENT_MESSAGE_BUTTON}$") & private,
+                student_reminder_start,
+            ),
+            MessageHandler(
+                filters.Regex("^" + re.escape(ADMIN_STUDENT_MESSAGE_BULK_BUTTON) + "$")
+                & private,
+                student_message_bulk_start,
             ),
         ],
         allow_reentry=True,
@@ -325,7 +411,13 @@ def build_application(config: BotConfig) -> Application:
     )
     application.add_handler(CommandHandler("recheck", recheck, filters=private))
     application.add_handler(
-        CallbackQueryHandler(recheck_button, pattern=f"^{RECHECK_CALLBACK_DATA}$")
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+            admin_recheck_pending_receive,
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(recheck_button, pattern=RECHECK_CALLBACK_PATTERN)
     )
     application.add_error_handler(on_handler_error)
     return application

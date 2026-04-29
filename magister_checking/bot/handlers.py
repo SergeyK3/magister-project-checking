@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 import io
 import logging
+import re
 from typing import Awaitable, Callable, List, Optional
 
 from telegram import (
@@ -74,7 +75,14 @@ from magister_checking.snapshot_render import (
     render_commission_telegram_html,
     render_spravka_telegram_html,
 )
+from magister_checking.broadcast import send_broadcast
+from magister_checking.drive_latest_snapshot import (
+    download_drive_file_bytes,
+    pick_latest_snapshot_for_row,
+    wrap_commission_html_for_browser,
+)
 from magister_checking.bot.row_pipeline import RowCheckReport
+from magister_checking.bot.student_notify_text import build_standard_reminder
 from magister_checking.row_check_cli import (
     RowLocator,
     format_report,
@@ -108,6 +116,19 @@ async def group_start_use_private_chat(
 ASK_FIELD, ASK_CONFIRM, BIND_ASK_FIO, BIND_CONFIRM, PROJECT_CARD_ASK_TARGET = range(5)
 SPRAVKA_MENU, SPRAVKA_ASK_TARGET = 5, 6
 ROLE_PICK, CLAIM_ASK_FIO, CLAIM_CONFIRM = 7, 8, 9
+(
+    STUDENT_MSG_ASK_TARGET,
+    STUDENT_MSG_PICK_KIND,
+    STUDENT_MSG_ASK_EXTRA,
+    STUDENT_MSG_ASK_CUSTOM,
+    STUDENT_MSG_CONFIRM,
+    STUDENT_MSG_BULK_ASK_ROWS,
+    STUDENT_MSG_BULK_CONFIRM,
+) = (10, 11, 12, 13, 14, 15, 16)
+
+ADMSTU_CALLBACK_TEMPLATE_PATTERN = r"^admstu:(std|stdex|cust)$"
+ADMSTU_CALLBACK_CONFIRM_PATTERN = r"^admstu:(send|cancel)$"
+ADMSTUB_CALLBACK_CONFIRM_PATTERN = r"^admstub:(send|cancel)$"
 
 USER_DATA_FORM_KEY = "form_data"
 USER_DATA_PENDING_KEY = "pending_fields"
@@ -116,9 +137,19 @@ USER_DATA_BIND_ROW_KEY = "bind_candidate_row"
 USER_DATA_CLAIM_TARGET_KEY = "claim_target"
 USER_DATA_CLAIM_ROW_KEY = "claim_candidate_row"
 USER_DATA_SPRAVKA_MODE = "spravka_mode"
+USER_DATA_ADMIN_RECHECK_PENDING = "admin_recheck_pending"
+USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED = "admin_recheck_only_if_changed"
+USER_DATA_STUDENT_REMINDER_ROW = "student_reminder_row"
+USER_DATA_STUDENT_REMINDER_FIO = "student_reminder_fio"
+USER_DATA_STUDENT_REMINDER_DRAFT = "student_reminder_draft"
+USER_DATA_STUDENT_BULK_ENTRIES = "student_reminder_bulk_entries"
+
+ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
+ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
+ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание по строкам"
+BULK_STUDENT_REMINDER_MAX_ROWS = 40
 
 CONFIG_BOT_DATA_KEY = "bot_config"
-ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 
 HELP_REPLY_TEXT_STUDENT = (
     "Команды бота (магистрант):\n\n"
@@ -138,11 +169,15 @@ HELP_REPLY_TEXT_STUDENT = (
 HELP_REPLY_TEXT_ADMIN = (
     "Команды бота (администратор):\n\n"
     "/start — регистрация, привязка к строке таблицы или продолжение анкеты\n"
-    "/recheck — повторить проверку отчёта (если вы уже в таблице)\n"
+    "/recheck — повторить проверку отчёта: своя строка; либо укажите цель в той же "
+    "команде — номер строки листа «Регистрация» или ФИО (если вашего telegram_id нет "
+    "в таблице, без номера/ФИО запуск нечего привязать)\n"
     "/cancel — прервать текущий диалог\n"
     "/admin — панель администратора (только для telegram_id из листа "
     f"«{ADMINS_WORKSHEET_NAME}»)\n"
     "/project_card — сформировать PDF-карточку проекта (только админы)\n"
+    "/student_message — сообщение одному магистранту из шаблона (только админы)\n"
+    "/student_message_bulk — стандартное напоминание по списку номеров строк (админы)\n"
     "/spravka — кратко для магистранта, полный текст для комиссии в чате, PDF, "
     "либо вложенный JSON с Drive в человекочитаемый вид (режимы «чужой строки» "
     "и JSON — у админа)\n"
@@ -188,6 +223,11 @@ def default_bot_commands() -> list[BotCommand]:
         BotCommand("cancel", "Прервать текущий диалог"),
         BotCommand("admin", "Панель администратора"),
         BotCommand("project_card", "PDF-карточка проекта (админы)"),
+        BotCommand("student_message", "Сообщение магистранту (админы)"),
+        BotCommand(
+            "student_message_bulk",
+            "Стандартное напоминание списку строк (админы)",
+        ),
         BotCommand("spravka", "Справка: магистр., комиссия, PDF, JSON→текст"),
         BotCommand("stats", "Сводка Dashboard в чат (админы)"),
         BotCommand("sync_dashboard", "Обновить лист Dashboard (админы)"),
@@ -239,9 +279,58 @@ def _get_user_form(context: ContextTypes.DEFAULT_TYPE) -> UserForm:
 
 def _admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[ADMIN_PROJECT_CARD_BUTTON]],
+        [
+            [ADMIN_PROJECT_CARD_BUTTON],
+            [ADMIN_STUDENT_MESSAGE_BUTTON],
+            [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
+    )
+
+
+def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        USER_DATA_STUDENT_REMINDER_ROW,
+        USER_DATA_STUDENT_REMINDER_FIO,
+        USER_DATA_STUDENT_REMINDER_DRAFT,
+        USER_DATA_STUDENT_BULK_ENTRIES,
+    ):
+        context.user_data.pop(key, None)
+
+
+def _student_reminder_template_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Стандартное напоминание", callback_data="admstu:std")],
+            [
+                InlineKeyboardButton(
+                    "Стандарт + замечания (до 3 строк)",
+                    callback_data="admstu:stdex",
+                )
+            ],
+            [InlineKeyboardButton("Только свой текст", callback_data="admstu:cust")],
+        ]
+    )
+
+
+def _student_reminder_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Отправить", callback_data="admstu:send"),
+                InlineKeyboardButton("Отмена", callback_data="admstu:cancel"),
+            ]
+        ]
+    )
+
+
+def _student_reminder_preview_text(draft: str) -> str:
+    return (
+        "Предпросмотр:\n"
+        "════════════════════\n"
+        f"{draft}\n"
+        "════════════════════"
     )
 
 
@@ -396,6 +485,80 @@ async def _call_blocking(func, /, *args, **kwargs):
     """Выполняет блокирующий I/O в рабочем потоке, не стопоря event loop."""
 
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _deliver_reminder_text_and_snapshot(
+    bot,
+    cfg: BotConfig,
+    *,
+    row_no: int,
+    chat_id_target: int,
+    message_text: str,
+) -> tuple[bool, str]:
+    """Текст в личку и при возможности HTML по снимку на Drive.
+
+    При успешной отправке текста второй элемент — текст для администратора
+    (обычно хвост с пояснением про вложение).
+    При ошибке доставки текста второй элемент — строка ошибки Telegram.
+    """
+
+    result = await send_broadcast(
+        bot,
+        [str(chat_id_target)],
+        message_text,
+        sleep_between=0.0,
+    )
+    if not result.sent:
+        reason = result.failed[0][1] if result.failed else "неизвестная ошибка"
+        return False, str(reason)
+
+    attach_note = ""
+    pick = await _call_blocking(pick_latest_snapshot_for_row, cfg, row_no)
+    if pick is not None:
+        try:
+            raw_bytes = await _call_blocking(
+                download_drive_file_bytes,
+                cfg,
+                pick.file_id,
+            )
+            snap = await _call_blocking(
+                project_snapshot_from_json_str,
+                raw_bytes.decode("utf-8"),
+            )
+            html_page = wrap_commission_html_for_browser(
+                render_commission_telegram_html(snap)
+            )
+            caption = (
+                "Снимок последней сохранённой проверки (откройте HTML в браузере — все ссылки активны). "
+                f"На Drive: «{pick.name}» ({pick.modified_time[:10]})."
+            )
+            if len(caption) > 1024:
+                caption = caption[:1021] + "…"
+            await bot.send_document(
+                chat_id=chat_id_target,
+                document=InputFile(
+                    io.BytesIO(html_page.encode("utf-8")),
+                    filename=f"proverka_stroka_{row_no}.html",
+                ),
+                caption=caption,
+            )
+            attach_note = "\n\nВложена HTML-справка по последнему JSON-снимку на Drive."
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "student_reminder: вложение по снимку для строки %s: %s",
+                row_no,
+                exc,
+                exc_info=True,
+            )
+            attach_note = (
+                "\n\nВложение снимка не добавлено — см. лог бота (Drive/JSON/размер)."
+            )
+    else:
+        attach_note = (
+            "\n\nСнимок для вложения не найден в папках Drive (задайте "
+            "PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS и сохраняйте снимки после проверки/карточки)."
+        )
+    return True, attach_note
 
 
 _TELEGRAM_SPRAVKA_MAX = 4000
@@ -943,7 +1106,10 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     await update.message.reply_text(
         "Панель администратора.\n\n"
-        "Нажмите кнопку ниже или используйте /project_card, чтобы сформировать PDF-карточку проекта.",
+        "• Карточка — кнопка ниже или /project_card (PDF).\n"
+        "• Сообщение магистранту — вторая кнопка или /student_message (напоминание в личку).\n"
+        "• Групповое стандартное напоминание — третья кнопка или /student_message_bulk "
+        "(список номеров строк).",
         reply_markup=_admin_keyboard(),
     )
     return ConversationHandler.END
@@ -1013,6 +1179,519 @@ async def project_card_receive_target(
         ),
         reply_markup=ReplyKeyboardRemove(),
     )
+    return ConversationHandler.END
+
+
+async def student_reminder_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Админ: напоминание одному магистранту (шаблон или свой текст в личку)."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    _clear_student_reminder(context)
+    await update.message.reply_text(
+        "Введите номер строки листа `Регистрация` или ФИО магистранта.\n\n"
+        "Я подставлю `telegram_id` из строки и пришлю в личку выбранный текст.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STUDENT_MSG_ASK_TARGET
+
+
+async def student_reminder_receive_target(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Строка/ФИО для напоминания магистранту."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    cfg = _bot_config(context)
+    worksheet = get_worksheet(cfg)
+    target = update.message.text or ""
+    row_number, error_message = _resolve_project_card_target_row(worksheet, target)
+    if error_message:
+        await update.message.reply_text(error_message)
+        return STUDENT_MSG_ASK_TARGET
+
+    assert row_number is not None
+    fio_label = (fio_text_from_worksheet_row(worksheet, row_number) or "").strip()
+
+    context.user_data[USER_DATA_STUDENT_REMINDER_ROW] = row_number
+    context.user_data[USER_DATA_STUDENT_REMINDER_FIO] = fio_label
+    await update.message.reply_text(
+        f"Строка {row_number}"
+        + (f" ({fio_label})" if fio_label else "")
+        + ".\n\nВыберите шаблон сообщения:",
+        reply_markup=_student_reminder_template_keyboard(),
+    )
+    return STUDENT_MSG_PICK_KIND
+
+
+async def student_reminder_pick_template(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Callback: std / stdex / cust."""
+
+    query = update.callback_query
+    if query is None or query.message is None:
+        return STUDENT_MSG_PICK_KIND
+    await query.answer()
+
+    if not _is_admin(update, context):
+        return ConversationHandler.END
+
+    raw = query.data or ""
+    m = re.match(ADMSTU_CALLBACK_TEMPLATE_PATTERN, raw)
+    if not m:
+        return STUDENT_MSG_PICK_KIND
+    tag = m.group(1)
+
+    fio_label = context.user_data.get(USER_DATA_STUDENT_REMINDER_FIO, "")
+
+    if tag == "std":
+        draft = build_standard_reminder(recipient_fio=fio_label, extra_lines=None)
+        context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(_student_reminder_preview_text(draft))
+        await query.message.reply_text(
+            "Отправить это сообщение в личку магистранту?",
+            reply_markup=_student_reminder_confirm_keyboard(),
+        )
+        return STUDENT_MSG_CONFIRM
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if tag == "stdex":
+        await query.message.reply_text(
+            "Пришлите до трёх строк замечаний (каждая — с новой строки).\n"
+            "Пустая отправка или «-» только — без блока замечаний."
+        )
+        return STUDENT_MSG_ASK_EXTRA
+
+    if tag == "cust":
+        await query.message.reply_text("Пришлите полный текст сообщения одним сообщением:")
+        return STUDENT_MSG_ASK_CUSTOM
+
+    return STUDENT_MSG_PICK_KIND
+
+
+async def student_reminder_receive_extra(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Строки замечаний к стандартному шаблону."""
+
+    msg = update.message
+    if msg is None:
+        return STUDENT_MSG_ASK_EXTRA
+
+    raw = normalize_text(msg.text or "")
+    lines: List[str] = []
+    if raw and raw.strip() not in {"", "-"}:
+        for ln in (msg.text or "").splitlines():
+            t = ln.strip()
+            if t and t != "-":
+                lines.append(t)
+    lines = lines[:3]
+
+    fio_label = context.user_data.get(USER_DATA_STUDENT_REMINDER_FIO, "")
+    draft = build_standard_reminder(recipient_fio=fio_label, extra_lines=lines)
+    context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
+
+    await msg.reply_text(_student_reminder_preview_text(draft))
+    await msg.reply_text(
+        "Отправить это сообщение в личку магистранту?",
+        reply_markup=_student_reminder_confirm_keyboard(),
+    )
+    return STUDENT_MSG_CONFIRM
+
+
+async def student_reminder_receive_custom(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Пользовательский полный текст."""
+
+    msg = update.message
+    if msg is None:
+        return STUDENT_MSG_ASK_CUSTOM
+
+    draft = (msg.text or "").strip()
+    if not draft:
+        await msg.reply_text("Текст пустой. Пришлите сообщение текстом или /cancel.")
+        return STUDENT_MSG_ASK_CUSTOM
+
+    context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
+
+    await msg.reply_text(_student_reminder_preview_text(draft))
+    await msg.reply_text(
+        "Отправить это сообщение в личку магистранту?",
+        reply_markup=_student_reminder_confirm_keyboard(),
+    )
+    return STUDENT_MSG_CONFIRM
+
+
+async def student_reminder_confirm_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Отправка или отмена."""
+
+    query = update.callback_query
+    if query is None or query.message is None:
+        return STUDENT_MSG_CONFIRM
+    await query.answer()
+
+    if not _is_admin(update, context):
+        return ConversationHandler.END
+
+    raw = query.data or ""
+    m = re.match(ADMSTU_CALLBACK_CONFIRM_PATTERN, raw)
+    if not m:
+        return STUDENT_MSG_CONFIRM
+    decision = m.group(1)
+
+    if decision == "cancel":
+        _clear_student_reminder(context)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "Отправка отменена.\n\nСнова — /student_message или панель /admin.",
+            reply_markup=_admin_keyboard(),
+        )
+        return ConversationHandler.END
+
+    row_no = context.user_data.get(USER_DATA_STUDENT_REMINDER_ROW)
+    draft_t = context.user_data.get(USER_DATA_STUDENT_REMINDER_DRAFT)
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if row_no is None or not isinstance(row_no, int) or draft_t is None or not str(draft_t).strip():
+        await query.message.reply_text(
+            "Внутреннее состояние сценария сброшено. Начните снова: /student_message."
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+
+    cfg = _bot_config(context)
+    ws = get_worksheet(cfg)
+    tg_raw = get_telegram_id_at_row(ws, row_no).strip()
+
+    try:
+        chat_id_target = int(tg_raw) if tg_raw else 0
+    except ValueError:
+        chat_id_target = 0
+
+    if not chat_id_target:
+        await query.message.reply_text(
+            f"В строке {row_no} пустой или некорректный telegram_id — не к кому отправить.",
+            reply_markup=_admin_keyboard(),
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+
+    ok, info = await _deliver_reminder_text_and_snapshot(
+        context.bot,
+        cfg,
+        row_no=row_no,
+        chat_id_target=chat_id_target,
+        message_text=str(draft_t),
+    )
+
+    if ok:
+        await query.message.reply_text(
+            f"Сообщение отправлено (chat_id={chat_id_target}, строка {row_no}).{info}",
+            reply_markup=_admin_keyboard(),
+        )
+    else:
+        await query.message.reply_text(
+            f"Не удалось доставить: {info}",
+            reply_markup=_admin_keyboard(),
+        )
+
+    _clear_student_reminder(context)
+    return ConversationHandler.END
+
+
+def _student_reminder_bulk_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Отправить всем", callback_data="admstub:send"),
+                InlineKeyboardButton("Отмена", callback_data="admstub:cancel"),
+            ]
+        ]
+    )
+
+
+def _parse_bulk_student_row_numbers(raw: str) -> tuple[list[int] | None, str | None]:
+    """Разбор строки вида ``5 7 12`` или ``5,12,15`` — только целые номера строк (≥ 2)."""
+
+    parts = [p for p in re.split(r"[\s,;]+", (raw or "").strip()) if p.strip()]
+    if not parts:
+        return None, "Список номеров строк пустой. Пример: «5 7 9» или «12,15,20»."
+    rows: list[int] = []
+    for p in parts:
+        if not p.isdigit():
+            return None, (
+                "Укажите только номера строк (целые числа), через пробел, запятую или перевод строки. "
+                f"Не понял фрагмент: {p!r}."
+            )
+        rows.append(int(p))
+    out: list[int] = []
+    seen: set[int] = set()
+    for n in rows:
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out, None
+
+
+def _bulk_delivery_summary_line(row_no: int, ok: bool, detail: str) -> str:
+    if not ok:
+        return f"• стр. {row_no}: ошибка — {detail[:200]}"
+    if "Вложена HTML-справка" in detail:
+        return f"• стр. {row_no}: отправлено + HTML снимок"
+    if "Вложение снимка не добавлено" in detail:
+        return f"• стр. {row_no}: текст да, вложение снимка — ошибка (см. лог)"
+    if "не найден в папках Drive" in detail:
+        return f"• стр. {row_no}: текст да, снимка на Drive нет"
+    return f"• стр. {row_no}: отправлено"
+
+
+async def student_message_bulk_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Групповое стандартное напоминание по списку номеров строк «Регистрация»."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    _clear_student_reminder(context)
+    await update.message.reply_text(
+        "Перечислите номера строк листа «Регистрация» (начиная со 2-й), по которым нужно "
+        "разослать стандартное напоминание — у каждого подставится ФИО из своей строки.\n\n"
+        "Можно через пробел, запятую или с новой строки. Пример:\n"
+        "5 7 9 10   или   12,15,18\n\n"
+        f"Не больше {BULK_STUDENT_REMINDER_MAX_ROWS} строк за раз.\n/cancel — отмена.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STUDENT_MSG_BULK_ASK_ROWS
+
+
+async def student_reminder_bulk_receive_rows(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Парсит список строк, показывает предпросмотр и кнопки Отправить/Отмена."""
+
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    msg = update.message
+    if msg is None:
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    idx, err = _parse_bulk_student_row_numbers(msg.text or "")
+    if err:
+        await msg.reply_text(err)
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    assert idx is not None
+    if len(idx) > BULK_STUDENT_REMINDER_MAX_ROWS:
+        await msg.reply_text(
+            f"Слишком много строк ({len(idx)}). Максимум {BULK_STUDENT_REMINDER_MAX_ROWS} за один раз."
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    bad_rows = [n for n in idx if n < 2]
+    if bad_rows:
+        await msg.reply_text(
+            "Номер строки данных должен быть не меньше 2 (строка 1 — заголовок): "
+            + ", ".join(str(x) for x in bad_rows)
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    cfg = _bot_config(context)
+    ws = get_worksheet(cfg)
+    entries: list[dict] = []
+    empty_tg: list[int] = []
+    empty_row: list[int] = []
+
+    for row_no in idx:
+        row_vals = load_row_values(ws, row_no)
+        if not any(str(v).strip() for v in row_vals):
+            empty_row.append(row_no)
+            continue
+        tg_raw = (get_telegram_id_at_row(ws, row_no) or "").strip()
+        if not tg_raw:
+            empty_tg.append(row_no)
+            continue
+        try:
+            chat_id = int(tg_raw)
+        except ValueError:
+            empty_tg.append(row_no)
+            continue
+        if not chat_id:
+            empty_tg.append(row_no)
+            continue
+        fio = (fio_text_from_worksheet_row(ws, row_no) or "").strip()
+        entries.append({"row": row_no, "chat_id": chat_id, "fio": fio})
+
+    if empty_row:
+        await msg.reply_text(
+            "Пустые или отсутствующие строки в таблице: "
+            + ", ".join(str(x) for x in empty_row)
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+    if empty_tg:
+        await msg.reply_text(
+            "Нет заполненного telegram_id в строках: "
+            + ", ".join(str(x) for x in empty_tg)
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+    if not entries:
+        await msg.reply_text("Некого добавить в рассылку.")
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    seen_chat: dict[int, int] = {}
+    dedup_rows: list[dict] = []
+    dup_notes: list[str] = []
+    for e in entries:
+        cid = int(e["chat_id"])
+        rw = int(e["row"])
+        if cid in seen_chat:
+            dup_notes.append(
+                f"Строка {rw} — тот же chat_id {cid}, что и строка {seen_chat[cid]} "
+                "(дубликат получателя пропускается)."
+            )
+            continue
+        seen_chat[cid] = rw
+        dedup_rows.append(e)
+    entries = dedup_rows
+
+    if not entries:
+        await msg.reply_text(
+            "После объединения дубликатов chat_id некого рассылать — укажите разных получателей."
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    context.user_data[USER_DATA_STUDENT_BULK_ENTRIES] = entries
+
+    sample_fio = entries[0]["fio"]
+    sample_draft = build_standard_reminder(recipient_fio=sample_fio, extra_lines=None)
+    lines = [
+        f"Будет отправлено {len(entries)} сообщений (стандартный текст, у каждого своё ФИО):",
+        "",
+    ]
+    if dup_notes:
+        lines.extend(dup_notes)
+        lines.append("")
+    show = entries[:35]
+    for e in show:
+        fn = e["fio"] or "—"
+        lines.append(f"• стр. {e['row']} — {fn} → chat_id {e['chat_id']}")
+    if len(entries) > 35:
+        lines.append(f"… и ещё {len(entries) - 35}.")
+    lines.extend(
+        [
+            "",
+            "Пример текста для первой строки в списке:",
+            "════════════",
+            sample_draft[:3200] + ("…" if len(sample_draft) > 3200 else ""),
+            "════════════",
+            "",
+            "Отправить всем?",
+        ]
+    )
+    body = "\n".join(lines)
+    if len(body) > 4000:
+        body = body[:3990] + "…"
+
+    await msg.reply_text(
+        body,
+        reply_markup=_student_reminder_bulk_confirm_keyboard(),
+    )
+    return STUDENT_MSG_BULK_CONFIRM
+
+
+async def student_reminder_bulk_confirm_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Отправка или отмена группового стандартного напоминания."""
+
+    query = update.callback_query
+    if query is None or query.message is None:
+        return STUDENT_MSG_BULK_CONFIRM
+    await query.answer()
+
+    if not _is_admin(update, context):
+        return ConversationHandler.END
+
+    raw = query.data or ""
+    m = re.match(ADMSTUB_CALLBACK_CONFIRM_PATTERN, raw)
+    if not m:
+        return STUDENT_MSG_BULK_CONFIRM
+    decision = m.group(1)
+
+    if decision == "cancel":
+        _clear_student_reminder(context)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "Рассылка отменена.\n\nСнова — /student_message_bulk или панель /admin.",
+            reply_markup=_admin_keyboard(),
+        )
+        return ConversationHandler.END
+
+    entries = context.user_data.get(USER_DATA_STUDENT_BULK_ENTRIES)
+    if not isinstance(entries, list) or not entries:
+        await query.message.reply_text(
+            "Состояние сценария устарело. Начните снова: /student_message_bulk."
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    cfg = _bot_config(context)
+    summary_lines: list[str] = []
+    delay = 0.06
+
+    for i, ent in enumerate(entries):
+        if i:
+            await asyncio.sleep(delay)
+        row_no = int(ent["row"])
+        chat_id_target = int(ent["chat_id"])
+        fio = str(ent.get("fio") or "")
+        draft = build_standard_reminder(recipient_fio=fio, extra_lines=None)
+        ok, info = await _deliver_reminder_text_and_snapshot(
+            context.bot,
+            cfg,
+            row_no=row_no,
+            chat_id_target=chat_id_target,
+            message_text=draft,
+        )
+        summary_lines.append(_bulk_delivery_summary_line(row_no, ok, info))
+
+    report = "Групповая рассылка завершена.\n\n" + "\n".join(summary_lines)
+    if len(report) > 4000:
+        report = report[:3990] + "…"
+
+    await query.message.reply_text(report, reply_markup=_admin_keyboard())
+    _clear_student_reminder(context)
     return ConversationHandler.END
 
 
@@ -1477,8 +2156,8 @@ async def receive_field(
                 await msg.reply_text(
                     target_msg
                     + "\n\nПришлите, пожалуйста, правильную ссылку на сам "
-                    "документ промежуточного отчёта (Google Docs / DOCX в "
-                    "Drive) прямо в ответ на это сообщение — я её проверю "
+                    "документ промежуточного отчёта (Google Docs, DOCX или "
+                    "PDF в Drive) прямо в ответ на это сообщение — я её проверю "
                     "и продолжу регистрацию.\n"
                     f"Чтобы пропустить этот шаг, отправьте {SKIP_TOKEN} или /skip."
                 )
@@ -1614,7 +2293,7 @@ async def ask_confirm(
             "Чтобы запустить проверку вашего отчёта прямо сейчас — "
             "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /recheck."
             + dashboard_rate_note,
-            reply_markup=build_recheck_keyboard(),
+            reply_markup=build_recheck_keyboard(row_num),
         )
 
     return ConversationHandler.END
@@ -1629,29 +2308,136 @@ RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "
 
 RECHECK_BUTTON_LABEL = "🔄 Перепроверить"
 RECHECK_CALLBACK_DATA = "recheck:full"
-"""Callback payload кнопки «Перепроверить». Эквивалент ``/recheck`` без аргументов
-(полный прогон). Узкий paттern регистрируется в ``app.build_application``."""
+RECHECK_CALLBACK_PATTERN = r"^recheck:full(?::\d+)?$"
+"""Шаблон callback: ``recheck:full`` или ``recheck:full:<номер строки>`` для админской
+перепроверки без повторного ввода цели (кнопка под отчётом по той же строке)."""
 
 
-def _parse_recheck_only_if_changed(message_text: str) -> bool:
-    """Распознаёт ``/recheck quick`` и эквиваленты — handoff §8 ``--only-if-changed``."""
+def _parse_recheck_callback_row(callback_data: str | None) -> int | None:
+    if not callback_data:
+        return None
+    parts = callback_data.strip().split(":")
+    if len(parts) != 3 or parts[0] != "recheck" or parts[1] != "full":
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
+
+
+def _parse_recheck_command_parts(message_text: str) -> tuple[bool, str | None]:
+    """Разбор текста команды ``/recheck``.
+
+    Возвращает ``(only_if_changed, target)``, где ``target`` — номер строки или ФИО
+    (всё, что осталось после удаления токенов ``quick`` / ``only-if-changed`` и т.д.).
+    Только администраторы могут передать непустой ``target`` (см. ``recheck``).
+    """
 
     parts = (message_text or "").strip().split()
     if len(parts) < 2:
-        return False
-    return parts[1].strip().lower() in RECHECK_QUICK_TOKENS
+        return False, None
+    body = parts[1:]
+    only_if_changed = False
+    collected: list[str] = []
+    for token in body:
+        if token.strip().lower() in RECHECK_QUICK_TOKENS:
+            only_if_changed = True
+        else:
+            collected.append(token)
+    target = " ".join(collected).strip() or None
+    return only_if_changed, target
 
 
-def build_recheck_keyboard() -> InlineKeyboardMarkup:
+def _clear_admin_recheck_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(USER_DATA_ADMIN_RECHECK_PENDING, None)
+    context.user_data.pop(USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED, None)
+
+
+async def _prompt_admin_recheck_need_target(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    only_if_changed: bool,
+) -> None:
+    """Админ без строки в «Регистрация»: ждём цель в той же команде или следующим сообщением."""
+
+    context.user_data[USER_DATA_ADMIN_RECHECK_PENDING] = True
+    context.user_data[USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED] = only_if_changed
+    msg = (
+        "Отправьте номер строки листа «Регистрация» или ФИО следующим сообщением "
+        "(или одной командой: /recheck N или /recheck ФИО)."
+    )
+    if only_if_changed:
+        msg += (
+            "\n\nБыстрый режим уже включён: запись после проверки — только если входы "
+            "менялись с прошлого прогона; или одной строкой: /recheck quick N."
+        )
+    if update.message is not None:
+        await update.message.reply_text(msg)
+    else:
+        await _send_recheck_reply(update, msg)
+
+
+async def admin_recheck_pending_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Второй шаг админского /recheck: текст с номером строки или ФИО (не команда)."""
+
+    if update.message is None or update.effective_user is None:
+        return
+    if not _is_private_chat(update):
+        return
+    if not context.user_data.get(USER_DATA_ADMIN_RECHECK_PENDING):
+        return
+    if not _is_admin(update, context):
+        _clear_admin_recheck_pending(context)
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    cfg = _bot_config(context)
+    worksheet = await _call_blocking(get_worksheet, cfg)
+    row_number, err_msg = await _call_blocking(
+        _resolve_project_card_target_row, worksheet, text
+    )
+    if err_msg:
+        await update.message.reply_text(err_msg)
+        return
+
+    context.user_data.pop(USER_DATA_ADMIN_RECHECK_PENDING, None)
+    only_if_changed = bool(
+        context.user_data.pop(USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED, False)
+    )
+
+    await _do_recheck(
+        update,
+        context,
+        only_if_changed=only_if_changed,
+        row_number_override=row_number,
+    )
+
+
+def build_recheck_keyboard(row_number: int | None = None) -> InlineKeyboardMarkup:
     """Inline-кнопка под итоговым отчётом и финалом регистрации.
 
     Inline (а не Reply) — чтобы кнопка была привязана к конкретному сообщению
     и пропадала после нажатия (см. ``recheck_button``). Это снижает риск
     случайного двойного запуска тяжёлого пайплайна.
+
+    Если передан ``row_number``, в callback кладётся ``recheck:full:<row>``, чтобы
+    администратор (без своей строки в «Регистрация») мог перепроверить ту же цель
+    кнопкой, не вводя номер снова. Магистрант всё равно ищется по ``telegram_id``.
     """
 
+    payload = (
+        RECHECK_CALLBACK_DATA
+        if row_number is None
+        else f"{RECHECK_CALLBACK_DATA}:{row_number}"
+    )
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(RECHECK_BUTTON_LABEL, callback_data=RECHECK_CALLBACK_DATA)]]
+        [[InlineKeyboardButton(RECHECK_BUTTON_LABEL, callback_data=payload)]]
     )
 
 
@@ -1711,14 +2497,14 @@ async def _do_recheck(
     *,
     only_if_changed: bool,
     skip_status_message: bool = False,
+    row_number_override: int | None = None,
 ) -> None:
     """Общее тело /recheck: вызывается из ``recheck`` и ``recheck_button``.
 
-    Поиск строки в листе ``Регистрация`` идёт строго по ``telegram_id`` —
-    ФИО как fallback не используем, чтобы случайный однофамилец не мог
-    инициировать перезапись чужой строки. Если ``telegram_id`` не привязан
-    к листу, бот предлагает пройти ``/start`` и кнопку не показывает
-    (без строки нечего перепроверять).
+    Поиск строки в листе ``Регистрация`` по умолчанию — строго по ``telegram_id``
+    у вызывающего (ФИО как fallback не используем, чтобы случайный однофамилец не мог
+    инициировать перезапись чужой строки). Администратор может передать номер строки
+    или ФИО прямо в команде (см. ``recheck``): тогда используется ``row_number_override``.
 
     Кнопка «Перепроверить» прицепляется к финальному отчёту, а также к
     сообщениям об ошибках пайплайна — чтобы пользователь мог сразу повторить
@@ -1735,13 +2521,21 @@ async def _do_recheck(
     telegram_id = str(update.effective_user.id)
 
     worksheet = await _call_blocking(get_worksheet, cfg)
-    row_number = await _call_blocking(find_row_by_telegram_id, worksheet, telegram_id)
+    if row_number_override is not None:
+        row_number = row_number_override
+    else:
+        row_number = await _call_blocking(find_row_by_telegram_id, worksheet, telegram_id)
     if row_number is None:
-        await _send_recheck_reply(
-            update,
-            "Не нашёл вашу строку в листе «Регистрация».\n\n"
-            "Сначала пройдите регистрацию: /start",
-        )
+        if _is_admin(update, context):
+            await _prompt_admin_recheck_need_target(
+                update, context, only_if_changed=only_if_changed
+            )
+        else:
+            await _send_recheck_reply(
+                update,
+                "Не нашёл вашу строку в листе «Регистрация».\n\n"
+                "Сначала пройдите регистрацию: /start",
+            )
         return
 
     if not skip_status_message:
@@ -1752,7 +2546,7 @@ async def _do_recheck(
         )
         await _send_recheck_reply(
             update,
-            f"Запускаю повторную проверку вашей строки {row_number}: {mode_hint}.\n"
+            f"Запускаю повторную проверку строки {row_number} ({mode_hint}).\n"
             "Это может занять до минуты.",
         )
 
@@ -1772,7 +2566,7 @@ async def _do_recheck(
         await _send_recheck_reply(
             update,
             f"Ошибка: {exc}",
-            reply_markup=build_recheck_keyboard(),
+            reply_markup=build_recheck_keyboard(row_number),
         )
         return
     except Exception as exc:  # noqa: BLE001
@@ -1786,7 +2580,7 @@ async def _do_recheck(
             update,
             "Не удалось выполнить повторную проверку.\n\n"
             f"{_user_message_for_api_failure(exc, audience='student')}",
-            reply_markup=build_recheck_keyboard(),
+            reply_markup=build_recheck_keyboard(row_number),
         )
         return
 
@@ -1796,25 +2590,91 @@ async def _do_recheck(
     await _send_recheck_reply(
         update,
         spravka_text,
-        reply_markup=build_recheck_keyboard(),
+        reply_markup=build_recheck_keyboard(row_number),
         parse_mode=ParseMode.HTML,
     )
 
 
 async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда ``/recheck`` — магистрант запускает свою проверку повторно.
+    """Команда ``/recheck`` — повторная проверка строки «Регистрация».
+
+    Магистрант: прогон своей строки (по ``telegram_id`` в таблице).
+
+    Администратор без строки в таблице: укажите цель в команде —
+    ``/recheck N`` или ``/recheck ФИО`` (и необязательно ``quick`` для
+    ``only_if_changed``).
 
     По умолчанию выполняется полный прогон с ``apply=True``: lay результаты
     в J:R и пишет одну запись в «Историю проверок» с ``source="bot"``.
-    Если магистрант написал ``/recheck quick``, включается короткое
-    замыкание ``only_if_changed=True`` (см. ``RECHECK_QUICK_TOKENS``).
+    ``/recheck quick`` у магистранта включает ``only_if_changed=True``.
     """
 
     if update.message is None or update.effective_user is None:
         return
 
-    only_if_changed = _parse_recheck_only_if_changed(update.message.text or "")
-    await _do_recheck(update, context, only_if_changed=only_if_changed)
+    only_if_changed, admin_target = _parse_recheck_command_parts(
+        update.message.text or ""
+    )
+    if admin_target and not _is_admin(update, context):
+        await update.message.reply_text(
+            "Указать в команде номер строки или ФИО могут только администраторы.\n\n"
+            "Чтобы перепроверить свою анкету, отправьте /recheck без аргументов "
+            "(или /recheck quick — быстрый режим, если данные в таблице не менялись)."
+        )
+        return
+
+    cfg = _bot_config(context)
+    telegram_id = str(update.effective_user.id)
+    worksheet = await _call_blocking(get_worksheet, cfg)
+
+    if admin_target:
+        _clear_admin_recheck_pending(context)
+        row_number_override, err_msg = await _call_blocking(
+            _resolve_project_card_target_row, worksheet, admin_target
+        )
+        if err_msg:
+            await update.message.reply_text(err_msg)
+            return
+    else:
+        row_number_override = None
+
+    if not _is_admin(update, context):
+        _clear_admin_recheck_pending(context)
+
+    row_by_tg = await _call_blocking(find_row_by_telegram_id, worksheet, telegram_id)
+
+    if row_number_override is not None:
+        _clear_admin_recheck_pending(context)
+        await _do_recheck(
+            update,
+            context,
+            only_if_changed=only_if_changed,
+            row_number_override=row_number_override,
+        )
+        return
+
+    if row_by_tg is not None:
+        _clear_admin_recheck_pending(context)
+        await _do_recheck(
+            update,
+            context,
+            only_if_changed=only_if_changed,
+            row_number_override=None,
+        )
+        return
+
+    if _is_admin(update, context):
+        await _prompt_admin_recheck_need_target(
+            update, context, only_if_changed=only_if_changed
+        )
+        return
+
+    await _do_recheck(
+        update,
+        context,
+        only_if_changed=only_if_changed,
+        row_number_override=None,
+    )
 
 
 async def recheck_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1849,7 +2709,14 @@ async def recheck_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Сообщение слишком старое или нет прав на редактирование — не критично.
         pass
 
-    await _do_recheck(update, context, only_if_changed=False)
+    row_cb = _parse_recheck_callback_row(query.data)
+    row_override = (
+        row_cb if (row_cb is not None and _is_admin(update, context)) else None
+    )
+
+    await _do_recheck(
+        update, context, only_if_changed=False, row_number_override=row_override
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1859,6 +2726,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _record_action(user_form, "cancelled")
     context.user_data[USER_DATA_CLAIM_TARGET_KEY] = None
     context.user_data[USER_DATA_CLAIM_ROW_KEY] = None
+    _clear_admin_recheck_pending(context)
+    _clear_student_reminder(context)
     msg = update.message or (update.effective_message)
     if msg is not None:
         await msg.reply_text(
@@ -1883,7 +2752,12 @@ async def help_command(
 
 
 __all__ = [
+    "ADMSTUB_CALLBACK_CONFIRM_PATTERN",
+    "ADMSTU_CALLBACK_CONFIRM_PATTERN",
+    "ADMSTU_CALLBACK_TEMPLATE_PATTERN",
     "ADMIN_PROJECT_CARD_BUTTON",
+    "ADMIN_STUDENT_MESSAGE_BUTTON",
+    "ADMIN_STUDENT_MESSAGE_BULK_BUTTON",
     "ASK_FIELD",
     "ASK_CONFIRM",
     "BIND_ASK_FIO",
@@ -1894,6 +2768,7 @@ __all__ = [
     "PROJECT_CARD_ASK_TARGET",
     "RECHECK_BUTTON_LABEL",
     "RECHECK_CALLBACK_DATA",
+    "RECHECK_CALLBACK_PATTERN",
     "SPRAVKA_CALLBACK_COMMISSION",
     "USER_DATA_BIND_ROW_KEY",
     "USER_DATA_CLAIM_TARGET_KEY",
@@ -1906,7 +2781,15 @@ __all__ = [
     "SPRAVKA_CALLBACK_PDF",
     "SPRAVKA_CALLBACK_TELEGRAM",
     "SPRAVKA_MENU",
+    "STUDENT_MSG_ASK_CUSTOM",
+    "STUDENT_MSG_ASK_EXTRA",
+    "STUDENT_MSG_ASK_TARGET",
+    "STUDENT_MSG_BULK_ASK_ROWS",
+    "STUDENT_MSG_BULK_CONFIRM",
+    "STUDENT_MSG_CONFIRM",
+    "STUDENT_MSG_PICK_KIND",
     "ROLE_PICK",
+    "admin_recheck_pending_receive",
     "admin_menu",
     "admin_stats",
     "admin_sync_dashboard",
@@ -1937,4 +2820,13 @@ __all__ = [
     "spravka_start",
     "start",
     "start_role_callback",
+    "student_message_bulk_start",
+    "student_reminder_bulk_confirm_callback",
+    "student_reminder_bulk_receive_rows",
+    "student_reminder_confirm_callback",
+    "student_reminder_receive_custom",
+    "student_reminder_receive_extra",
+    "student_reminder_receive_target",
+    "student_reminder_pick_template",
+    "student_reminder_start",
 ]

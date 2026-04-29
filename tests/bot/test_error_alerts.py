@@ -6,7 +6,7 @@ import asyncio
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram import Chat, Message, Update, User
 from telegram.error import NetworkError
@@ -14,7 +14,11 @@ from telegram.ext import ContextTypes
 
 from magister_checking.bot.app import build_application
 from magister_checking.bot.config import BotConfig
-from magister_checking.bot.error_alerts import format_handler_error_html, on_handler_error
+from magister_checking.bot.error_alerts import (
+    format_handler_error_html,
+    on_handler_error,
+    reset_mag_alert_cooldown_for_tests,
+)
 from magister_checking.bot.handlers import CONFIG_BOT_DATA_KEY
 
 
@@ -66,6 +70,9 @@ class FormatHandlerErrorHtmlTests(unittest.TestCase):
 
 
 class OnHandlerErrorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_mag_alert_cooldown_for_tests()
+
     def test_skips_send_when_no_alert_chats(self) -> None:
         async def _run() -> None:
             cfg = _minimal_config(alert=())
@@ -130,6 +137,48 @@ class OnHandlerErrorTests(unittest.TestCase):
             ctx.error = NetworkError("httpx.ConnectError: [Errno 11001] getaddrinfo failed")
             await on_handler_error(None, ctx)
             send_mock.assert_not_awaited()
+
+        asyncio.run(_run())
+
+    def test_duplicate_errors_same_magistrate_suppress_alert_one_per_minute(self) -> None:
+        """Подряд ошибки того же пользователя не дублируют алерт админам (429 обрабатывается отдельно)."""
+
+        async def _run() -> None:
+            cfg = _minimal_config(alert=(111,))
+            application = build_application(cfg)
+            send_mock = AsyncMock()
+            ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+            ctx.application = application
+            ctx.bot = MagicMock()
+            ctx.bot.send_message = send_mock
+            ctx.error = RuntimeError("first")
+
+            chat = Chat(id=1, type="private")
+            user = User(id=90901, first_name="T", is_bot=False)
+            msg = Message(
+                message_id=1,
+                date=datetime.now(tz=timezone.utc),
+                chat=chat,
+                from_user=user,
+            )
+            upd = Update(update_id=10, message=msg)
+
+            clock = {"t": 1000.0}
+
+            with patch(
+                "magister_checking.bot.error_alerts.time.time",
+                side_effect=lambda: clock["t"],
+            ):
+                await on_handler_error(upd, ctx)
+                self.assertEqual(send_mock.await_count, 1)
+                clock["t"] = 1030.0
+                ctx.error = RuntimeError("second")
+                await on_handler_error(upd, ctx)
+                self.assertEqual(send_mock.await_count, 1)
+                clock["t"] = 1080.0
+                ctx.error = RuntimeError("third")
+                await on_handler_error(upd, ctx)
+                self.assertEqual(send_mock.await_count, 2)
 
         asyncio.run(_run())
 

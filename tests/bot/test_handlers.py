@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from telegram.ext import ConversationHandler
 
 from telegram import InlineKeyboardMarkup
+from telegram.constants import ChatType
 from telegram.error import BadRequest
 
 from magister_checking.bot import handlers
@@ -26,6 +27,7 @@ from magister_checking.bot.handlers import (
     ROLE_PICK,
     help_reply_for_user,
     admin_menu,
+    admin_recheck_pending_receive,
     admin_stats,
     admin_sync_dashboard,
     ask_confirm,
@@ -78,6 +80,9 @@ def _make_update(
     update.message.reply_text = AsyncMock()
     update.message.reply_document = AsyncMock()
     update.effective_message = update.message
+    chat = MagicMock()
+    chat.type = ChatType.PRIVATE
+    update.effective_chat = chat
     return update
 
 
@@ -578,7 +583,7 @@ class AskConfirmTests(unittest.TestCase):
         self.assertIsInstance(markup, InlineKeyboardMarkup)
         button = markup.inline_keyboard[0][0]
         self.assertEqual(button.text, RECHECK_BUTTON_LABEL)
-        self.assertEqual(button.callback_data, RECHECK_CALLBACK_DATA)
+        self.assertEqual(button.callback_data, f"{RECHECK_CALLBACK_DATA}:2")
 
     def test_yes_saves_with_report_enrichment_when_available(self) -> None:
         ws = FakeWorksheet(
@@ -857,6 +862,8 @@ class HelpAndCommandsTests(unittest.TestCase):
                 "cancel",
                 "admin",
                 "project_card",
+                "student_message",
+                "student_message_bulk",
                 "spravka",
                 "stats",
                 "sync_dashboard",
@@ -1116,7 +1123,7 @@ class AdminProjectCardTests(unittest.TestCase):
 
         self.assertEqual(state, ConversationHandler.END)
         last = update.message.reply_text.await_args.args[0]
-        self.assertIn("Кратко:", last)
+        self.assertIn("Не удалось сформировать", last)
         self.assertIn("первая строка", last)
         self.assertNotIn("вторая строка", last)
 
@@ -1142,7 +1149,7 @@ class RecheckHandlerTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_update(user_id=999, text="/recheck")
 
-        with _patch_worksheet(ws), patch(
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
             "magister_checking.bot.handlers.run_row_check"
         ) as run:
             _run(recheck(update, ctx))
@@ -1151,13 +1158,90 @@ class RecheckHandlerTests(unittest.TestCase):
         msg = update.message.reply_text.await_args_list[-1].args[0]
         self.assertIn("/start", msg)
 
+    def test_recheck_admin_without_registration_row_gets_target_hint(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=999, text="/recheck")
+
+        with _patch_worksheet(ws), _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.run_row_check"
+        ) as run:
+            _run(recheck(update, ctx))
+
+        run.assert_not_called()
+        msg = update.message.reply_text.await_args_list[-1].args[0]
+        self.assertIn("/recheck", msg)
+        self.assertIn("следующим сообщением", msg)
+        self.assertNotIn("не привязан", msg)
+        self.assertNotIn("Сначала пройдите регистрацию", msg)
+        self.assertTrue(ctx.user_data.get("admin_recheck_pending"))
+
+    def test_recheck_admin_followup_plain_text_runs_pipeline(self) -> None:
+        ws = FakeWorksheet(
+            [list(SHEET_HEADER), self._row(telegram_id="222", fio="Петров П.П.")]
+        )
+        ctx = _FakeContext(ws)
+        ctx.user_data["admin_recheck_pending"] = True
+        ctx.user_data["admin_recheck_only_if_changed"] = False
+        update = _make_update(user_id=999, text="2")
+
+        fake_report = RowCheckReport(fio="Петров П.П.", row_number=2)
+        with _patch_worksheet(ws), _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Петров П.П."), {}),
+        ):
+            _run(admin_recheck_pending_receive(update, ctx))
+
+        run.assert_called_once()
+        locator = run.call_args.args[1]
+        self.assertEqual(locator.row_number, 2)
+        self.assertIsNone(ctx.user_data.get("admin_recheck_pending"))
+
+    def test_recheck_admin_with_target_row_runs_pipeline(self) -> None:
+        ws = FakeWorksheet(
+            [list(SHEET_HEADER), self._row(telegram_id="222", fio="Петров П.П.")]
+        )
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=999, text="/recheck 2")
+
+        fake_report = RowCheckReport(fio="Петров П.П.", row_number=2)
+        with _patch_worksheet(ws), _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Петров П.П."), {}),
+        ):
+            _run(recheck(update, ctx))
+
+        run.assert_called_once()
+        locator = run.call_args.args[1]
+        self.assertEqual(locator.row_number, 2)
+
+    def test_recheck_non_admin_with_target_rejected(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="222")])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=111, text="/recheck 2")
+
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
+            "magister_checking.bot.handlers.run_row_check"
+        ) as run:
+            _run(recheck(update, ctx))
+
+        run.assert_not_called()
+        msg = update.message.reply_text.await_args_list[-1].args[0]
+        self.assertIn("только администраторы", msg)
+
     def test_recheck_runs_full_pipeline_for_known_user(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER), self._row(telegram_id="111")])
         ctx = _FakeContext(ws)
         update = _make_update(user_id=111, text="/recheck")
 
         fake_report = RowCheckReport(fio="Иванов И.И.", row_number=2)
-        with _patch_worksheet(ws), patch(
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
             "magister_checking.bot.handlers.run_row_check",
             return_value=fake_report,
         ) as run, patch(
@@ -1183,7 +1267,7 @@ class RecheckHandlerTests(unittest.TestCase):
         )
         self.assertIsInstance(final_markup, InlineKeyboardMarkup)
         self.assertEqual(
-            final_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+            final_markup.inline_keyboard[0][0].callback_data, f"{RECHECK_CALLBACK_DATA}:2"
         )
 
     def test_recheck_quick_passes_only_if_changed(self) -> None:
@@ -1194,7 +1278,7 @@ class RecheckHandlerTests(unittest.TestCase):
         fake_report = RowCheckReport(
             fio="Иванов И.И.", row_number=2, unchanged=True
         )
-        with _patch_worksheet(ws), patch(
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
             "magister_checking.bot.handlers.run_row_check",
             return_value=fake_report,
         ) as run:
@@ -1211,7 +1295,7 @@ class RecheckHandlerTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_update(user_id=111, text="/recheck")
 
-        with _patch_worksheet(ws), patch(
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
             "magister_checking.bot.handlers.run_row_check",
             side_effect=RuntimeError("drive boom"),
         ):
@@ -1223,7 +1307,7 @@ class RecheckHandlerTests(unittest.TestCase):
         retry_markup = last_call.kwargs.get("reply_markup")
         self.assertIsInstance(retry_markup, InlineKeyboardMarkup)
         self.assertEqual(
-            retry_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+            retry_markup.inline_keyboard[0][0].callback_data, f"{RECHECK_CALLBACK_DATA}:2"
         )
 
 
@@ -1251,6 +1335,9 @@ def _make_callback_update(
     query.edit_message_text = AsyncMock()
     query.message.reply_text = AsyncMock()
     update.callback_query = query
+    chat = MagicMock()
+    chat.type = ChatType.PRIVATE
+    update.effective_chat = chat
     return update
 
 
@@ -1271,6 +1358,11 @@ class RecheckButtonTests(unittest.TestCase):
         button = markup.inline_keyboard[0][0]
         self.assertEqual(button.text, RECHECK_BUTTON_LABEL)
         self.assertEqual(button.callback_data, RECHECK_CALLBACK_DATA)
+        markup_row = build_recheck_keyboard(42)
+        self.assertEqual(
+            markup_row.inline_keyboard[0][0].callback_data,
+            f"{RECHECK_CALLBACK_DATA}:42",
+        )
 
     def test_button_acks_query_and_strips_keyboard_then_runs_full_pipeline(
         self,
@@ -1305,7 +1397,7 @@ class RecheckButtonTests(unittest.TestCase):
         final_markup = replies[-1].kwargs.get("reply_markup")
         self.assertIsInstance(final_markup, InlineKeyboardMarkup)
         self.assertEqual(
-            final_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+            final_markup.inline_keyboard[0][0].callback_data, f"{RECHECK_CALLBACK_DATA}:2"
         )
 
     def test_button_unknown_telegram_id_replies_start_without_running_pipeline(
@@ -1315,14 +1407,14 @@ class RecheckButtonTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_callback_update(user_id=999)
 
-        with _patch_worksheet(ws), patch(
+        with _patch_worksheet(ws), _patch_admin_check(False), patch(
             "magister_checking.bot.handlers.run_row_check"
         ) as run:
             _run(recheck_button(update, ctx))
 
         run.assert_not_called()
         update.callback_query.answer.assert_awaited_once()
-        msg = update.callback_query.message.reply_text.await_args.args[0]
+        msg = update.callback_query.message.reply_text.await_args_list[-1].args[0]
         self.assertIn("/start", msg)
 
     def test_button_swallows_edit_message_badrequest(self) -> None:
@@ -1366,8 +1458,29 @@ class RecheckButtonTests(unittest.TestCase):
         retry_markup = last_call.kwargs.get("reply_markup")
         self.assertIsInstance(retry_markup, InlineKeyboardMarkup)
         self.assertEqual(
-            retry_markup.inline_keyboard[0][0].callback_data, RECHECK_CALLBACK_DATA
+            retry_markup.inline_keyboard[0][0].callback_data, f"{RECHECK_CALLBACK_DATA}:2"
         )
+
+    def test_admin_button_embedded_row_targets_same_line(self) -> None:
+        """Админ без строки в таблице: callback ``recheck:full:N`` задаёт строку без повторного ввода."""
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_callback_update(
+            user_id=999, callback_data=f"{RECHECK_CALLBACK_DATA}:7"
+        )
+        fake_report = RowCheckReport(fio="Студент", row_number=7)
+        with _patch_worksheet(ws), _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.run_row_check",
+            return_value=fake_report,
+        ) as run, patch(
+            "magister_checking.bot.handlers.load_user_enrichment_for_row",
+            return_value=(UserForm(fio="Студент"), {}),
+        ):
+            _run(recheck_button(update, ctx))
+
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[1].row_number, 7)
 
 
 if __name__ == "__main__":

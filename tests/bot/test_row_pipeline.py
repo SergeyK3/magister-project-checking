@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from magister_checking.bot.models import FillStatus, UserForm
 from magister_checking.bot.row_pipeline import (
@@ -35,6 +36,11 @@ from magister_checking.report_parser import ParsedReport
 VALID_FIO = "Камзебаева Анель Дулатовна"
 VALID_PHONE = "+77052107246"
 REPORT_URL = "https://docs.google.com/document/d/report/edit"
+
+
+def _run_s3(parsed: ParsedReport, **kwargs: Any) -> Any:
+    """Stage 3: пять ссылок, первая — ``report_url`` из строки регистрации."""
+    return run_stage3(parsed=parsed, registration_report_url=REPORT_URL, **kwargs)
 
 
 def _doc_with_text(text: str) -> dict:
@@ -96,10 +102,12 @@ class Stage3Tests(unittest.TestCase):
             project_folder_url="https://drive.google.com/drive/folders/proj",
             publication_url="https://drive.google.com/file/d/pub/view",
         )
-        result, cells = run_stage3(parsed=parsed)
+        result, cells = _run_s3(parsed=parsed)
         self.assertTrue(result.passed)
         self.assertEqual(result.issues, [])
         cells_map = {c.column_key: c for c in cells}
+        self.assertEqual(len(cells_map), 5)
+        self.assertEqual(cells_map["report_url"].value, REPORT_URL)
         self.assertEqual(
             cells_map["project_folder_url"].value,
             "https://drive.google.com/drive/folders/proj",
@@ -120,10 +128,11 @@ class Stage3Tests(unittest.TestCase):
 
     def test_missing_links_become_no_and_reported(self) -> None:
         parsed = _parsed()
-        result, cells = run_stage3(parsed=parsed)
+        result, cells = run_stage3(parsed=parsed, registration_report_url="")
         self.assertFalse(result.passed)
         cells_map = {c.column_key: c for c in cells}
         for key in (
+            "report_url",
             "project_folder_url",
             "lkb_url",
             "dissertation_url",
@@ -131,28 +140,33 @@ class Stage3Tests(unittest.TestCase):
         ):
             self.assertEqual(cells_map[key].value, LINK_MISSING_VALUE)
             self.assertFalse(cells_map[key].strikethrough)
-        self.assertIn("Ссылка на диссертацию отсутствует", result.issues)
-        self.assertIn("Ссылка на магистерский проект отсутствует", result.issues)
-        self.assertIn("Ссылка на заключение ЛКБ отсутствует", result.issues)
-        self.assertIn("Ссылка на публикацию отсутствует", result.issues)
+        self.assertTrue(any("«Промежуточный отчёт»" in i for i in result.issues))
+        self.assertTrue(any("«Диссертация»" in i for i in result.issues))
+        self.assertTrue(any("«Папка «Магистерский проект»»" in i for i in result.issues))
+        self.assertTrue(any("«Заключение ЛКБ»" in i for i in result.issues))
+        self.assertTrue(any("«Публикация»" in i for i in result.issues))
 
     def test_unreachable_link_marked_strikethrough(self) -> None:
         diss_url = "https://docs.google.com/document/d/diss/edit"
         lkb_url = "https://drive.google.com/file/d/lkb/view"
         parsed = _parsed(dissertation_url=diss_url, lkb_url=lkb_url)
-        accessibility = {diss_url: True, lkb_url: False}
-        result, cells = run_stage3(parsed=parsed, accessibility=accessibility)
+        accessibility = {REPORT_URL: True, diss_url: True, lkb_url: False}
+        result, cells = _run_s3(parsed=parsed, accessibility=accessibility)
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["lkb_url"].strikethrough)
         self.assertFalse(cells_map["dissertation_url"].strikethrough)
-        self.assertIn("Ссылка на заключение ЛКБ не открывается", result.issues)
+        self.assertTrue(any("«Заключение ЛКБ»" in i and "HTTPS" in i for i in result.issues))
 
     def test_passed_requires_accessible_dissertation(self) -> None:
         diss_url = "https://docs.google.com/document/d/diss/edit"
         parsed = _parsed(dissertation_url=diss_url)
-        result_ok, _ = run_stage3(parsed=parsed, accessibility={diss_url: True})
+        result_ok, _ = _run_s3(
+            parsed=parsed, accessibility={REPORT_URL: True, diss_url: True}
+        )
         self.assertTrue(result_ok.passed)
-        result_bad, _ = run_stage3(parsed=parsed, accessibility={diss_url: False})
+        result_bad, _ = _run_s3(
+            parsed=parsed, accessibility={REPORT_URL: True, diss_url: False}
+        )
         self.assertFalse(result_bad.passed)
 
     def test_publication_prefers_results_over_review(self) -> None:
@@ -163,7 +177,7 @@ class Stage3Tests(unittest.TestCase):
             results_article_url="https://drive.google.com/file/d/results/view",
             review_article_url="https://drive.google.com/file/d/review/view",
         )
-        _, cells = run_stage3(parsed=parsed)
+        _, cells = _run_s3(parsed=parsed)
         pub = next(c for c in cells if c.column_key == "publication_url")
         self.assertEqual(pub.value, "https://drive.google.com/file/d/results/view")
 
@@ -175,7 +189,7 @@ class Stage3Tests(unittest.TestCase):
             results_article_url="https://drive.google.com/file/d/results/view",
             review_article_url="https://drive.google.com/file/d/review/view",
         )
-        _, cells = run_stage3(parsed=parsed)
+        _, cells = _run_s3(parsed=parsed)
         pub = next(c for c in cells if c.column_key == "publication_url")
         self.assertEqual(pub.value, "https://drive.google.com/file/d/pub/view")
 
@@ -183,12 +197,12 @@ class Stage3Tests(unittest.TestCase):
 class Stage3TypePolicyTests(unittest.TestCase):
     """Семантическая валидация типа ссылки в Stage 3.
 
-    Политика по полям (см. _FIELD_POLICIES в bot/row_pipeline.py):
-      project_folder_url — только folder, soft fail;
-      lkb_url            — только file + PDF, soft fail;
-      dissertation_url   — Doc или file + DOCX, **hard fail** (Stage 3
-                            не passed);
-      publication_url    — только file + PDF, soft fail.
+    Политика по полям (см. _FIELD_POLICIES в bot/row_pipeline.py), пять ссылок:
+      report_url          — промежуточный отчёт: Google Doc, .docx или PDF в Drive;
+      project_folder_url  — только папка Drive;
+      lkb_url            — Doc или файл PDF на Drive;
+      dissertation_url    — Doc или файл .docx на Drive (**Stage 3 passed**);
+      publication_url    — Doc или файл PDF на Drive.
 
     «Soft fail» означает: ячейка зачёркивается, в issues есть warning,
     но Stage 3 продолжает считаться passed (если только диссертация в
@@ -214,7 +228,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         return {self.FILE_LKB: PDF_MIME, self.FILE_PUB: PDF_MIME}
 
     def test_baseline_all_correct_passes(self) -> None:
-        result, cells = run_stage3(
+        result, cells = _run_s3(
             parsed=self._good_parsed(), link_mime_types=self._good_mimes()
         )
         self.assertTrue(result.passed)
@@ -222,22 +236,84 @@ class Stage3TypePolicyTests(unittest.TestCase):
         for cell in cells:
             self.assertFalse(cell.strikethrough, msg=cell.column_key)
 
+    def test_interim_report_pdf_on_drive_passes_mime_policy(self) -> None:
+        pdf_report = "https://drive.google.com/file/d/rep_pdf/view"
+        mimes = dict(self._good_mimes())
+        mimes[pdf_report] = PDF_MIME
+        result, cells = run_stage3(
+            parsed=self._good_parsed(),
+            registration_report_url=pdf_report,
+            link_mime_types=mimes,
+        )
+        cells_map = {c.column_key: c for c in cells}
+        self.assertFalse(cells_map["report_url"].strikethrough)
+        self.assertEqual(cells_map["report_url"].value, pdf_report)
+        self.assertTrue(result.passed)
+
+    def test_interim_report_drive_folder_soft_fails_with_folder_hint(self) -> None:
+        """Промежуточный отчёт = ссылка на папку Drive → strike + пояснение про folder."""
+        rep_folder = self.FOLDER_PROJ
+        mimes = dict(self._good_mimes())
+        result, cells = run_stage3(
+            parsed=self._good_parsed(),
+            registration_report_url=rep_folder,
+            link_mime_types=mimes,
+        )
+        cells_map = {c.column_key: c for c in cells}
+        self.assertTrue(cells_map["report_url"].strikethrough)
+        self.assertEqual(cells_map["report_url"].value, rep_folder)
+        msg = next(i for i in result.issues if "«Промежуточный отчёт»" in i)
+        self.assertIn("folder", msg.lower())
+        self.assertIn("Папка «Магистерский проект»", msg)
+        self.assertFalse(result.passed)
+
     def test_project_folder_as_doc_url_soft_fails(self) -> None:
         """project_folder = Google Doc URL → strike + warning, но Stage 3 ок."""
         parsed = self._good_parsed(project_folder_url=self.DOC_DISS)
-        result, cells = run_stage3(parsed=parsed, link_mime_types=self._good_mimes())
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["project_folder_url"].strikethrough)
         self.assertEqual(cells_map["project_folder_url"].value, self.DOC_DISS)
-        self.assertTrue(any("магистерский проект" in i for i in result.issues))
+        msg = next(i for i in result.issues if "«Папка «Магистерский проект»»" in i)
+        self.assertIn("folders", msg)
+        self.assertIn("не на файл или документ", msg)
+        self.assertTrue(result.passed)
+
+    def test_project_folder_as_drive_file_soft_fails(self) -> None:
+        """Вместо папки указан файл Drive → то же замечание про …/folders/…."""
+        file_instead = "https://drive.google.com/file/d/projfolder/view"
+        parsed = self._good_parsed(project_folder_url=file_instead)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
+        cells_map = {c.column_key: c for c in cells}
+        self.assertTrue(cells_map["project_folder_url"].strikethrough)
+        msg = next(i for i in result.issues if "«Папка «Магистерский проект»»" in i)
+        self.assertIn("folders", msg)
+        self.assertTrue(result.passed)
+
+    def test_project_folder_unknown_kind_without_folders_fragment_hint(self) -> None:
+        """Ссылка без типичного …/folders/… — дополнительное замечание."""
+        weird = "https://drive.google.com/open?id=abc123folderish"
+        parsed = self._good_parsed(project_folder_url=weird)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
+        cells_map = {c.column_key: c for c in cells}
+        self.assertTrue(cells_map["project_folder_url"].strikethrough)
+        msg = next(i for i in result.issues if "«Папка «Магистерский проект»»" in i)
+        self.assertIn("folders", msg)
+        self.assertIn("если его нет", msg)
         self.assertTrue(result.passed)
 
     def test_lkb_as_folder_soft_fails(self) -> None:
         parsed = self._good_parsed(lkb_url=self.FOLDER_PROJ)
-        result, cells = run_stage3(parsed=parsed, link_mime_types=self._good_mimes())
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["lkb_url"].strikethrough)
-        self.assertTrue(any("заключение ЛКБ" in i for i in result.issues))
+        self.assertTrue(any("«Заключение ЛКБ»" in i for i in result.issues))
+        self.assertTrue(
+            any(
+                "конкретный pdf файл" in i.lower()
+                for i in result.issues
+            )
+        )
         self.assertTrue(result.passed)
 
     def test_lkb_file_with_wrong_mime_soft_fails(self) -> None:
@@ -245,20 +321,19 @@ class Stage3TypePolicyTests(unittest.TestCase):
         parsed = self._good_parsed()
         mimes = self._good_mimes()
         mimes[self.FILE_LKB] = "image/jpeg"
-        result, cells = run_stage3(parsed=parsed, link_mime_types=mimes)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=mimes)
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["lkb_url"].strikethrough)
         self.assertTrue(
-            any("image/jpeg" in i and "заключение ЛКБ" in i for i in result.issues)
+            any("image/jpeg" in i and "«Заключение ЛКБ»" in i for i in result.issues)
         )
         self.assertTrue(result.passed)
 
-    def test_publication_as_doc_url_soft_fails(self) -> None:
+    def test_publication_google_doc_passes(self) -> None:
         parsed = self._good_parsed(publication_url=self.DOC_DISS)
-        result, cells = run_stage3(parsed=parsed, link_mime_types=self._good_mimes())
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
         cells_map = {c.column_key: c for c in cells}
-        self.assertTrue(cells_map["publication_url"].strikethrough)
-        self.assertTrue(any("публикацию" in i for i in result.issues))
+        self.assertFalse(cells_map["publication_url"].strikethrough)
         self.assertTrue(result.passed)
 
     def test_publication_file_without_mime_soft_fails(self) -> None:
@@ -267,21 +342,21 @@ class Stage3TypePolicyTests(unittest.TestCase):
         parsed = self._good_parsed()
         # Только LKB mime известен; для FILE_PUB mime неизвестен.
         mimes = {self.FILE_LKB: PDF_MIME}
-        result, cells = run_stage3(parsed=parsed, link_mime_types=mimes)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=mimes)
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["publication_url"].strikethrough)
         self.assertTrue(
-            any("определить формат" in i and "публикацию" in i for i in result.issues)
+            any("определить MIME" in i and "«Публикация»" in i for i in result.issues)
         )
         self.assertTrue(result.passed)
 
     def test_dissertation_as_folder_hard_fails(self) -> None:
         """diss = folder → strike + warning + Stage 3 НЕ passed."""
         parsed = self._good_parsed(dissertation_url=self.FOLDER_PROJ)
-        result, cells = run_stage3(parsed=parsed, link_mime_types=self._good_mimes())
+        result, cells = _run_s3(parsed=parsed, link_mime_types=self._good_mimes())
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["dissertation_url"].strikethrough)
-        self.assertTrue(any("диссертацию" in i for i in result.issues))
+        self.assertTrue(any("«Диссертация»" in i for i in result.issues))
         self.assertFalse(result.passed)
 
     def test_dissertation_as_drive_file_with_docx_mime_passes(self) -> None:
@@ -290,7 +365,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         parsed = self._good_parsed(dissertation_url=diss_file)
         mimes = self._good_mimes()
         mimes[diss_file] = DOCX_MIME
-        result, cells = run_stage3(parsed=parsed, link_mime_types=mimes)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=mimes)
         cells_map = {c.column_key: c for c in cells}
         self.assertFalse(cells_map["dissertation_url"].strikethrough)
         self.assertTrue(result.passed)
@@ -301,7 +376,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         parsed = self._good_parsed(dissertation_url=diss_file)
         mimes = self._good_mimes()
         mimes[diss_file] = PDF_MIME
-        result, cells = run_stage3(parsed=parsed, link_mime_types=mimes)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=mimes)
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["dissertation_url"].strikethrough)
         self.assertFalse(result.passed)
@@ -312,7 +387,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         «это .docx» нельзя)."""
         diss_file = "https://drive.google.com/file/d/diss/view"
         parsed = self._good_parsed(dissertation_url=diss_file)
-        result, cells = run_stage3(parsed=parsed, link_mime_types={})
+        result, cells = _run_s3(parsed=parsed, link_mime_types={})
         cells_map = {c.column_key: c for c in cells}
         self.assertTrue(cells_map["dissertation_url"].strikethrough)
         self.assertFalse(result.passed)
@@ -322,7 +397,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         ЛКБ/публикации не считается ошибкой — это режим «без сети»
         (тесты, dry-run без Drive API)."""
         parsed = self._good_parsed()
-        result, cells = run_stage3(parsed=parsed, link_mime_types=None)
+        result, cells = _run_s3(parsed=parsed, link_mime_types=None)
         for cell in cells:
             self.assertFalse(cell.strikethrough, msg=cell.column_key)
         self.assertEqual(result.issues, [])

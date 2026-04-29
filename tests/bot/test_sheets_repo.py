@@ -783,6 +783,28 @@ class ApplyRowCheckUpdatesTests(unittest.TestCase):
         self.assertEqual(saved[12], "https://docs.google.com/document/d/diss")
         self.assertEqual(saved[13], "нет")
 
+    def test_preserves_manual_links_when_stage3_not_executed(self) -> None:
+        _, ws = self._fresh_sheet()
+        row = list(ws.rows[1])
+        row[10] = "https://drive.google.com/drive/folders/manual-proj"
+        row[12] = "https://docs.google.com/document/d/manual-diss/edit"
+        ws.rows[1] = row
+
+        apply_row_check_updates(
+            ws,
+            2,
+            report_url_valid="yes",
+            report_url_accessible="yes",
+            stage3_executed=False,
+            stage3_cells=[],
+        )
+
+        out = ws.rows[1]
+        self.assertEqual(out[8], "yes")
+        self.assertEqual(out[9], "yes")
+        self.assertEqual(out[10], "https://drive.google.com/drive/folders/manual-proj")
+        self.assertEqual(out[12], "https://docs.google.com/document/d/manual-diss/edit")
+
     def test_batch_update_is_single_call_in_raw_mode(self) -> None:
         _, ws = self._fresh_sheet()
 

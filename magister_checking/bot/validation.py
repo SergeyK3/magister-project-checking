@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from magister_checking.docs_extract import table_cell_content_blocks
 from magister_checking.drive_urls import is_google_drive_folder_url
 
 
@@ -22,9 +23,9 @@ FIO_INVALID_MESSAGE = "В поле «ФИО» введена фраза, не п
 PHONE_INVALID_MESSAGE = "В поле «Телефон» введён неверный номер"
 REPORT_URL_WRONG_TARGET_MESSAGE = "Ссылка на промежуточный отчёт неверна"
 REPORT_URL_HTTP_INACCESSIBLE_MESSAGE = (
-    "По ссылке бот не смог открыть страницу (часто так бывает, если документ "
-    "доступен только вам). В Google Docs или Drive: «Настроить доступ» → "
-    "для пункта «Все, у кого есть ссылка» выберите «Читатель»."
+    "«Промежуточный отчёт»: при проверке ссылка недоступна по HTTPS с сервера проверки. "
+    "Откройте доступ на чтение для всех по ссылке: «Настроить доступ» → "
+    "«Все, у кого есть ссылка» → роль «Читатель»."
 )
 REPORT_URL_FOLDER_NOT_DOCUMENT_MESSAGE = (
     "Ссылка на промежуточный отчет содержит адрес папки, а не документа. "
@@ -129,7 +130,10 @@ def _document_plain_text(document: Any) -> str:
         return ""
     parts: list[str] = []
     total = 0
-    stack: list[Any] = [document.get("body", {}).get("content", [])]
+    root = document.get("body", {}).get("content") or []
+    if not isinstance(root, list):
+        root = []
+    stack: list[Any] = [root]
     while stack:
         node = stack.pop()
         if total >= 2000:
@@ -155,7 +159,8 @@ def _document_plain_text(document: Any) -> str:
         if isinstance(table, dict):
             for row in table.get("tableRows", []) or []:
                 for cell in row.get("tableCells", []) or []:
-                    stack.append(cell.get("content", []))
+                    if isinstance(cell, dict):
+                        stack.append(table_cell_content_blocks(cell))
             continue
     return "".join(parts)
 

@@ -189,6 +189,38 @@ _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "last_action": ("last_action", "последнее действие"),
 }
 
+# Четыре колонки ссылок (папка / ЛКБ / диссертация / публикация): временный ввод вручную
+# при сбое извлечения из промежуточного отчёта.
+SHEET_LINK_OVERRIDE_KEYS: tuple[str, ...] = (
+    "project_folder_url",
+    "lkb_url",
+    "dissertation_url",
+    "publication_url",
+)
+
+
+def read_sheet_link_overrides_for_row(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+) -> dict[str, str]:
+    """Возвращает текущие значения четырёх колонок ссылок из строки листа.
+
+    Используется как обходной путь, если ссылки нельзя извлечь из текста
+    промежуточного отчёта (Docs API / разбор). Фильтрация «настоящий URL»
+    выполняется в ``row_check_cli``."""
+    header = _header_row(worksheet)
+    row = worksheet.row_values(row_number)
+    padded = list(row) + [""] * max(0, len(header) - len(row))
+    field_map = _field_to_column_map_from_header(header)
+    out: dict[str, str] = {}
+    for key in SHEET_LINK_OVERRIDE_KEYS:
+        idx = field_map.get(key)
+        if idx is None or idx >= len(padded):
+            continue
+        out[key] = str(padded[idx] or "").strip()
+    return out
+
+
 GOOGLE_SCOPES: List[str] = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -595,7 +627,8 @@ def _row_to_user(header: Iterable[str], row: Iterable[str]) -> UserForm:
     kwargs = {name: "" for name in SHEET_HEADER}
     for field_name, idx in normalized_header.items():
         if idx < len(padded):
-            kwargs[field_name] = padded[idx] or ""
+            raw = padded[idx]
+            kwargs[field_name] = "" if raw is None or raw == "" else str(raw)
     declared = {f.name for f in fields(UserForm)}
     cleaned = {k: v for k, v in kwargs.items() if k in declared}
     return UserForm(**cleaned)
@@ -873,6 +906,7 @@ def apply_row_check_updates(
     *,
     report_url_valid: str | None = None,
     report_url_accessible: str | None = None,
+    stage3_executed: bool = True,
     stage3_cells: list[Stage3CellUpdate] | None = None,
     stage4_cells: list[Stage4CellUpdate] | None = None,
     fill_status: str | None = None,
@@ -882,6 +916,10 @@ def apply_row_check_updates(
     Сначала очищает все колонки результатов проверки
     (``_CHECK_RESULT_COLUMN_KEYS``) и снимает с них ``strikethrough``,
     затем поверх записывает свежие значения этого прогона.
+
+    Если ``stage3_executed=False`` (пайплайн остановился до Stage 3), колонки
+    четырёх ссылок из ``SHEET_LINK_OVERRIDE_KEYS`` не зачищаются — чтобы
+    ручной ввод администратора не затирался пустым ``stage3_cells``.
 
     - Колонки «Проверка ссылки» (``report_url_valid``) и «Доступ открыт»
       (``report_url_accessible``) обновляются, если соответствующее значение
@@ -933,6 +971,8 @@ def apply_row_check_updates(
     # 1) Зачистка: затираем все известные колонки проверки и снимаем
     # strikethrough. Колонки, которых нет в заголовке, тихо пропускаются.
     for key in _CHECK_RESULT_COLUMN_KEYS:
+        if not stage3_executed and key in SHEET_LINK_OVERRIDE_KEYS:
+            continue
         col_idx = _set_value(key, "")
         if col_idx is not None and sheet_id is not None:
             _set_strike(col_idx, False)
@@ -1003,6 +1043,74 @@ def apply_row_check_updates(
         spreadsheet = getattr(worksheet, "spreadsheet", None)
         if spreadsheet is not None and hasattr(spreadsheet, "batch_update"):
             spreadsheet.batch_update({"requests": format_requests})
+
+
+def write_dissertation_meta_columns(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+    *,
+    title: str,
+    language: str,
+) -> None:
+    """Пишет название и язык диссертации (колонки вне clean-write Stage 2–4)."""
+
+    field_map = _field_to_column_map(worksheet)
+    batch_values: list[dict] = []
+    for key, val in (
+        ("dissertation_title", title or ""),
+        ("dissertation_language", language or ""),
+    ):
+        col_idx = field_map.get(key)
+        if col_idx is None:
+            continue
+        letter = _column_letter(col_idx)
+        batch_values.append(
+            {"range": f"{letter}{row_number}", "values": [[val]]}
+        )
+    if batch_values:
+        _safe_batch_update_values(worksheet, batch_values)
+
+
+def write_dissertation_sheet_metrics(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+    *,
+    pages_total: str,
+    sources_count: str,
+    dissertation_title: str,
+    dissertation_language: str,
+    compliance: str | None = None,
+) -> None:
+    """Пишет в строку число страниц, источников, тему, язык и (опционально) оформление.
+
+    Не очищает остальные колонки проверки — только указанные ячейки.
+    Столбцы ищутся по ``_HEADER_ALIASES`` (как в листе «Регистрация»).
+
+    ``compliance`` — текст колонки «Соответствие оформлению» (как из
+    :func:`evaluate_formatting_compliance` / Stage 4). ``None`` — колонку не
+    трогать; иначе записать переданную строку (в том числе пустую).
+    """
+
+    field_map = _field_to_column_map(worksheet)
+    batch_values: list[dict] = []
+    items: list[tuple[str, str]] = [
+        ("pages_total", pages_total or ""),
+        ("sources_count", sources_count or ""),
+        ("dissertation_title", dissertation_title or ""),
+        ("dissertation_language", dissertation_language or ""),
+    ]
+    if compliance is not None:
+        items.append(("compliance", compliance))
+    for key, val in items:
+        col_idx = field_map.get(key)
+        if col_idx is None:
+            continue
+        letter = _column_letter(col_idx)
+        batch_values.append(
+            {"range": f"{letter}{row_number}", "values": [[val]]}
+        )
+    if batch_values:
+        _safe_batch_update_values(worksheet, batch_values)
 
 
 def set_row_fill_status(

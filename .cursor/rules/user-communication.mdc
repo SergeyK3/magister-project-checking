@@ -5,6 +5,7 @@ alwaysApply: true
 
 # Interaction with this user
 
+- **Язык ответов:** по умолчанию писать пользователю **по-русски**, если он явно не попросил другой язык (например, английский для отдельного сообщения).
 - Do **not** rely on unstated assumptions, speculative causes, or “likely” scenarios when explaining bugs or behavior.
 - Give an **accurate diagnosis**: cite code paths, data structures, and conditions that are **verified** from the repository or from evidence the user provided (logs, screenshots, document IDs).
 - If the root cause cannot be established from available facts, say **exactly what is unknown** and what **concrete check** would resolve it (e.g. a specific API response field, a single function, one reproduction step)—do not fill the gap with guesses.

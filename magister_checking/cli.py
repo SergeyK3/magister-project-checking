@@ -167,6 +167,149 @@ def cmd_broadcast(ns: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def cmd_send_message(ns: argparse.Namespace) -> int:
+    """Отправляет текст из файла одному или нескольким пользователям по строкам листа или ``telegram_id``."""
+
+    import asyncio
+
+    from telegram import Bot
+
+    from magister_checking.bot.config import ConfigError, load_config
+    from magister_checking.bot.sheets_repo import get_telegram_id_at_row, get_worksheet
+    from magister_checking.broadcast import (
+        format_dry_run_preview,
+        format_send_summary,
+        merge_dedup,
+        send_broadcast,
+    )
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации бота: {exc}", file=sys.stderr)
+        return 2
+
+    message_path = ns.message_file
+    try:
+        message = message_path.read_text(encoding="utf-8-sig").rstrip("\n")
+    except OSError as exc:
+        print(f"Не удалось прочитать --message-file {message_path}: {exc}", file=sys.stderr)
+        return 2
+    if not message.strip():
+        print(f"Файл {message_path} пуст — нечего отправлять.", file=sys.stderr)
+        return 2
+
+    rows_list: list[int] | None = getattr(ns, "rows", None)
+
+    recipients: list[str]
+    label: str
+
+    if rows_list is not None:
+        row_sequence: list[int] = []
+        seen_r: set[int] = set()
+        for r in rows_list:
+            if r in seen_r:
+                continue
+            seen_r.add(r)
+            row_sequence.append(r)
+        bad = [r for r in row_sequence if r < 2]
+        if bad:
+            print(
+                "Номер строки для магистранта должен быть ≥ 2 (строка 1 — заголовок): "
+                + ", ".join(str(x) for x in bad),
+                file=sys.stderr,
+            )
+            return 2
+        worksheet = get_worksheet(config)
+        row_pairs: list[tuple[int, str]] = []
+        missing_rows: list[int] = []
+        for row_no in row_sequence:
+            raw = get_telegram_id_at_row(worksheet, row_no)
+            if not (raw or "").strip():
+                missing_rows.append(row_no)
+            else:
+                row_pairs.append((row_no, str(raw).strip()))
+        if missing_rows:
+            print(
+                "Пустой telegram_id в строках «Регистрация»: "
+                + ", ".join(str(x) for x in missing_rows)
+                + " — не к кому отправить.",
+                file=sys.stderr,
+            )
+            return 1
+        id_strings = [tid for _, tid in row_pairs]
+        recipients = merge_dedup(id_strings)
+        label = (
+            "строки «Регистрация» "
+            + ", ".join(f"{r}→{t}" for r, t in row_pairs)
+            + f" → {len(recipients)} уникальных chat_id"
+        )
+    elif ns.row is not None:
+        if ns.row < 2:
+            print("Номер строки для магистранта должен быть ≥ 2 (строка 1 — заголовок).", file=sys.stderr)
+            return 2
+        worksheet = get_worksheet(config)
+        raw = get_telegram_id_at_row(worksheet, ns.row)
+        if not (raw or "").strip():
+            print(
+                f"В строке {ns.row} пустой telegram_id — не к кому отправлять.",
+                file=sys.stderr,
+            )
+            return 1
+        recipients = [str(raw).strip()]
+        label = f"строка «Регистрация» {ns.row} → chat_id {recipients[0]}"
+    else:
+        tid = (ns.telegram_id or "").strip()
+        if not tid:
+            print("Укажите непустой --telegram-id.", file=sys.stderr)
+            return 2
+        try:
+            int(tid)
+        except ValueError:
+            print(f"telegram_id должен быть числом, получено: {tid!r}", file=sys.stderr)
+            return 2
+        recipients = [tid]
+        label = f"chat_id {tid} (из аргумента)"
+
+    if not ns.send:
+        print(
+            format_dry_run_preview(
+                recipients,
+                message,
+                source_label=f"send-message: {label}",
+            )
+        )
+        return 0
+
+    if not ns.i_know_this_is_irreversible:
+        print(
+            "--send требует подтверждения: добавьте --i-know-this-is-irreversible.",
+            file=sys.stderr,
+        )
+        return 2
+
+    n = len(recipients)
+    if n == 1:
+        print(f"Отправляю сообщение одному получателю ({label})...")
+    else:
+        print(f"Отправляю сообщение {n} получателям ({label})...")
+    sleep_between = 0.0 if n <= 1 else max(1.0 / max(ns.rate, 1.0), 0.0)
+    asyncio_run = asyncio.run
+
+    async def _run() -> int:
+        async with Bot(config.telegram_bot_token) as bot:
+            result = await send_broadcast(
+                bot,
+                recipients,
+                message,
+                sleep_between=sleep_between,
+            )
+        print(format_send_summary(result))
+        return 0 if not result.failed else 1
+
+    return asyncio_run(_run())
+
+
 def cmd_check_row(ns: argparse.Namespace) -> int:
     """Построчная проверка магистранта (пайплайн листа «Регистрация»).
 
@@ -186,6 +329,14 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
         config = load_config()
     except ConfigError as exc:
         print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+
+    if ns.notify_student and not ns.apply:
+        print(
+            "Флаг --notify-student допустим только вместе с --apply "
+            "(уведомление шлётся после записи результатов в таблицу).",
+            file=sys.stderr,
+        )
         return 2
 
     locator = RowLocator(row_number=ns.row, fio=ns.fio)
@@ -219,6 +370,24 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
         )
     else:
         print(format_report(report, applied=applied_effective))
+    if ns.notify_student:
+        if report.unchanged:
+            print(
+                "Уведомление не отправлено: прогон без изменений листа "
+                "(--only-if-changed).",
+                file=sys.stderr,
+            )
+        else:
+            from magister_checking.bot.student_row_notify import (
+                notify_student_after_manual_row_apply,
+            )
+
+            ok, info = notify_student_after_manual_row_apply(
+                config, report, applied=applied_effective
+            )
+            print(info)
+            if not ok:
+                return 1
     return 0
 
 
@@ -457,6 +626,64 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_bcast.set_defaults(func=cmd_broadcast)
 
+    p_smsg = sub.add_parser(
+        "send-message",
+        help="Одному или нескольким получателям: текст из файла в личку Telegram по строке листа "
+        "«Регистрация», по списку строк (--rows) или по --telegram-id (dry-run; "
+        "--send --i-know-this-is-irreversible)",
+    )
+    p_smsg.add_argument(
+        "--message-file",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="UTF-8 текст сообщения",
+    )
+    smsg_tgt = p_smsg.add_mutually_exclusive_group(required=True)
+    smsg_tgt.add_argument(
+        "--row",
+        type=int,
+        default=None,
+        metavar="N",
+        help="номер строки листа «Регистрация» (≥2)",
+    )
+    smsg_tgt.add_argument(
+        "--telegram-id",
+        dest="telegram_id",
+        default=None,
+        metavar="ID",
+        help="числовой Telegram chat_id пользователя",
+    )
+    smsg_tgt.add_argument(
+        "--rows",
+        nargs="+",
+        type=int,
+        dest="rows",
+        metavar="N",
+        help="несколько строк «Регистрация»: номера через пробел, например --rows 5 7 9 10; "
+        "при одинаковом chat_id в разных строках сообщение уйдёт один раз",
+    )
+    p_smsg.add_argument(
+        "--rate",
+        type=float,
+        default=25.0,
+        metavar="MSGS_PER_SEC",
+        help="при отправке нескольким получателям — пауза между сообщениями "
+        "(≈ rate сообщ./сек, default 25)",
+    )
+    p_smsg.add_argument(
+        "--send",
+        action="store_true",
+        help="реально отправить (без флага — превью)",
+    )
+    p_smsg.add_argument(
+        "--i-know-this-is-irreversible",
+        dest="i_know_this_is_irreversible",
+        action="store_true",
+        help="второе подтверждение для --send",
+    )
+    p_smsg.set_defaults(func=cmd_send_message)
+
     p_check = sub.add_parser(
         "check-row",
         help="Прогнать одну строку листа «Регистрация» через этапы 1-3 (справка в stdout)",
@@ -493,6 +720,14 @@ def main(argv: list[str] | None = None) -> int:
         help="не запускать пайплайн, если входы (URL отчёта, modifiedTime, "
         "ссылки Stage 3) совпадают с последним прогоном из листа "
         "«История проверок» (handoff Stage 4 (c) — diff_detection).",
+    )
+    p_check.add_argument(
+        "--notify-student",
+        action="store_true",
+        help="после записи в лист (--apply) отправить магистранту в личку Telegram "
+        "полную справку по этапам проверки и полям (нужен непустой telegram_id в строке; "
+        "аналог ответа после /recheck). С --only-if-changed уведомление не шлётся, "
+        "если прогон сокращён (входы не менялись).",
     )
     p_check.set_defaults(func=cmd_check_row)
 

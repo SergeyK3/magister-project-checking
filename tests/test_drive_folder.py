@@ -229,7 +229,7 @@ class TestPickIntermediateReportDocId(unittest.TestCase):
         )
 
     def test_named_subfolder_without_report_falls_back_to_none(self) -> None:
-        """Подпапка с правильным именем есть, но в ней нет ни Doc, ни .docx."""
+        """Подпапка с правильным именем есть, но внутри нет Doc / .docx / PDF."""
         drive = _make_drive_service(
             {
                 "ROOT": [
@@ -243,13 +243,31 @@ class TestPickIntermediateReportDocId(unittest.TestCase):
                     {
                         "id": "PIC",
                         "name": "scan.pdf",
-                        "mimeType": "application/pdf",
+                        "mimeType": "image/jpeg",
                     }
                 ],
             }
         )
         self.assertIsNone(
             pick_intermediate_report_doc_id(drive_service=drive, folder_id="ROOT")
+        )
+
+    def test_pdf_in_folder_returned_for_conversion(self) -> None:
+        """В папке PDF с префиксом имени отчёта — тот же путь конверсии, что у .docx."""
+        drive = _make_drive_service(
+            {
+                "ROOT": [
+                    {
+                        "id": "PDF1",
+                        "name": "Промежуточный отчет Иванова.pdf",
+                        "mimeType": "application/pdf",
+                    },
+                ]
+            }
+        )
+        self.assertEqual(
+            pick_intermediate_report_doc_id(drive_service=drive, folder_id="ROOT"),
+            "PDF1",
         )
 
 

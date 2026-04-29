@@ -1,4 +1,4 @@
-"""Конвертация «чужих» файлов Drive в Google Doc на лету.
+"""Конвертация загруженных в Drive .docx / .pdf в Google Doc на лету.
 
 Docs API умеет читать только нативные Google Docs
 (``application/vnd.google-apps.document``). Магистранты часто загружают
@@ -31,13 +31,12 @@ from typing import Any, Iterator
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-CONVERTIBLE_DRIVE_MIMES = frozenset({DOCX_MIME})
-"""MIME-типы, которые Drive умеет сконвертировать в Google Doc при copy.
+PDF_MIME = "application/pdf"
+CONVERTIBLE_DRIVE_MIMES = frozenset({DOCX_MIME, PDF_MIME})
+"""MIME-типы, которые Drive умеет сконвертировать в Google Doc при ``files.copy``.
 
-Пока перечислен только .docx — это то, что реально встречалось у магистрантов.
-Legacy ``.doc``/``.rtf``/``.odt`` добавлять по факту обращения: копия через
-``files.copy(mimeType=google-apps.document)`` у них работает через Drive-
-конвертер, но не на всех версиях формата и не все кейсы нужны сейчас.
+Поддерживаются загруженные в Drive ``.docx`` и ``.pdf`` (конвертация на стороне
+Google — как при «Открыть с помощью Google Документы» в веб-интерфейсе).
 """
 
 _LOG = logging.getLogger(__name__)
@@ -49,7 +48,8 @@ class UnsupportedDocumentMimeTypeError(RuntimeError):
     def __init__(self, mime_type: str, file_id: str) -> None:
         super().__init__(
             f"Файл {file_id!r} имеет MIME-тип {mime_type!r}; "
-            "поддерживаются только Google Doc и .docx."
+            "поддерживаются только Google Doc и загруженные в Drive .docx / .pdf "
+            "(через конверсию в Google Doc)."
         )
         self.mime_type = mime_type
         self.file_id = file_id
@@ -69,7 +69,7 @@ def google_doc_from_drive_file(
     """Возвращает id файла, который гарантированно можно читать Docs API.
 
     - Если ``file_id`` — уже Google Doc, отдаём его как есть и ничего не удаляем.
-    - Если ``.docx`` (``CONVERTIBLE_DRIVE_MIMES``), делаем копию в папке
+    - Если ``.docx`` или ``.pdf`` (``CONVERTIBLE_DRIVE_MIMES``), делаем копию в папке
       ``conversion_folder_id`` с ``mimeType=application/vnd.google-apps.document``
       и удаляем копию при выходе из контекста (в т.ч. при исключении).
     - Для других MIME-типов бросаем ``UnsupportedDocumentMimeTypeError``.

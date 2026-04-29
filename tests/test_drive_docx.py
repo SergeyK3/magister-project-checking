@@ -10,6 +10,7 @@ from magister_checking.drive_docx import (
     DOCX_MIME,
     GOOGLE_DOC_MIME,
     MissingConversionFolderError,
+    PDF_MIME,
     UnsupportedDocumentMimeTypeError,
     google_doc_from_drive_file,
 )
@@ -131,9 +132,23 @@ class DocxConversionTests(unittest.TestCase):
         self.assertEqual(len(log["update"]), 1)
 
 
+class PdfConversionTests(unittest.TestCase):
+    def test_pdf_copies_then_trashes_like_docx(self) -> None:
+        drive, log = _make_drive_service(mime_type=PDF_MIME, name="Отчёт.pdf")
+
+        with google_doc_from_drive_file(
+            drive, "orig-id", conversion_folder_id="buffer-folder"
+        ) as got:
+            self.assertEqual(got, "copy-id")
+
+        self.assertEqual(len(log["copy"]), 1)
+        self.assertEqual(log["copy"][0]["body"]["mimeType"], GOOGLE_DOC_MIME)
+        self.assertEqual(len(log["update"]), 1)
+
+
 class ErrorPathsTests(unittest.TestCase):
     def test_unsupported_mime_raises_without_copying(self) -> None:
-        drive, log = _make_drive_service(mime_type="application/pdf")
+        drive, log = _make_drive_service(mime_type="image/jpeg")
 
         with self.assertRaises(UnsupportedDocumentMimeTypeError) as ctx:
             with google_doc_from_drive_file(
@@ -141,7 +156,7 @@ class ErrorPathsTests(unittest.TestCase):
             ):
                 pass  # pragma: no cover
 
-        self.assertEqual(ctx.exception.mime_type, "application/pdf")
+        self.assertEqual(ctx.exception.mime_type, "image/jpeg")
         self.assertEqual(log["copy"], [])
         self.assertEqual(log["update"], [])
 

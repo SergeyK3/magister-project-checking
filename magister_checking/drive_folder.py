@@ -14,14 +14,15 @@ INTERMEDIATE_REPORT_NAME_PREFIXES: tuple[str, ...] = (
 
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PDF_MIME = "application/pdf"
 GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 # MIME, которые дальше по пайплайну превращаются в Google Doc через
 # drive_docx.google_doc_from_drive_file (нативный Doc — passthrough,
-# .docx — копируется в buffer-папку с конверсией). Резолвер должен
+# .docx / .pdf — копируются в buffer-папку с конверсией). Резолвер должен
 # возвращать id любого из этих типов, иначе пайплайн ломается на стадии
 # чтения через Docs API.
-_REPORT_FILE_MIMES: tuple[str, ...] = (GOOGLE_DOC_MIME, DOCX_MIME)
+_REPORT_FILE_MIMES: tuple[str, ...] = (GOOGLE_DOC_MIME, DOCX_MIME, PDF_MIME)
 
 
 def filename_starts_with_intermediate_report(name: str) -> bool:
@@ -59,16 +60,17 @@ def _list_folder_children(
 def _pick_best_report_file(files: list[dict[str, Any]]) -> str | None:
     """Из набора файлов отчёта выбрать лучший id.
 
-    Предпочтение: нативный Google Doc → .docx. При нескольких в одной
+    Предпочтение: нативный Google Doc → .docx → PDF. При нескольких в одной
     категории — лексикографически первый по имени (case-insensitive).
-    Это даёт стабильный результат, если в папке оказались и Doc, и
-    .docx (например, магистрант сконвертировал, но не удалил исходник).
+    Это даёт стабильный результат, если в папке оказались несколько подходящих
+    файлов (например, магистрант сконвертировал, но не удалил исходник).
     """
     if not files:
         return None
     docs = [f for f in files if f.get("mimeType") == GOOGLE_DOC_MIME]
     docxs = [f for f in files if f.get("mimeType") == DOCX_MIME]
-    chosen = docs or docxs
+    pdfs = [f for f in files if f.get("mimeType") == PDF_MIME]
+    chosen = docs or docxs or pdfs
     if not chosen:
         return None
     chosen.sort(key=lambda f: (f.get("name") or "").casefold())
@@ -82,19 +84,19 @@ def pick_intermediate_report_doc_id(
 
     Алгоритм (в порядке приоритета):
 
-    1. В самой ``folder_id`` ищем файл с MIME Google Doc или ``.docx``,
+    1. В самой ``folder_id`` ищем файл с MIME Google Doc, ``.docx`` или PDF,
        имя которого начинается с одного из ``INTERMEDIATE_REPORT_NAME_PREFIXES``.
        Это исторический случай: магистрант кладёт «Промежуточный отчет
-       <ФИО>.docx» (или Doc) прямо в папку проекта.
+       <ФИО>.docx» (или Doc / PDF) прямо в папку проекта.
     2. Если в текущей папке такого файла нет — ищем ВНУТРИ неё
        подпапку, имя которой начинается с того же префикса (например
        «Промежуточный отчет Танановой А.А.»). Спускаемся на один
-       уровень и в этой подпапке выбираем любой Doc/.docx **без
+       уровень и в этой подпапке выбираем любой Doc / .docx / PDF **без
        фильтра по имени** — именованная подпапка уже задаёт контекст,
        а внутри файл часто называется обобщённо
        («Промежуточный отчет магистранта.docx»).
 
-    Возвращает id Google Doc или .docx; ``.docx`` дальше превращается в
+    Возвращает id Google Doc, .docx или PDF; ``.docx``/PDF дальше превращаются в
     Doc через :func:`magister_checking.drive_docx.google_doc_from_drive_file`.
     """
     file_mime_clause = " or ".join(f"mimeType = '{m}'" for m in _REPORT_FILE_MIMES)

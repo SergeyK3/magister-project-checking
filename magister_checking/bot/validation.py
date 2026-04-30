@@ -66,6 +66,15 @@ def normalize_text(value: str) -> str:
     return stripped
 
 
+def normalize_fio_user_input(value: str) -> str:
+    """Как :func:`normalize_text`, но снимает ведущий ``@`` (привычка скопировать ФИО как «упоминание» в Telegram)."""
+
+    t = normalize_text(value)
+    while t.startswith("@"):
+        t = t[1:].lstrip()
+    return t
+
+
 def is_valid_url(url: str) -> bool:
     """Проверяет, что строка похожа на http(s)-URL."""
 

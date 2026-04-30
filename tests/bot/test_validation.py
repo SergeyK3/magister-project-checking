@@ -19,6 +19,7 @@ from magister_checking.bot.validation import (
     check_report_url_target_kind,
     is_interim_report_document,
     is_valid_url,
+    normalize_fio_user_input,
     normalize_text,
     validate_fio_shape,
     validate_phone_shape,
@@ -38,6 +39,20 @@ class NormalizeTextTests(unittest.TestCase):
 
     def test_empty_returns_empty(self) -> None:
         self.assertEqual(normalize_text(""), "")
+
+
+class NormalizeFioUserInputTests(unittest.TestCase):
+    def test_strips_leading_at(self) -> None:
+        self.assertEqual(
+            normalize_fio_user_input("@Иванов Иван Иванович"),
+            "Иванов Иван Иванович",
+        )
+
+    def test_strips_multiple_leading_at(self) -> None:
+        self.assertEqual(normalize_fio_user_input("@@ Петров П.П. "), "Петров П.П.")
+
+    def test_skip_token_still_empty(self) -> None:
+        self.assertEqual(normalize_fio_user_input(SKIP_TOKEN), "")
 
 
 class IsValidUrlTests(unittest.TestCase):

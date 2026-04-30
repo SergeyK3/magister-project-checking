@@ -1,0 +1,403 @@
+"""Тесты для load_config: путь к SA-ключу vs содержимое JSON."""
+
+from __future__ import annotations
+
+import json
+import os
+import unittest
+from pathlib import Path
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+from unittest.mock import patch
+
+from magister_checking.bot.config import (
+    DEFAULT_PERSISTENCE_FILE,
+    ConfigError,
+    load_config,
+)
+
+
+_SAMPLE_JSON = {
+    "type": "service_account",
+    "project_id": "demo",
+    "private_key_id": "x",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+    "client_email": "demo@demo.iam.gserviceaccount.com",
+    "client_id": "1",
+}
+
+
+def _base_env(overrides: dict) -> dict:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "stub",
+        "SPREADSHEET_ID": "sheet123",
+        "WORKSHEET_NAME": "Регистрация",
+        "PROJECT_CARD_OUTPUT_FOLDER_URL": "",
+        "LOG_LEVEL": "INFO",
+    }
+    env.update(overrides)
+    return env
+
+
+class LoadConfigTests(unittest.TestCase):
+    def test_path_value(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(str(cfg.google_service_account_json), sa_path)
+            self.assertEqual(cfg.project_card_output_folder_url, "")
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, ())
+            self.assertEqual(cfg.persistence_file, DEFAULT_PERSISTENCE_FILE)
+        finally:
+            os.unlink(sa_path)
+
+    def test_persistence_file_override(self) -> None:
+        """BOT_PERSISTENCE_FILE переопределяет путь по умолчанию."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with TemporaryDirectory() as tmp:
+                custom = Path(tmp) / "custom" / "state.pickle"
+                with patch.dict(
+                    os.environ,
+                    _base_env(
+                        {
+                            "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                            "BOT_PERSISTENCE_FILE": str(custom),
+                        }
+                    ),
+                    clear=True,
+                ):
+                    cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+                self.assertEqual(cfg.persistence_file, custom)
+        finally:
+            os.unlink(sa_path)
+
+    def test_docx_conversion_folder_from_url(self) -> None:
+        """DOCX_CONVERSION_FOLDER_URL (legacy) принимает URL Drive и сохраняет только id."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "DOCX_CONVERSION_FOLDER_URL": "https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "FOLDER_ID")
+        finally:
+            os.unlink(sa_path)
+
+    def test_docx_conversion_folder_from_raw_id(self) -> None:
+        """DOCX_CONVERSION_FOLDER_ID (legacy) принимает чистый id без URL."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "DOCX_CONVERSION_FOLDER_ID": "abc123",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "abc123")
+        finally:
+            os.unlink(sa_path)
+
+    def test_docx_conversion_folder_absent(self) -> None:
+        """Если переменные не заданы, поле пустое (фича отключена)."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_from_url(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_URL — основной источник, принимает URL."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_URL": "https://drive.google.com/drive/folders/BUF_ID?usp=sharing",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "BUF_ID")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_from_raw_id(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_ID принимает чистый id."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_ID": "raw_buf_id",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "raw_buf_id")
+        finally:
+            os.unlink(sa_path)
+
+    def test_buffer_folder_priority_over_legacy(self) -> None:
+        """GOOGLE_DRIVE_BUFFER_FOLDER_* имеет приоритет над DOCX_CONVERSION_FOLDER_*."""
+
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "GOOGLE_DRIVE_BUFFER_FOLDER_ID": "new_id",
+                        "DOCX_CONVERSION_FOLDER_ID": "legacy_id",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.docx_conversion_folder_id, "new_id")
+        finally:
+            os.unlink(sa_path)
+
+    def test_project_card_output_folder_url(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_CARD_OUTPUT_FOLDER_URL": "https://drive.google.com/drive/folders/abc123",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(
+                cfg.project_card_output_folder_url,
+                "https://drive.google.com/drive/folders/abc123",
+            )
+            self.assertEqual(
+                cfg.project_snapshot_output_folder_urls,
+                ("https://drive.google.com/drive/folders/abc123",),
+            )
+        finally:
+            os.unlink(sa_path)
+
+    def test_project_snapshot_output_folder_urls_two(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            a = "https://drive.google.com/drive/folders/aaa"
+            b = "https://drive.google.com/drive/folders/bbb"
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS": f"{a} , {b} ",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.project_card_output_folder_url, a)
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, (a, b))
+        finally:
+            os.unlink(sa_path)
+
+    def test_multi_snapshot_urls_override_legacy_card_only(self) -> None:
+        """PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS задаёт список; PROJECT_CARD не склеивается."""
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            a = "https://drive.google.com/drive/folders/onlyMulti"
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "PROJECT_CARD_OUTPUT_FOLDER_URL": "https://drive.google.com/drive/folders/ignored",
+                        "PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS": a,
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.project_snapshot_output_folder_urls, (a,))
+            self.assertEqual(cfg.project_card_output_folder_url, a)
+        finally:
+            os.unlink(sa_path)
+
+    def test_content_in_dedicated_var(self) -> None:
+        with patch.dict(
+            os.environ,
+            _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT": json.dumps(_SAMPLE_JSON)}),
+            clear=True,
+        ):
+            cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+        try:
+            self.assertTrue(cfg.google_service_account_json.is_file())
+            data = json.loads(cfg.google_service_account_json.read_text(encoding="utf-8"))
+            self.assertEqual(data["client_email"], _SAMPLE_JSON["client_email"])
+        finally:
+            cfg.google_service_account_json.unlink(missing_ok=True)
+
+    def test_content_passed_via_path_var(self) -> None:
+        """GOOGLE_SERVICE_ACCOUNT_JSON, начинающийся с '{', считается JSON."""
+
+        with patch.dict(
+            os.environ,
+            _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": json.dumps(_SAMPLE_JSON)}),
+            clear=True,
+        ):
+            cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+        try:
+            self.assertTrue(cfg.google_service_account_json.is_file())
+        finally:
+            cfg.google_service_account_json.unlink(missing_ok=True)
+
+    def test_missing_required_vars(self) -> None:
+        with patch.dict(os.environ, {"WORKSHEET_NAME": "x"}, clear=True):
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(dotenv_path=Path("__missing_test_env__.env"))
+        msg = str(ctx.exception)
+        self.assertIn("TELEGRAM_BOT_TOKEN", msg)
+        self.assertIn("SPREADSHEET_ID", msg)
+        self.assertIn("GOOGLE_SERVICE_ACCOUNT_JSON", msg)
+
+    def test_path_does_not_exist(self) -> None:
+        with TemporaryDirectory() as tmp:
+            ghost = Path(tmp) / "absent.json"
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": str(ghost)}),
+                clear=True,
+            ):
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertIn("не найден", str(ctx.exception))
+
+    def test_invalid_json_content(self) -> None:
+        with patch.dict(
+            os.environ,
+            _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT": "{oops}"}),
+            clear=True,
+        ):
+            with self.assertRaises(ConfigError) as ctx:
+                load_config(dotenv_path=Path("__missing_test_env__.env"))
+        self.assertIn("некорректно", str(ctx.exception))
+
+    def test_alert_chat_ids_empty_by_default(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env({"GOOGLE_SERVICE_ACCOUNT_JSON": sa_path}),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.alert_chat_ids, ())
+        finally:
+            os.unlink(sa_path)
+
+    def test_alert_chat_ids_parsed(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "BOT_ALERT_CHAT_IDS": " 111 , -100222 ",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.alert_chat_ids, (111, -100222))
+        finally:
+            os.unlink(sa_path)
+
+    def test_alert_chat_ids_invalid_raises(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "BOT_ALERT_CHAT_IDS": "not-int",
+                    }
+                ),
+                clear=True,
+            ):
+                with self.assertRaises(ConfigError) as ctx:
+                    load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertIn("BOT_ALERT_CHAT_IDS", str(ctx.exception))
+        finally:
+            os.unlink(sa_path)
+
+
+if __name__ == "__main__":
+    unittest.main()

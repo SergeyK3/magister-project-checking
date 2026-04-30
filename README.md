@@ -1,6 +1,12 @@
 # Magister Project Checking
 
-Проект для проверки магистерских работ. Автоматизация сбора сведений из Google Docs (отчёты, сводные таблицы внутри документов). Пилот — личный Google-аккаунт и OAuth.
+Проект для проверки магистерских работ. Состоит из двух частей:
+
+- **Telegram-бот `@magistrcheckbot`** — основной канал регистрации магистрантов и
+  первичной проверки ссылки на промежуточный отчёт (этапы 1–2 ТЗ v2). Пишет
+  данные в Google Sheets через Service Account.
+- **CLI-утилиты анализа Google Docs** — `doc-info`, `doc-extract`,
+  `build-summary`, `fill-docs-test1`. Используют OAuth (личный Google-аккаунт).
 
 **Репозиторий на GitHub:** [github.com/SergeyK3/magister-project-checking](https://github.com/SergeyK3/magister-project-checking)
 
@@ -10,6 +16,7 @@
 |------|------------|
 | [docs/tz_magister_checking_0d150b8f.plan.md](docs/tz_magister_checking_0d150b8f.plan.md) | Техническое задание (исходное) |
 | [docs/tz_amendment_2026-04-06_docs_output.md](docs/tz_amendment_2026-04-06_docs_output.md) | Изменение ТЗ: вывод в Google Doc вместо Sheets |
+| [docs/tz_tezis_v2.md](docs/tz_tezis_v2.md) | Тезисы ТЗ v2: Telegram-бот + Google Sheets |
 | [docs/google_cloud_console.md](docs/google_cloud_console.md) | Настройка Google Cloud Console |
 
 Личные черновики: `docs/private/` (в `.gitignore`).
@@ -95,3 +102,139 @@ python -m pip install -r requirements.txt
 ## Секреты
 
 См. [credentials/README.md](credentials/README.md).
+
+## Telegram-бот @magistrcheckbot (ТЗ v2, этапы 1–2)
+
+Бот собирает регистрационные данные магистранта через диалог `/start`, делает
+первичную проверку ссылки на промежуточный отчёт и записывает строку в Google
+Sheets. Логика разнесена по пакету `magister_checking.bot`
+(`config`, `models`, `validation`, `sheets_repo`, `handlers`, `app`).
+
+### Подготовка
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather), получите токен.
+2. Создайте Service Account в Google Cloud Console и скачайте JSON-ключ.
+   Положите его в `credentials/` (папка под `.gitignore`).
+3. Откройте целевую Google Sheets и **поделитесь ею с email сервисного аккаунта**
+   (поле `client_email` из JSON) с правом «Редактор».
+4. Скопируйте `.env.example` в `.env` и заполните:
+
+   ```env
+   TELEGRAM_BOT_TOKEN=123456:ABC...
+   SPREADSHEET_ID=16gpZSZgKBcbf8Z9LZvcYKT1lUPG-URuo9C6K9BRPDHU
+   WORKSHEET_NAME=Регистрация
+   GOOGLE_SERVICE_ACCOUNT_JSON=credentials/service_account.json
+   LOG_LEVEL=INFO
+   ```
+
+   В средах, где файл положить нельзя (Cursor Cloud Agent Secrets, GitHub
+   Actions и т.п.), вместо пути можно передать **содержимое** JSON-ключа в
+   `GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT` — оно будет записано во временный
+   файл с правами `600`.
+
+### Запуск
+
+```powershell
+python -m magister_checking bot
+```
+
+Бот стартует в режиме long polling. На листе автоматически создаётся (или
+перезаписывается) рабочая шапка:
+
+```
+telegram_id, telegram_username, telegram_first_name, telegram_last_name,
+fio, group_name, workplace, position, phone, supervisor,
+report_url, report_url_valid, report_url_accessible,
+fill_status, last_action
+```
+
+После каждого сохранения анкеты бот также пересчитывает лист `Dashboard`
+в этой же Google-таблице. На нём выводится простая регистрационная аналитика:
+общее число регистраций, число полных/частичных/пустых анкет, количество
+привязанных Telegram-аккаунтов, а также статистика по наличию ссылки и
+доступности отчёта.
+
+Для администраторских действий добавьте в той же Google-таблице отдельный лист
+`Администраторы` с колонками:
+
+```text
+telegram_id, username, fio, role, active
+```
+
+Бот проверяет права администратора по `telegram_id`, а не по Google-аккаунту.
+
+### Сценарий пользователя
+
+- `/start` — начать или продолжить регистрацию. Если запись уже есть, бот
+  спросит только незаполненные поля (см. п.5.4 ТЗ).
+- Любое поле можно пропустить, отправив `-` или команду `/skip`.
+- `/cancel` — выйти из диалога без сохранения.
+- В конце бот показывает сводку и просит подтвердить «да / нет». При «да»
+  выполняется upsert строки по `telegram_id`.
+
+### Сценарий администратора
+
+- `/admin` — показать кнопку запуска админского действия.
+- `/project_card` — сформировать PDF-карточку проекта по номеру строки или ФИО.
+- Кнопка `Сформировать карточку проекта` запускает тот же сценарий, что и `/project_card`.
+
+При формировании карточки бот:
+- заново пересчитывает ссылки и аналитику по диссертации;
+- обновляет строку магистранта в листе `Регистрация`;
+- обновляет лист `Dashboard`;
+- формирует PDF-карточку проекта локально;
+- отправляет PDF-файл администратору прямо в Telegram.
+
+### Статусы (`fill_status`, п.12 ТЗ)
+
+- `NEW` — ни одно обязательное поле не заполнено;
+- `PARTIAL` — часть полей заполнена;
+- `REGISTERED` — все 7 обязательных полей заполнены.
+
+`last_action` фиксирует имя последнего шага (`ask_<field>`, `answered_<field>`,
+`skipped_<field>`, `confirmed_save`, `cancelled_save`, `cancelled`) — это
+помогает оператору видеть, где магистрант остановился.
+
+### Тесты
+
+```powershell
+python -m pytest tests/bot -q
+```
+
+Тесты используют фейковый worksheet и моки Telegram/HTTP — сеть и реальный
+Service Account не нужны.
+
+### Симуляция регистрации (без Telegram)
+
+Скрипт [`tools/simulate_registration.py`](tools/simulate_registration.py)
+прогоняет ту же бизнес-логику бота (`models.py`, `validation.py`, расчёт
+`FillStatus`) поверх in-memory worksheet и сохраняет результат в `.xlsx`.
+Полезно для демонстрации и регрессии без живого Telegram.
+
+**Важно про `telegram_id` (см. п.6.2 ТЗ):** реальный Telegram ID можно получить
+**только** при живом обращении пользователя к боту (`/start` в личном чате).
+В симуляции `telegram_id` либо берётся из исходной таблицы, либо
+проставляется синтетически через `--fake-telegram-id-base`, либо остаётся
+пустым.
+
+Демонстрация на синтетических 5 магистрантах (CSV в репо):
+
+```powershell
+python -m tools.simulate_registration `
+  --input-csv tools/sample_students.csv `
+  --output-xlsx artifacts/simulated_registration.xlsx `
+  --fake-telegram-id-base 900000001
+```
+
+Прогон по первым N строкам уже существующей Google Sheets (использует ваш `.env`
+и Service Account):
+
+```powershell
+python -m tools.simulate_registration `
+  --from-sheet --limit 5 `
+  --output-xlsx artifacts/from_sheet.xlsx
+```
+
+По умолчанию реальный HTTP-запрос к ссылкам **не делается** — фиксируется
+только результат проверки формата URL (`report_url_valid`). Для боевой
+проверки добавьте `--check-links`.

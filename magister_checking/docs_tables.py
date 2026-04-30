@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from magister_checking.docs_extract import HyperlinkRecord
+from magister_checking.docs_extract import HyperlinkRecord, table_cell_content_blocks
 
 
 @dataclass
@@ -34,7 +34,7 @@ def extract_tables(document: dict[str, Any]) -> list[list[list[TableCell]]]:
 def _extract_cell(cell: dict[str, Any], path: str) -> TableCell:
     parts: list[str] = []
     links: list[HyperlinkRecord] = []
-    _fill_from_content(cell.get("content", []), path, parts, links)
+    _fill_from_content(table_cell_content_blocks(cell), path, parts, links)
     return TableCell(text="".join(parts), links=links)
 
 
@@ -53,7 +53,7 @@ def _fill_from_content(
                 for ci, nested_cell in enumerate(row.get("tableCells", [])):
                     nested_path = f"{path}/nested[{ri},{ci}]"
                     _fill_from_content(
-                        nested_cell.get("content", []), nested_path, parts, links
+                        table_cell_content_blocks(nested_cell), nested_path, parts, links
                     )
 
 

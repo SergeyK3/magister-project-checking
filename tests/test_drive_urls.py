@@ -3,6 +3,7 @@
 import unittest
 
 from magister_checking.drive_urls import (
+    classify_drive_url,
     extract_google_file_id,
     extract_google_folder_id,
     is_google_drive_folder_url,
@@ -34,6 +35,86 @@ class TestExtractGoogleFileId(unittest.TestCase):
         url = "https://drive.google.com/drive/u/0/folders/ZZZfolderId42"
         self.assertTrue(is_google_drive_folder_url(url))
         self.assertEqual(extract_google_folder_id(url), "ZZZfolderId42")
+
+
+class TestClassifyDriveUrl(unittest.TestCase):
+    """Семантическая классификация Drive/Docs URL для Stage 3 пайплайна.
+
+    Используется в bot/row_pipeline.py: для каждой колонки L/M/N/O
+    политика говорит, какие ``DriveUrlKind`` допустимы. Mismatch →
+    strikethrough + warning в справку магистранту.
+    """
+
+    def test_google_doc(self) -> None:
+        for url in (
+            "https://docs.google.com/document/d/ABC/edit",
+            "https://docs.google.com/document/d/ABC/edit?usp=sharing&ouid=1",
+            "http://docs.google.com/document/d/ABC",
+        ):
+            self.assertEqual(classify_drive_url(url), "google_doc", msg=url)
+
+    def test_google_sheet(self) -> None:
+        url = "https://docs.google.com/spreadsheets/d/SHEET_ID/edit#gid=0"
+        self.assertEqual(classify_drive_url(url), "google_sheet")
+
+    def test_drive_folder(self) -> None:
+        for url in (
+            "https://drive.google.com/drive/folders/FOLDER_ID",
+            "https://drive.google.com/drive/folders/FOLDER_ID?usp=sharing",
+            "https://drive.google.com/drive/u/0/folders/FOLDER_ID",
+        ):
+            self.assertEqual(classify_drive_url(url), "drive_folder", msg=url)
+
+    def test_drive_file(self) -> None:
+        for url in (
+            "https://drive.google.com/file/d/FILE_ID/view",
+            "https://drive.google.com/file/d/FILE_ID/view?usp=drive_link",
+            "https://drive.google.com/file/d/FILE_ID/preview",
+        ):
+            self.assertEqual(classify_drive_url(url), "drive_file", msg=url)
+
+    def test_other_for_unknown_or_empty(self) -> None:
+        for url in (
+            "",
+            "   ",
+            "not-a-url",
+            "ftp://drive.google.com/file/d/X",  # не http(s)
+            "https://example.com/x",
+            "https://drive.google.com/open?id=X",  # legacy ?id= форма — не «drive_file»
+            "https://docs.google.com/presentation/d/ABC",  # presentation вне политики
+        ):
+            self.assertEqual(classify_drive_url(url), "other", msg=url)
+
+    def test_docx_in_docs_viewer_with_rtpof_classified_as_drive_file(self) -> None:
+        """docs.google.com/document URL с ``rtpof=true`` — это Drive viewer
+        для загруженного .docx, а не нативный Doc.
+
+        Боевой кейс: магистрант загружает .docx в Drive и шарит ссылку
+        прямо из браузера. URL вида
+        ``docs.google.com/document/d/<id>/edit?usp=drive_link&ouid=...&rtpof=true&sd=true``
+        ведёт на .docx (mime ``…wordprocessingml.document``), и Docs API
+        на нём отвечает HTTP 400 «not supported». Классификатор должен
+        сразу отправить такой URL в drive_file, чтобы Stage 4 пошёл по
+        пути download bytes → analyze_docx_bytes (handoff §B).
+        """
+        for url in (
+            "https://docs.google.com/document/d/ABC/edit?rtpof=true&sd=true",
+            "https://docs.google.com/document/d/ABC/edit?usp=drive_link&ouid=1&rtpof=true&sd=true",
+            "http://docs.google.com/document/d/ABC?rtpof=TRUE",  # case-insensitive
+            "https://docs.google.com/document/d/ABC?rtpof= true ",  # пробелы вокруг
+        ):
+            self.assertEqual(classify_drive_url(url), "drive_file", msg=url)
+
+    def test_native_doc_url_without_rtpof_remains_google_doc(self) -> None:
+        """Чтобы Variant A не сломал нативные Google Docs (без rtpof)."""
+
+        for url in (
+            "https://docs.google.com/document/d/ABC/edit",
+            "https://docs.google.com/document/d/ABC/edit?usp=sharing",
+            "https://docs.google.com/document/d/ABC/edit?usp=sharing&rtpof=false",
+            "https://docs.google.com/document/d/ABC/edit?rtpof=",  # пустое значение
+        ):
+            self.assertEqual(classify_drive_url(url), "google_doc", msg=url)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,11 @@ credentials/*
 **/token.json
 *.pickle
 
+# Состояние PicklePersistence (PTB). По умолчанию бот кладёт state.pickle в ./state/,
+# путь можно переопределить через BOT_PERSISTENCE_FILE в .env.
+state/
+magistrcheckbot_state.pickle
+
 # Локальные переменные окружения
 .env
 .env.local

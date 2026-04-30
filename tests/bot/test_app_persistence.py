@@ -25,6 +25,7 @@ def _make_config(persistence_file: Path) -> BotConfig:
         log_level=20,
         persistence_file=persistence_file,
         project_snapshot_output_folder_urls=(),
+        magistrants_worksheet_name="",
     )
 
 

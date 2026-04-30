@@ -867,6 +867,11 @@ class HelpAndCommandsTests(unittest.TestCase):
                 "spravka",
                 "stats",
                 "sync_dashboard",
+                "sync_magistrants",
+                "register",
+                "status",
+                "unreg",
+                "reg_list",
             ],
         )
 

@@ -57,6 +57,85 @@ def cmd_bot(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_normalize_phones(_: argparse.Namespace) -> int:
+    """Массово приводит колонку телефона к ``+7XXXXXXXXXX`` по правилам бота."""
+
+    from magister_checking.bot.config import ConfigError, load_config
+    from magister_checking.bot.sheets_repo import normalize_phones_to_ru_kz_standard
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        print(
+            "Нужны SPREADSHEET_ID, WORKSHEET_NAME и SA JSON — см. .env.example.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        stats = normalize_phones_to_ru_kz_standard(config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Ошибка при обращении к Google Sheets: {exc}", file=sys.stderr)
+        return 1
+
+    for title, meta in stats.items():
+        if meta.get("skipped"):
+            reason = meta.get("reason", "неизвестно")
+            print(f"• «{title}»: пропуск ({reason})")
+        elif meta.get("synced"):
+            print(f"• «{title}»: синхронизирован ({meta.get('note', '')})")
+        else:
+            dr = meta.get("data_rows", "?")
+            ch = meta.get("cells_changed", "?")
+            print(f"• «{title}»: строк данных={dr}, изменённых ячеек телефона={ch}")
+    return 0
+
+
+def cmd_supervisor_list_preview(ns: argparse.Namespace) -> int:
+    """Печать в stdout текстов как у /unreg и /reg_list (превью для админа / проектировщика)."""
+
+    from magister_checking.bot.config import ConfigError, load_config
+    from magister_checking.bot.supervisor_lists import (
+        supervisor_registered_report,
+        supervisor_unregistered_report,
+    )
+
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+        return 2
+
+    tid = (ns.telegram_id or "").strip()
+    override = (ns.supervisor_fio or "").strip() or None
+
+    kinds: tuple[str, ...]
+    if ns.kind == "both":
+        kinds = ("unreg", "reg_list")
+    else:
+        kinds = (ns.kind,)
+
+    exit_code = 0
+    for kind in kinds:
+        print(f"=== /{kind} ===")
+        if kind == "unreg":
+            chunks, err = supervisor_unregistered_report(
+                config, tid, supervisor_fio_override=override
+            )
+        else:
+            chunks, err = supervisor_registered_report(
+                config, tid, supervisor_fio_override=override
+            )
+        if err:
+            print(err, file=sys.stderr)
+            exit_code = 1
+            continue
+        print("\n\n".join(chunks))
+        print()
+    return exit_code
+
+
 def cmd_broadcast(ns: argparse.Namespace) -> int:
     """Рассылает текстовое сообщение всем зарегистрированным пользователям бота.
 
@@ -586,6 +665,39 @@ def main(argv: list[str] | None = None) -> int:
         help="Запустить Telegram-бота @magistrcheckbot (long polling). Конфиг — .env",
     )
     p_bot.set_defaults(func=cmd_bot)
+
+    p_norm_phone = sub.add_parser(
+        "normalize-phones",
+        help='Нормализовать телефоны (+7…) на листах «Регистрация», «научрук» '
+        "(и синхронизировать лист магистрантов, если задан MAGISTRANTS_WORKSHEET_NAME)",
+    )
+    p_norm_phone.set_defaults(func=cmd_normalize_phones)
+
+    p_sup_prev = sub.add_parser(
+        "supervisor-list-preview",
+        help="Превью ответов /unreg и /reg_list в консоли (SA + .env; для админа без чата научрука)",
+    )
+    p_sup_prev.add_argument(
+        "--telegram-id",
+        dest="telegram_id",
+        default="",
+        metavar="ID",
+        help="числовой Telegram ID научрука (строка в листе «научрук»); опционально, если задан --supervisor-fio",
+    )
+    p_sup_prev.add_argument(
+        "--supervisor-fio",
+        dest="supervisor_fio",
+        default="",
+        metavar="ФИО",
+        help="ФИО научрука «как в научрук» — обход поиска по telegram_id",
+    )
+    p_sup_prev.add_argument(
+        "--kind",
+        choices=("unreg", "reg_list", "both"),
+        default="both",
+        help="фрагмент вывода: только незарегистрированные, только зарегистрированные или оба",
+    )
+    p_sup_prev.set_defaults(func=cmd_supervisor_list_preview)
 
     p_bcast = sub.add_parser(
         "broadcast",

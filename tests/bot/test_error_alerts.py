@@ -33,6 +33,7 @@ def _minimal_config(*, alert: tuple[int, ...] = (999,)) -> BotConfig:
         persistence_file=Path("state/x.pickle"),
         alert_chat_ids=alert,
         project_snapshot_output_folder_urls=(),
+        magistrants_worksheet_name="",
     )
 
 

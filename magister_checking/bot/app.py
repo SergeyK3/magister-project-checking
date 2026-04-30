@@ -39,6 +39,7 @@ from magister_checking.bot.handlers import (
     CLAIM_ASK_FIO,
     CLAIM_CONFIRM,
     CONFIG_BOT_DATA_KEY,
+    PIN_VERIFY_INPUT,
     PROJECT_CARD_ASK_TARGET,
     RECHECK_CALLBACK_PATTERN,
     ROLE_PICK,
@@ -55,6 +56,7 @@ from magister_checking.bot.handlers import (
     admin_recheck_pending_receive,
     admin_stats,
     admin_sync_dashboard,
+    admin_sync_magistrants,
     ask_confirm,
     cancel,
     confirm_bind,
@@ -67,8 +69,10 @@ from magister_checking.bot.handlers import (
     receive_bind_fio,
     receive_claim_fio,
     receive_field,
+    receive_pin_input,
     recheck,
     recheck_button,
+    register_command,
     skip_bind,
     skip_field,
     spravka_choose,
@@ -77,6 +81,7 @@ from magister_checking.bot.handlers import (
     spravka_start,
     start,
     start_role_callback,
+    status_command,
     student_message_bulk_start,
     student_reminder_bulk_confirm_callback,
     student_reminder_bulk_receive_rows,
@@ -86,6 +91,8 @@ from magister_checking.bot.handlers import (
     student_reminder_receive_target,
     student_reminder_pick_template,
     student_reminder_start,
+    supervisor_registered_list_command,
+    supervisor_unregistered_list_command,
 )
 
 logger = logging.getLogger("magistrcheckbot")
@@ -318,6 +325,9 @@ def build_application(config: BotConfig) -> Application:
     claim_confirm_message_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private, confirm_claim
     )
+    pin_input_message_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private, receive_pin_input
+    )
     spravka_target_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private,
         spravka_receive_target,
@@ -327,6 +337,7 @@ def build_application(config: BotConfig) -> Application:
         persistent=True,
         entry_points=[
             CommandHandler("start", start, filters=private),
+            CommandHandler("register", register_command, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
@@ -359,6 +370,7 @@ def build_application(config: BotConfig) -> Application:
                 field_message_handler,
             ],
             ASK_CONFIRM: [confirm_message_handler],
+            PIN_VERIFY_INPUT: [pin_input_message_handler],
             PROJECT_CARD_ASK_TARGET: [project_card_target_handler],
             STUDENT_MSG_ASK_TARGET: [student_reminder_target_handler],
             STUDENT_MSG_PICK_KIND: [student_reminder_template_cb_handler],
@@ -373,6 +385,7 @@ def build_application(config: BotConfig) -> Application:
         fallbacks=[
             CommandHandler("cancel", cancel, filters=private),
             CommandHandler("start", start, filters=private),
+            CommandHandler("register", register_command, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
@@ -408,6 +421,16 @@ def build_application(config: BotConfig) -> Application:
     application.add_handler(CommandHandler("stats", admin_stats, filters=private))
     application.add_handler(
         CommandHandler("sync_dashboard", admin_sync_dashboard, filters=private)
+    )
+    application.add_handler(
+        CommandHandler("sync_magistrants", admin_sync_magistrants, filters=private)
+    )
+    application.add_handler(CommandHandler("status", status_command, filters=private))
+    application.add_handler(
+        CommandHandler("unreg", supervisor_unregistered_list_command, filters=private)
+    )
+    application.add_handler(
+        CommandHandler("reg_list", supervisor_registered_list_command, filters=private)
     )
     application.add_handler(CommandHandler("recheck", recheck, filters=private))
     application.add_handler(

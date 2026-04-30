@@ -639,7 +639,8 @@ def run_row_check(
     (handoff §8 — diff_detection «без прогона пайплайна»).
 
     ``history_source`` — что записать в колонку ``source`` истории:
-    ``cli`` (CLI вручную), ``bot`` (магистрант через /recheck).
+    ``cli`` (CLI вручную), ``bot`` (магистрант через /recheck),
+    ``supervisor_status`` (научник запустил через /status ФИО подопечного в боте).
     """
 
     spreadsheet = get_spreadsheet(config)

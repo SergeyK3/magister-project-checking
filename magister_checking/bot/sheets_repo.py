@@ -6,6 +6,7 @@ worksheet-объект (gspread.Worksheet) — это упрощает тест�
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 import html
 import re
@@ -17,7 +18,10 @@ from google.oauth2.service_account import Credentials
 
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import SHEET_HEADER, UserForm, effective_fill_status
+from magister_checking.bot.phone_normalize import normalize_phone_ru_kz
 from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
+
+logger = logging.getLogger(__name__)
 
 _SHEETS_VALUE_INPUT_OPTION = "RAW"
 """Режим записи в Google Sheets.
@@ -763,6 +767,298 @@ def sync_registration_dashboard(config: BotConfig) -> None:
     _safe_update(dashboard_worksheet, _DASHBOARD_RANGE, dashboard_rows)
 
 
+MAGISTRANTS_REGISTERED_LABEL = "зарегистрирован"
+MAGISTRANTS_NOT_REGISTERED_LABEL = "нет"
+
+_MAGISTRANTS_HEADER_FIO: tuple[str, ...] = ("фио магистранта", "фио")
+_MAGISTRANTS_HEADER_PHONE: tuple[str, ...] = (
+    "телефон",
+    "сотовый контактный телефон",
+    "телефон магистранта",
+)
+_MAGISTRANTS_HEADER_SUPERVISOR: tuple[str, ...] = (
+    "научный руков",
+    "научный руководитель",
+    "научный руководитель ссылка",
+    "научрук",
+)
+_MAGISTRANTS_HEADER_REG: tuple[str, ...] = ("регистрация",)
+_MAGISTRANTS_HEADER_TELEGRAM_ID: tuple[str, ...] = (
+    "telegram_id",
+    "telegram id",
+    "id telegram",
+    "телеграм id",
+    "телеграм",
+)
+
+
+def _magistrants_resolve_column(
+    header: List[str], aliases: tuple[str, ...]
+) -> Optional[int]:
+    normalized_to_index = {
+        _normalize_header(name): idx
+        for idx, name in enumerate(header)
+        if _normalize_header(name)
+    }
+    for alias in aliases:
+        key = _normalize_header(alias)
+        if key in normalized_to_index:
+            return normalized_to_index[key]
+    # Заголовок вида «Научный руководитель (ссылка)» → «научный руководитель ссылка»;
+    # допускаем совпадение по префиксу для длинных алиасов (ключ + пробел + хвост).
+    for alias in aliases:
+        key = _normalize_header(alias)
+        if len(key) < 12:
+            continue
+        for norm_name, idx in normalized_to_index.items():
+            if norm_name == key or norm_name.startswith(key + " "):
+                return idx
+    return None
+
+
+def magistrants_sheet_column_indices(header: List[str]) -> Optional[dict[str, int]]:
+    """Индексы колонок листа master-списка (0-based). Ключ ``supervisor`` — если колонка есть."""
+
+    fio_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_FIO)
+    phone_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_PHONE)
+    reg_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_REG)
+    sup_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_SUPERVISOR)
+    tg_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_TELEGRAM_ID)
+    if fio_i is None or phone_i is None or reg_i is None:
+        return None
+    out: dict[str, int] = {
+        "fio": fio_i,
+        "phone": phone_i,
+        "registration": reg_i,
+    }
+    if sup_i is not None:
+        out["supervisor"] = sup_i
+    if tg_i is not None:
+        out["telegram_id"] = tg_i
+    return out
+
+
+def registration_students_by_fio_phone(
+    registration_worksheet: gspread.Worksheet,
+) -> dict[tuple[str, str], UserForm]:
+    """Ключ (normalize_fio, normalize_phone) → анкета; только непустые tg_id, ФИО, телефон."""
+
+    users = _iter_users(registration_worksheet)
+    out: dict[tuple[str, str], UserForm] = {}
+    for u in users:
+        if not (u.telegram_id or "").strip():
+            continue
+        if not (u.fio or "").strip():
+            continue
+        if not (u.phone or "").strip():
+            continue
+        fk = normalize_fio(u.fio)
+        pk = normalize_phone_ru_kz(u.phone)
+        if not fk or not pk:
+            continue
+        key = (fk, pk)
+        if key in out:
+            logger.warning("Дубликат ключа ФИО+тел в листе Регистрация: %s", key)
+        out[key] = u
+    return out
+
+
+def _supervisor_name_rest_word_align(words_a: list[str], words_b: list[str]) -> bool:
+    """Совпадение хвоста ФИО без инициалов с точками: по словам, допуская префиксы."""
+
+    if not words_a and not words_b:
+        return True
+    if not words_a or not words_b:
+        return True
+    n = min(len(words_a), len(words_b))
+    for i in range(n):
+        x, y = words_a[i], words_b[i]
+        if x == y:
+            continue
+        if x.startswith(y) or y.startswith(x):
+            continue
+        if len(x) == 1 and y.startswith(x):
+            continue
+        if len(y) == 1 and x.startswith(y):
+            continue
+        return False
+    return True
+
+
+def _supervisor_initial_letters_from_rest(abbrev_rest: str) -> list[str]:
+    """Буквы инициалов из «г. к.», «Г.К.», «и.и.» (порядок сохраняется)."""
+
+    letters: list[str] = []
+    for raw in re.split(r"[\s.]+", abbrev_rest.strip()):
+        chunk = raw.strip().lower()
+        if not chunk:
+            continue
+        if len(chunk) == 1 and chunk.isalpha():
+            letters.append(chunk)
+        elif len(chunk) == 2 and chunk.isalpha():
+            letters.extend([chunk[0], chunk[1]])
+        else:
+            letters.append(chunk[0])
+    return letters
+
+
+def _supervisor_rest_initials_vs_words(abbrev_rest: str, full_rest: str) -> bool:
+    full_words = [w for w in full_rest.split() if w]
+    if not full_words:
+        return False
+    letters = _supervisor_initial_letters_from_rest(abbrev_rest)
+    if not letters:
+        return False
+    if not full_words[0].startswith(letters[0]):
+        return False
+    if len(letters) == 1:
+        return True
+    for i, letter in enumerate(letters[1:], start=1):
+        if i >= len(full_words):
+            return False
+        if not full_words[i].startswith(letter):
+            return False
+    return True
+
+
+def _supervisor_name_rest_compatible(rest_a: str, rest_b: str) -> bool:
+    if not rest_a and not rest_b:
+        return True
+    if not rest_a or not rest_b:
+        return True
+    ra, rb = rest_a.strip(), rest_b.strip()
+    if ra in rb or rb in ra or ra == rb:
+        return True
+    wa, wb = ra.split(), rb.split()
+    if "." in ra or "." in rb:
+        abbrev, full = (ra, rb) if "." in ra else (rb, ra)
+        return _supervisor_rest_initials_vs_words(abbrev, full)
+    return _supervisor_name_rest_word_align(wa, wb)
+
+
+def supervisor_name_matches(sup_fio_sheet: str, cell_supervisor: str) -> bool:
+    """Сопоставляет ФИО научрука из листа «научрук» с ячейкой на листе магистрантов.
+
+    После равенства и вхождения подстроки (как раньше) допускает расхождение
+    отчества и сокращения имени до инициалов при совпадении **фамилии**
+    (первое слово) и согласованном **имени** (второе и далее слово / «Г.» / «Г.К.»).
+    """
+
+    a = normalize_fio(sup_fio_sheet)
+    b = normalize_fio(cell_supervisor)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a in b or b in a:
+        return True
+    wa = [w for w in a.split() if w]
+    wb = [w for w in b.split() if w]
+    if not wa or not wb:
+        return False
+    if wa[0] != wb[0]:
+        return False
+    rest_a = " ".join(wa[1:])
+    rest_b = " ".join(wb[1:])
+    return _supervisor_name_rest_compatible(rest_a, rest_b)
+
+
+def get_supervisor_fio_for_telegram_id(config: BotConfig, telegram_id: str) -> str:
+    """ФИО научрука по telegram_id из листа «научрук»."""
+
+    if not telegram_id or not str(telegram_id).strip():
+        return ""
+    spreadsheet = get_spreadsheet(config)
+    ws = get_optional_worksheet(spreadsheet, SUPERVISORS_WORKSHEET_NAME)
+    if ws is None:
+        return ""
+    row_no = find_row_by_telegram_id(ws, telegram_id)
+    if row_no is None:
+        return ""
+    return fio_text_from_worksheet_row(ws, row_no)
+
+
+def sync_magistrants_registration_status(config: BotConfig) -> None:
+    """Нормализует телефоны (+7…), колонку «Регистрация»: зарегистрирован / нет.
+
+    Если в первой строке листа есть колонка ``telegram_id`` (или синоним из
+    ``_MAGISTRANTS_HEADER_TELEGRAM_ID``), подставляет туда ``telegram_id`` из
+    листа «Регистрация» для совпавших пар (ФИО + телефон); для несовпавших
+    строк очищает ячейку.
+    """
+
+    title = (config.magistrants_worksheet_name or "").strip()
+    if not title:
+        return
+    spreadsheet = get_spreadsheet(config)
+    mag_ws = get_optional_worksheet(spreadsheet, title)
+    if mag_ws is None:
+        logger.warning("Лист «%s» не найден — пропуск синхронизации магистрантов", title)
+        return
+    reg_ws = spreadsheet.worksheet(config.worksheet_name)
+    header = _header_row(mag_ws)
+    colmap = magistrants_sheet_column_indices(header)
+    if colmap is None:
+        logger.warning(
+            "Лист «%s»: в первой строке нет колонок ФИО / Телефон / Регистрация.",
+            title,
+        )
+        return
+    reg_by_key = registration_students_by_fio_phone(reg_ws)
+    reg_keys = set(reg_by_key.keys())
+    all_rows = mag_ws.get_all_values()
+    if len(all_rows) < 2:
+        return
+    fio_i = colmap["fio"]
+    phone_i = colmap["phone"]
+    reg_i = colmap["registration"]
+    tg_i = colmap.get("telegram_id")
+    values_phone: list[list[str]] = []
+    values_reg: list[list[str]] = []
+    values_tg: list[list[str]] = []
+    for row in all_rows[1:]:
+        if not row or not any(str(c).strip() for c in row):
+            values_phone.append([""])
+            values_reg.append([""])
+            if tg_i is not None:
+                values_tg.append([""])
+            continue
+        width = max(len(header), len(row), fio_i + 1, phone_i + 1, reg_i + 1)
+        if tg_i is not None:
+            width = max(width, tg_i + 1)
+        padded = list(row) + [""] * (width - len(row))
+        raw_phone = str(padded[phone_i] or "").strip()
+        pk = normalize_phone_ru_kz(raw_phone)
+        phone_display = pk if pk else raw_phone
+        fk = normalize_fio(str(padded[fio_i] or ""))
+        reg_val = (
+            MAGISTRANTS_REGISTERED_LABEL
+            if fk and pk and (fk, pk) in reg_keys
+            else MAGISTRANTS_NOT_REGISTERED_LABEL
+        )
+        values_phone.append([phone_display])
+        values_reg.append([reg_val])
+        if tg_i is not None:
+            tg_val = ""
+            if fk and pk and (fk, pk) in reg_by_key:
+                tg_val = (reg_by_key[(fk, pk)].telegram_id or "").strip()
+            values_tg.append([tg_val])
+    start = 2
+    end = start + len(values_phone) - 1
+    letter_p = _column_letter(phone_i)
+    letter_r = _column_letter(reg_i)
+    ranges_batch: list[dict] = [
+        {"range": f"{letter_p}{start}:{letter_p}{end}", "values": values_phone},
+        {"range": f"{letter_r}{start}:{letter_r}{end}", "values": values_reg},
+    ]
+    if tg_i is not None and values_tg:
+        letter_t = _column_letter(tg_i)
+        ranges_batch.append(
+            {"range": f"{letter_t}{start}:{letter_t}{end}", "values": values_tg}
+        )
+    _safe_batch_update_values(mag_ws, ranges_batch)
+
+
 def _bool_cell(value: str) -> bool:
     normalized = _normalize_header(value)
     return normalized in {"yes", "y", "true", "1", "active", "да"}
@@ -858,6 +1154,106 @@ def fio_text_from_worksheet_row(worksheet: gspread.Worksheet, row_number: int) -
     if col >= len(row):
         return ""
     return str(row[col] or "").strip()
+
+
+def phone_text_from_worksheet_row(worksheet: gspread.Worksheet, row_number: int) -> str:
+    """Телефон из строки по колонке ``phone`` (алиасы как в ``_HEADER_ALIASES``)."""
+
+    field_map = _field_to_column_map(worksheet)
+    col = field_map.get("phone")
+    if col is None:
+        return ""
+    row = worksheet.row_values(row_number)
+    if col >= len(row):
+        return ""
+    return str(row[col] or "").strip()
+
+
+def normalize_worksheet_phones_ru_kz(worksheet: gspread.Worksheet) -> dict[str, object]:
+    """Переписывает колонку ``phone`` в канонический вид ``+7XXXXXXXXXX``, где возможно.
+
+    Если ``normalize_phone_ru_kz`` возвращает пустую строку для непустого сырья,
+    сохраняется исходный текст ячейки (кроме строк, признанных полностью пустыми).
+    Обновляет только колонку телефона через один ``batch_update``.
+
+    Возвращает метаданные: ``skipped`` при отсутствии распознанной колонки телефона.
+    """
+
+    sheet_title = getattr(worksheet, "title", "")
+    header = _header_row(worksheet)
+    field_map = _field_to_column_map(worksheet)
+    phone_i = field_map.get("phone")
+    if phone_i is None:
+        logger.warning(
+            "Лист «%s»: колонка телефона не найдена по заголовку — пропуск нормализации.",
+            sheet_title or "?",
+        )
+        return {"sheet": sheet_title, "skipped": True, "reason": "no_phone_column"}
+
+    all_rows = worksheet.get_all_values()
+    if len(all_rows) < 2:
+        return {"sheet": sheet_title, "skipped": False, "data_rows": 0, "cells_changed": 0}
+
+    values_out: list[list[str]] = []
+    cells_changed = 0
+
+    for row in all_rows[1:]:
+        if not row or not any(str(c).strip() for c in row):
+            values_out.append([""])
+            continue
+
+        width = max(len(header), len(row), phone_i + 1)
+        padded = list(row) + [""] * (width - len(row))
+        old_display = str(padded[phone_i] if phone_i < len(padded) else "").strip()
+        new_val = normalize_phone_ru_kz(old_display) or old_display
+        if new_val != old_display:
+            cells_changed += 1
+        values_out.append([new_val])
+
+    start = 2
+    end = start + len(values_out) - 1
+    letter = _column_letter(phone_i)
+    _safe_batch_update_values(
+        worksheet,
+        [{"range": f"{letter}{start}:{letter}{end}", "values": values_out}],
+    )
+    return {
+        "sheet": sheet_title,
+        "skipped": False,
+        "data_rows": len(values_out),
+        "cells_changed": cells_changed,
+    }
+
+
+def normalize_phones_to_ru_kz_standard(config: BotConfig) -> dict[str, dict[str, object]]:
+    """Нормализует телефоны на листе «Регистрация», «научрук» и (если задано) «Магистранты».
+
+    Для листа магистрантов вызывает :func:`sync_magistrants_registration_status`
+    (телефоны **+7** и колонка «Регистрация»).
+    """
+
+    spreadsheet = get_spreadsheet(config)
+    out: dict[str, dict[str, object]] = {}
+
+    reg_title = config.worksheet_name
+    reg_ws = spreadsheet.worksheet(reg_title)
+    out[reg_title] = normalize_worksheet_phones_ru_kz(reg_ws)
+
+    sup_ws = get_optional_worksheet(spreadsheet, SUPERVISORS_WORKSHEET_NAME)
+    if sup_ws is None:
+        out[SUPERVISORS_WORKSHEET_NAME] = {"skipped": True, "reason": "worksheet_not_found"}
+    else:
+        out[SUPERVISORS_WORKSHEET_NAME] = normalize_worksheet_phones_ru_kz(sup_ws)
+
+    mag_title = (config.magistrants_worksheet_name or "").strip()
+    if mag_title:
+        sync_magistrants_registration_status(config)
+        out[mag_title] = {
+            "synced": True,
+            "via": "sync_magistrants_registration_status",
+            "note": "телефоны +7, колонка «Регистрация», при наличии колонки — telegram_id",
+        }
+    return out
 
 
 def _safe_batch_update_values(

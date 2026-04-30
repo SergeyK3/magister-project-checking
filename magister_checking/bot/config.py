@@ -82,6 +82,13 @@ class BotConfig:
     Сборка: ``PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS`` (через запятую) или, если
     пусто, одна папка ``PROJECT_CARD_OUTPUT_FOLDER_URL`` (см. load_config)."""
 
+    magistrants_worksheet_name: str = ""
+    """Имя листа master-списка магистрантов (например ``Магистранты``).
+
+    Пустая строка — синхронизация колонки «Регистрация» и команды научрука,
+    завязанные на этот лист, отключены. Переменная окружения:
+    ``MAGISTRANTS_WORKSHEET_NAME``."""
+
     @property
     def log_level_name(self) -> str:
         return logging.getLevelName(self.log_level)
@@ -171,6 +178,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     sa_path_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON")
     sa_content_raw = _read_env("GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT")
     worksheet_name = _read_env("WORKSHEET_NAME", DEFAULT_WORKSHEET_NAME) or DEFAULT_WORKSHEET_NAME
+    magistrants_worksheet_raw = _read_env("MAGISTRANTS_WORKSHEET_NAME", "") or ""
     project_card_raw = _read_env("PROJECT_CARD_OUTPUT_FOLDER_URL", "") or ""
     multi_raw = _read_env("PROJECT_SNAPSHOT_OUTPUT_FOLDER_URLS", "") or ""
     project_snapshot_output_folder_urls = _parse_project_snapshot_output_folder_urls(
@@ -233,6 +241,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         alert_chat_ids=alert_chat_ids,
         telegram_force_ipv4=_parse_env_bool(force_ipv4_raw, default=False),
         project_snapshot_output_folder_urls=project_snapshot_output_folder_urls,
+        magistrants_worksheet_name=magistrants_worksheet_raw.strip(),
     )
 
 

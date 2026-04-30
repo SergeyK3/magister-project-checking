@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, patch
 
 import gspread
 
+from magister_checking.bot.config import BotConfig
 from magister_checking.bot.models import SHEET_HEADER, UserForm
 from magister_checking.bot.row_pipeline import Stage3CellUpdate, Stage4CellUpdate
 from magister_checking.bot.sheets_repo import (
@@ -30,11 +32,18 @@ from magister_checking.bot.sheets_repo import (
     is_admin_telegram_id,
     is_supervisor_telegram_id,
     load_user,
+    magistrants_sheet_column_indices,
     SUPERVISORS_WORKSHEET_NAME,
     read_last_recheck_entry,
+    MAGISTRANTS_NOT_REGISTERED_LABEL,
+    MAGISTRANTS_REGISTERED_LABEL,
     save_user_to_row_with_extras,
     normalize_fio,
+    normalize_phones_to_ru_kz_standard,
+    normalize_worksheet_phones_ru_kz,
+    sync_magistrants_registration_status,
     sync_registration_dashboard,
+    supervisor_name_matches,
     upsert_user,
     upsert_user_with_extras,
 )
@@ -522,6 +531,58 @@ class FioBindingTests(unittest.TestCase):
         )
 
         self.assertEqual(find_rows_by_fio(ws, "Иванов И.И."), [2, 3])
+
+    def test_supervisor_name_matches_abbrev_initials_vs_full(self) -> None:
+        self.assertTrue(
+            supervisor_name_matches(
+                "Амирова Гульнур Каргабековна",
+                "Амирова Г. К.",
+            )
+        )
+        self.assertTrue(
+            supervisor_name_matches(
+                "Амирова Г. К.",
+                "Амирова Гульнур Каргабековна",
+            )
+        )
+        self.assertTrue(
+            supervisor_name_matches("Иванов Иван Иванович", "Иванов И.И.")
+        )
+        self.assertTrue(
+            supervisor_name_matches("Иванов И.И.", "Иванов Иван Иванович")
+        )
+
+    def test_supervisor_name_matches_substring_still_true(self) -> None:
+        self.assertTrue(
+            supervisor_name_matches(
+                "Амирова Гульнур",
+                "Амирова Гульнур Каргабековна",
+            )
+        )
+
+    def test_supervisor_name_matches_different_surname_false(self) -> None:
+        self.assertFalse(
+            supervisor_name_matches("Петров И.И.", "Иванов Иван Иванович")
+        )
+
+    def test_magistrants_sheet_finds_supervisor_column_with_ssylka_suffix(self) -> None:
+        header = [
+            "№",
+            "ФИО магистранта",
+            "Спец",
+            "Телефон",
+            "ID руководи",
+            "Научный руководитель (ссылка)",
+            "Дата",
+            "Регистрация",
+        ]
+        cm = magistrants_sheet_column_indices(header)
+        self.assertIsNotNone(cm)
+        assert cm is not None
+        self.assertEqual(cm["fio"], 1)
+        self.assertEqual(cm["phone"], 3)
+        self.assertEqual(cm["supervisor"], 5)
+        self.assertEqual(cm["registration"], 7)
 
     def test_attach_telegram_writes_first_four_columns(self) -> None:
         ws = FakeWorksheet(
@@ -1262,6 +1323,165 @@ class ReadLastRecheckEntryTests(unittest.TestCase):
         self.assertEqual(entry.fingerprint, "fp_new")
         self.assertEqual(entry.passed, "no")
         self.assertEqual(entry.issues, "issue")
+
+
+class SyncMagistrantsRegistrationStatusTests(unittest.TestCase):
+    def test_updates_phone_and_registration_from_registration_sheet(self) -> None:
+        mag_header = [
+            "№",
+            "ФИО магистранта",
+            "Спец",
+            "Телефон",
+            "telegram_id",
+            "Научный руков",
+            "Дата",
+            "Регистрация",
+        ]
+        mag_ws = FakeWorksheet(
+            [
+                mag_header,
+                ["1", "Иванов Иван Иванович", "", "8 999 000-00-00", "", "Петров", "", "нет"],
+                ["2", "Петров Пётр", "", "9990001111", "", "Иванов", "", "нет"],
+            ]
+        )
+        reg_row = [""] * len(SHEET_HEADER)
+        hmap = {name: i for i, name in enumerate(SHEET_HEADER)}
+        reg_row[hmap["telegram_id"]] = "111"
+        reg_row[hmap["fio"]] = "Иванов Иван Иванович"
+        reg_row[hmap["phone"]] = "+79990000000"
+        reg_ws = FakeWorksheet([list(SHEET_HEADER), reg_row])
+        ss = FakeSpreadsheet({"Регистрация": reg_ws, "Магистранты": mag_ws})
+        cfg = BotConfig(
+            telegram_bot_token="dummy",
+            spreadsheet_id="dummy",
+            worksheet_name="Регистрация",
+            project_card_output_folder_url="",
+            google_service_account_json=Path("credentials/unused.json"),
+            log_level=20,
+            persistence_file=Path("state/t.pickle"),
+            magistrants_worksheet_name="Магистранты",
+            project_snapshot_output_folder_urls=(),
+        )
+        with patch("magister_checking.bot.sheets_repo.get_spreadsheet", return_value=ss):
+            sync_magistrants_registration_status(cfg)
+        self.assertEqual(mag_ws.rows[1][3], "+79990000000")
+        self.assertEqual(mag_ws.rows[1][4], "111")
+        self.assertEqual(mag_ws.rows[1][7], MAGISTRANTS_REGISTERED_LABEL)
+        self.assertEqual(mag_ws.rows[2][3], "+79990001111")
+        self.assertEqual(mag_ws.rows[2][4], "")
+        self.assertEqual(mag_ws.rows[2][7], MAGISTRANTS_NOT_REGISTERED_LABEL)
+        batch, _vio = mag_ws.batch_update_calls[0]
+        self.assertEqual(len(batch), 3)
+
+    def test_sync_skips_telegram_id_when_column_absent(self) -> None:
+        mag_header = [
+            "№",
+            "ФИО магистранта",
+            "Спец",
+            "Телефон",
+            "Научный руков",
+            "Дата",
+            "Регистрация",
+        ]
+        mag_ws = FakeWorksheet(
+            [
+                mag_header,
+                ["1", "Иванов Иван Иванович", "", "8 999 000-00-00", "Петров", "", "нет"],
+            ]
+        )
+        reg_row = [""] * len(SHEET_HEADER)
+        hmap = {name: i for i, name in enumerate(SHEET_HEADER)}
+        reg_row[hmap["telegram_id"]] = "111"
+        reg_row[hmap["fio"]] = "Иванов Иван Иванович"
+        reg_row[hmap["phone"]] = "+79990000000"
+        reg_ws = FakeWorksheet([list(SHEET_HEADER), reg_row])
+        ss = FakeSpreadsheet({"Регистрация": reg_ws, "Магистранты": mag_ws})
+        cfg = BotConfig(
+            telegram_bot_token="dummy",
+            spreadsheet_id="dummy",
+            worksheet_name="Регистрация",
+            project_card_output_folder_url="",
+            google_service_account_json=Path("credentials/unused.json"),
+            log_level=20,
+            persistence_file=Path("state/t.pickle"),
+            magistrants_worksheet_name="Магистранты",
+            project_snapshot_output_folder_urls=(),
+        )
+        with patch("magister_checking.bot.sheets_repo.get_spreadsheet", return_value=ss):
+            sync_magistrants_registration_status(cfg)
+        self.assertEqual(mag_ws.rows[1][3], "+79990000000")
+        self.assertEqual(mag_ws.rows[1][6], MAGISTRANTS_REGISTERED_LABEL)
+        batch, _vio = mag_ws.batch_update_calls[0]
+        self.assertEqual(len(batch), 2)
+
+    def test_noop_when_magistrants_worksheet_name_empty(self) -> None:
+        mag_ws = FakeWorksheet([["ФИО магистранта", "Телефон", "Регистрация"], ["X", "1", "нет"]])
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        ss = FakeSpreadsheet({"Регистрация": reg_ws, "Магистранты": mag_ws})
+        cfg = BotConfig(
+            telegram_bot_token="dummy",
+            spreadsheet_id="dummy",
+            worksheet_name="Регистрация",
+            project_card_output_folder_url="",
+            google_service_account_json=Path("credentials/unused.json"),
+            log_level=20,
+            persistence_file=Path("state/t.pickle"),
+            magistrants_worksheet_name="",
+            project_snapshot_output_folder_urls=(),
+        )
+        with patch("magister_checking.bot.sheets_repo.get_spreadsheet", return_value=ss):
+            sync_magistrants_registration_status(cfg)
+        self.assertEqual(mag_ws.batch_update_calls, [])
+
+
+class NormalizeWorksheetPhonesTests(unittest.TestCase):
+    def test_8_prefixed_digits_become_plus7(self) -> None:
+        ix = SHEET_HEADER.index("phone")
+        r = [""] * len(SHEET_HEADER)
+        r[ix] = "8 (916) 123-45-67"
+        ws = FakeWorksheet([list(SHEET_HEADER), r])
+        ws.title = "Регистрация"
+        meta = normalize_worksheet_phones_ru_kz(ws)
+        self.assertFalse(meta.get("skipped"))
+        self.assertEqual(meta.get("cells_changed"), 1)
+        self.assertEqual(meta.get("data_rows"), 1)
+        self.assertEqual(ws.rows[1][ix], "+79161234567")
+
+    def test_skip_when_no_phone_column(self) -> None:
+        ws = FakeWorksheet([["a", "b"], ["1", "2"]])
+        ws.title = "X"
+        meta = normalize_worksheet_phones_ru_kz(ws)
+        self.assertTrue(meta.get("skipped"))
+
+    def test_normalize_book_registration_and_naurchuk(self) -> None:
+        pix = SHEET_HEADER.index("phone")
+        rr = [""] * len(SHEET_HEADER)
+        rr[pix] = "9998887766"
+        reg = FakeWorksheet([list(SHEET_HEADER), rr])
+        sup = FakeWorksheet([["ФИО", "телефон"], ["Петров П.", "89160001122"]])
+        ss = FakeSpreadsheet(
+            {
+                "Регистрация": reg,
+                SUPERVISORS_WORKSHEET_NAME: sup,
+            }
+        )
+        cfg = BotConfig(
+            telegram_bot_token="dummy",
+            spreadsheet_id="dummy",
+            worksheet_name="Регистрация",
+            project_card_output_folder_url="",
+            google_service_account_json=Path("credentials/unused.json"),
+            log_level=20,
+            persistence_file=Path("state/t.pickle"),
+            magistrants_worksheet_name="",
+            project_snapshot_output_folder_urls=(),
+        )
+        with patch("magister_checking.bot.sheets_repo.get_spreadsheet", return_value=ss):
+            stats = normalize_phones_to_ru_kz_standard(cfg)
+        self.assertFalse(stats["Регистрация"].get("skipped"))
+        self.assertFalse(stats[SUPERVISORS_WORKSHEET_NAME].get("skipped"))
+        self.assertEqual(reg.rows[1][pix], "+79998887766")
+        self.assertEqual(sup.rows[1][1], "+79160001122")
 
 
 if __name__ == "__main__":

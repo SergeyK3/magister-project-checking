@@ -900,22 +900,72 @@ class HelpAndCommandsTests(unittest.TestCase):
 
 
 class SpravkaHandlerTests(unittest.TestCase):
-    """/spravka — меню: короткий текст или PDF."""
+    """/spravka — canonical check flow plus admin formats."""
 
-    def test_spravka_start_sends_menu_with_two_callbacks(self) -> None:
+    def test_spravka_start_non_admin_runs_canonical_retry(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
         update = _make_update(text="/spravka")
-        with _patch_admin_check(False):
+        with _patch_admin_check(False), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            state = _run(spravka_start(update, ctx))
+        self.assertEqual(state, ConversationHandler.END)
+        m_do.assert_awaited_once()
+        self.assertTrue(m_do.call_args.kwargs.get("only_if_changed"))
+        self.assertEqual(m_do.call_args.kwargs.get("report_trigger"), "spravka")
+
+    def test_spravka_start_admin_without_target_sends_menu(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/spravka")
+        with _patch_admin_check(True):
             state = _run(spravka_start(update, ctx))
         self.assertEqual(state, handlers.SPRAVKA_MENU)
         km = update.message.reply_text.await_args.kwargs["reply_markup"]
-        self.assertEqual(len(km.inline_keyboard), 2)
+        self.assertEqual(len(km.inline_keyboard), 3)
         self.assertEqual(
             km.inline_keyboard[0][0].callback_data, handlers.SPRAVKA_CALLBACK_TELEGRAM
         )
         self.assertEqual(
-            km.inline_keyboard[1][0].callback_data, handlers.SPRAVKA_CALLBACK_PDF
+            km.inline_keyboard[1][0].callback_data, handlers.SPRAVKA_CALLBACK_COMMISSION
+        )
+        self.assertEqual(
+            km.inline_keyboard[2][0].callback_data, handlers.SPRAVKA_CALLBACK_PDF
+        )
+
+    def test_spravka_start_admin_with_target_runs_retry_for_row(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "222"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        row[SHEET_HEADER.index("report_url")] = (
+            "https://docs.google.com/document/d/r/edit"
+        )
+        ws = FakeWorksheet([list(SHEET_HEADER), row])
+        ctx = _FakeContext(ws)
+        update = _make_update(user_id=999, text="/справка 2")
+        with _patch_admin_check(True), _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            state = _run(spravka_start(update, ctx))
+        self.assertEqual(state, ConversationHandler.END)
+        m_do.assert_awaited_once()
+        self.assertEqual(m_do.call_args.kwargs.get("row_number_override"), 2)
+        self.assertTrue(m_do.call_args.kwargs.get("only_if_changed"))
+        self.assertEqual(m_do.call_args.kwargs.get("report_trigger"), "spravka")
+
+    def test_spravka_start_non_admin_with_target_rejected(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/справка 2")
+        with _patch_admin_check(False), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            state = _run(spravka_start(update, ctx))
+        self.assertEqual(state, ConversationHandler.END)
+        m_do.assert_not_awaited()
+        self.assertIn(
+            "только администраторы", update.message.reply_text.await_args.args[0]
         )
 
     def test_spravka_pdf_callback_denies_non_admin(self) -> None:
@@ -943,7 +993,8 @@ class SpravkaHandlerTests(unittest.TestCase):
         self.assertEqual(state, ConversationHandler.END)
         m_do.assert_awaited_once()
         self.assertTrue(m_do.call_args.kwargs.get("skip_status_message"))
-        self.assertFalse(m_do.call_args.kwargs.get("only_if_changed"))
+        self.assertTrue(m_do.call_args.kwargs.get("only_if_changed"))
+        self.assertEqual(m_do.call_args.kwargs.get("report_trigger"), "spravka")
 
     def test_spravka_pdf_admin_goes_to_ask_target(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])

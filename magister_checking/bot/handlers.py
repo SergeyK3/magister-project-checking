@@ -2066,10 +2066,52 @@ async def student_reminder_bulk_confirm_callback(
 
 
 async def spravka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Меню выбора: короткий Telegram-текст справки или PDF для комиссии."""
+    """Канонический публичный вход проверки: ``/справка``.
+
+    Для магистранта команда сразу запускает проверку своей строки через общий
+    retry-пайплайн. Меню форматов остаётся для администратора без аргументов.
+    """
 
     if update.message is None:
         return ConversationHandler.END
+    only_if_changed, admin_target = _parse_recheck_command_parts(
+        update.message.text or "",
+        default_only_if_changed=SPRAVKA_RETRY_ONLY_IF_CHANGED,
+    )
+    if admin_target and not _is_admin(update, context):
+        await update.message.reply_text(
+            "Указать номер строки или ФИО в /справка могут только администраторы.\n\n"
+            "Чтобы получить справку по своей строке, отправьте /справка без аргументов."
+        )
+        return ConversationHandler.END
+
+    if admin_target:
+        cfg = _bot_config(context)
+        worksheet = await _call_blocking(get_worksheet, cfg)
+        row_number_override, err_msg = await _call_blocking(
+            _resolve_project_card_target_row, worksheet, admin_target
+        )
+        if err_msg:
+            await update.message.reply_text(err_msg)
+            return ConversationHandler.END
+        await _do_recheck(
+            update,
+            context,
+            only_if_changed=only_if_changed,
+            row_number_override=row_number_override,
+            report_trigger="spravka",
+        )
+        return ConversationHandler.END
+
+    if not _is_admin(update, context):
+        await _do_recheck(
+            update,
+            context,
+            only_if_changed=only_if_changed,
+            report_trigger="spravka",
+        )
+        return ConversationHandler.END
+
     text_lines = [
         "Выберите формат справки по проекту:\n",
         "• Кратко — для магистранта (этапы, ссылки, диссертация).",
@@ -2157,7 +2199,11 @@ async def spravka_choose(
         except BadRequest:
             pass
         await _do_recheck(
-            update, context, only_if_changed=False, skip_status_message=True
+            update,
+            context,
+            only_if_changed=SPRAVKA_RETRY_ONLY_IF_CHANGED,
+            skip_status_message=True,
+            report_trigger="spravka",
         )
         return ConversationHandler.END
 
@@ -2637,11 +2683,14 @@ async def ask_confirm(
 
 
 RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "diff"}
-"""Ключевые слова, после которых ``/recheck`` работает как ``--only-if-changed``.
+"""Ключевые слова, после которых legacy ``/recheck`` работает как ``--only-if-changed``.
 
-По умолчанию ``/recheck`` запускает полный прогон (handoff §8 — diff_detection
-режим «full by default»), но магистрант может написать ``/recheck quick``,
+По умолчанию legacy ``/recheck`` запускает полный прогон (handoff §8 —
+diff_detection режим «full by default»), но магистрант может написать ``/recheck quick``,
 чтобы получить ответ «без изменений» без повторной нагрузки на Drive."""
+
+SPRAVKA_RETRY_ONLY_IF_CHANGED = True
+"""Канонический публичный ``/справка`` не дублирует снимки при неизменных входах."""
 
 RECHECK_BUTTON_LABEL = "🔄 Перепроверить"
 RECHECK_CALLBACK_DATA = "recheck:full"
@@ -2662,19 +2711,24 @@ def _parse_recheck_callback_row(callback_data: str | None) -> int | None:
         return None
 
 
-def _parse_recheck_command_parts(message_text: str) -> tuple[bool, str | None]:
-    """Разбор текста команды ``/recheck``.
+def _parse_recheck_command_parts(
+    message_text: str, *, default_only_if_changed: bool = False
+) -> tuple[bool, str | None]:
+    """Разбор текста retry-команды.
 
     Возвращает ``(only_if_changed, target)``, где ``target`` — номер строки или ФИО
     (всё, что осталось после удаления токенов ``quick`` / ``only-if-changed`` и т.д.).
-    Только администраторы могут передать непустой ``target`` (см. ``recheck``).
+    Только администраторы могут передать непустой ``target`` (см. ``recheck`` /
+    ``spravka_start``). Для legacy ``/recheck`` default — full; для публичной
+    ``/справка`` default — only-if-changed, чтобы повтор без изменений не писал
+    лишний JSON snapshot.
     """
 
     parts = (message_text or "").strip().split()
     if len(parts) < 2:
-        return False, None
+        return default_only_if_changed, None
     body = parts[1:]
-    only_if_changed = False
+    only_if_changed = default_only_if_changed
     collected: list[str] = []
     for token in body:
         if token.strip().lower() in RECHECK_QUICK_TOKENS:
@@ -2845,6 +2899,7 @@ async def _do_recheck(
     row_number_override: int | None = None,
     attach_recheck_keyboard: bool = True,
     history_source: str = "bot",
+    report_trigger: str = "recheck",
 ) -> None:
     """Общее тело /recheck: вызывается из ``recheck`` и ``recheck_button``.
 
@@ -2941,7 +2996,7 @@ async def _do_recheck(
         return
 
     spravka_text = await _call_blocking(
-        _format_spravka_text_from_recheck, cfg, report, row_number, "recheck"
+        _format_spravka_text_from_recheck, cfg, report, row_number, report_trigger
     )
     await _send_recheck_reply(
         update,

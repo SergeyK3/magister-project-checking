@@ -1,0 +1,216 @@
+"""Phase 0 characterization tests for Telegram command/routing inventory."""
+
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from telegram.ext import CommandHandler, ConversationHandler, MessageHandler
+
+from magister_checking.bot import handlers as h
+from magister_checking.bot.app import build_application
+from magister_checking.bot.config import BotConfig
+
+
+def _make_config(persistence_file: Path) -> BotConfig:
+    return BotConfig(
+        telegram_bot_token="123:ABCdefGHIjklMNOpqrstUVwxyz1234567890",
+        spreadsheet_id="sheet123",
+        worksheet_name="Регистрация",
+        project_card_output_folder_url="",
+        google_service_account_json=Path("credentials/unused.json"),
+        log_level=20,
+        persistence_file=persistence_file,
+        project_snapshot_output_folder_urls=(),
+        magistrants_worksheet_name="",
+    )
+
+
+def _command_tuple(handler: CommandHandler) -> tuple[tuple[str, ...], str]:
+    return (tuple(sorted(handler.commands)), handler.callback.__name__)
+
+
+def _command_inventory(items: list[object]) -> list[tuple[tuple[str, ...], str]]:
+    return [_command_tuple(item) for item in items if isinstance(item, CommandHandler)]
+
+
+class Phase0CommandInventoryTests(unittest.TestCase):
+    def test_bot_command_menu_exact_inventory(self) -> None:
+        self.assertEqual(
+            [(c.command, c.description) for c in h.default_bot_commands()],
+            [
+                ("start", "Регистрация или продолжить анкету"),
+                ("help", "Список команд и подсказки"),
+                ("recheck", "Повторить проверку отчёта"),
+                ("cancel", "Прервать текущий диалог"),
+                ("admin", "Панель администратора"),
+                ("project_card", "PDF-карточка проекта (админы)"),
+                ("student_message", "Сообщение магистранту (админы)"),
+                (
+                    "student_message_bulk",
+                    "Стандартное напоминание списку строк (админы)",
+                ),
+                ("spravka", "Справка: магистр., комиссия, PDF, JSON→текст"),
+                ("stats", "Сводка Dashboard в чат (админы)"),
+                ("sync_dashboard", "Обновить лист Dashboard (админы)"),
+                ("sync_magistrants", "Синхронизация листа магистрантов (админы)"),
+                ("register", "Первичная регистрация (магистрант)"),
+                ("status", "Статус магистранта / научрука"),
+                (
+                    "unreg",
+                    "Незарегистрированные (научрук); админ: ФИО научрука — превью",
+                ),
+                (
+                    "reg_list",
+                    "Зарегистрированные (научрук); админ: ФИО научрука — превью",
+                ),
+            ],
+        )
+
+    def test_current_fsm_state_numbers_are_frozen(self) -> None:
+        self.assertEqual(
+            {
+                "ASK_FIELD": h.ASK_FIELD,
+                "ASK_CONFIRM": h.ASK_CONFIRM,
+                "BIND_ASK_FIO": h.BIND_ASK_FIO,
+                "BIND_CONFIRM": h.BIND_CONFIRM,
+                "PROJECT_CARD_ASK_TARGET": h.PROJECT_CARD_ASK_TARGET,
+                "SPRAVKA_MENU": h.SPRAVKA_MENU,
+                "SPRAVKA_ASK_TARGET": h.SPRAVKA_ASK_TARGET,
+                "ROLE_PICK": h.ROLE_PICK,
+                "CLAIM_ASK_FIO": h.CLAIM_ASK_FIO,
+                "CLAIM_CONFIRM": h.CLAIM_CONFIRM,
+                "STUDENT_MSG_ASK_TARGET": h.STUDENT_MSG_ASK_TARGET,
+                "STUDENT_MSG_PICK_KIND": h.STUDENT_MSG_PICK_KIND,
+                "STUDENT_MSG_ASK_EXTRA": h.STUDENT_MSG_ASK_EXTRA,
+                "STUDENT_MSG_ASK_CUSTOM": h.STUDENT_MSG_ASK_CUSTOM,
+                "STUDENT_MSG_CONFIRM": h.STUDENT_MSG_CONFIRM,
+                "STUDENT_MSG_BULK_ASK_ROWS": h.STUDENT_MSG_BULK_ASK_ROWS,
+                "STUDENT_MSG_BULK_CONFIRM": h.STUDENT_MSG_BULK_CONFIRM,
+                "PIN_VERIFY_INPUT": h.PIN_VERIFY_INPUT,
+            },
+            {
+                "ASK_FIELD": 0,
+                "ASK_CONFIRM": 1,
+                "BIND_ASK_FIO": 2,
+                "BIND_CONFIRM": 3,
+                "PROJECT_CARD_ASK_TARGET": 4,
+                "SPRAVKA_MENU": 5,
+                "SPRAVKA_ASK_TARGET": 6,
+                "ROLE_PICK": 7,
+                "CLAIM_ASK_FIO": 8,
+                "CLAIM_CONFIRM": 9,
+                "STUDENT_MSG_ASK_TARGET": 10,
+                "STUDENT_MSG_PICK_KIND": 11,
+                "STUDENT_MSG_ASK_EXTRA": 12,
+                "STUDENT_MSG_ASK_CUSTOM": 13,
+                "STUDENT_MSG_CONFIRM": 14,
+                "STUDENT_MSG_BULK_ASK_ROWS": 15,
+                "STUDENT_MSG_BULK_CONFIRM": 16,
+                "PIN_VERIFY_INPUT": 17,
+            },
+        )
+
+    def test_application_top_level_command_routing_inventory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+
+        self.assertEqual(
+            _command_inventory(app.handlers.get(-1, [])),
+            [(("help",), "help_command")],
+        )
+        self.assertEqual(
+            _command_inventory(app.handlers.get(0, [])),
+            [
+                (("start",), "group_start_use_private_chat"),
+                (("admin",), "admin_menu"),
+                (("stats",), "admin_stats"),
+                (("sync_dashboard",), "admin_sync_dashboard"),
+                (("sync_magistrants",), "admin_sync_magistrants"),
+                (("status",), "status_command"),
+                (("unreg",), "supervisor_unregistered_list_command"),
+                (("reg_list",), "supervisor_registered_list_command"),
+                (("recheck",), "recheck"),
+            ],
+        )
+
+    def test_conversation_command_routing_inventory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+        conv = next(
+            item
+            for item in app.handlers.get(0, [])
+            if isinstance(item, ConversationHandler)
+        )
+
+        self.assertEqual(
+            _command_inventory(conv.entry_points),
+            [
+                (("start",), "start"),
+                (("register",), "register_command"),
+                (("project_card",), "project_card_start"),
+                (("student_message",), "student_reminder_start"),
+                (("student_message_bulk",), "student_message_bulk_start"),
+                (("spravka",), "spravka_start"),
+            ],
+        )
+        self.assertEqual(
+            sorted(conv.states.keys()),
+            sorted(
+                [
+                h.ASK_FIELD,
+                h.ASK_CONFIRM,
+                h.BIND_ASK_FIO,
+                h.BIND_CONFIRM,
+                h.CLAIM_ASK_FIO,
+                h.CLAIM_CONFIRM,
+                h.PIN_VERIFY_INPUT,
+                h.PROJECT_CARD_ASK_TARGET,
+                h.ROLE_PICK,
+                h.SPRAVKA_ASK_TARGET,
+                h.SPRAVKA_MENU,
+                h.STUDENT_MSG_ASK_CUSTOM,
+                h.STUDENT_MSG_ASK_EXTRA,
+                h.STUDENT_MSG_ASK_TARGET,
+                h.STUDENT_MSG_BULK_ASK_ROWS,
+                h.STUDENT_MSG_BULK_CONFIRM,
+                h.STUDENT_MSG_CONFIRM,
+                h.STUDENT_MSG_PICK_KIND,
+                ]
+            ),
+        )
+        self.assertEqual(
+            _command_inventory(conv.fallbacks),
+            [
+                (("cancel",), "cancel"),
+                (("start",), "start"),
+                (("register",), "register_command"),
+                (("project_card",), "project_card_start"),
+                (("student_message",), "student_reminder_start"),
+                (("student_message_bulk",), "student_message_bulk_start"),
+                (("spravka",), "spravka_start"),
+            ],
+        )
+        self.assertEqual(
+            _command_inventory(conv.states[h.ASK_FIELD]),
+            [(("skip",), "skip_field")],
+        )
+        self.assertEqual(
+            _command_inventory(conv.states[h.BIND_ASK_FIO]),
+            [(("skip",), "skip_bind")],
+        )
+
+    def test_json_snapshot_handler_stays_readonly_side_channel(self) -> None:
+        with TemporaryDirectory() as tmp:
+            app = build_application(_make_config(Path(tmp) / "state.pickle"))
+
+        group_1_message_handlers = [
+            item for item in app.handlers.get(1, []) if isinstance(item, MessageHandler)
+        ]
+        self.assertEqual(len(group_1_message_handlers), 1)
+        self.assertIs(group_1_message_handlers[0].callback, h.on_project_snapshot_json_file)
+
+
+if __name__ == "__main__":
+    unittest.main()

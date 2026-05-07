@@ -14,6 +14,8 @@ import secrets
 import time
 from dataclasses import dataclass
 
+from magister_checking.observability import hash_value, id_tail
+
 logger = logging.getLogger("magistrcheckbot")
 
 _PIN_LOCK = asyncio.Lock()
@@ -83,9 +85,9 @@ async def issue_pin_challenge(
         json.dumps(
             {
                 "event": "pin_issued",
-                "telegram_id": key,
-                "phone_normalized": phone,
-                "pin_plaintext": plain,
+                "telegram_user_hash": hash_value(key),
+                "phone_hash": hash_value(phone),
+                "phone_tail": id_tail(phone, length=2),
                 "ttl_sec": PIN_TTL_SEC,
             },
             ensure_ascii=False,
@@ -119,7 +121,11 @@ async def verify_pin_challenge(telegram_user_id: str, entered: str) -> str:
             logger.info(
                 "%s",
                 json.dumps(
-                    {"event": "pin_verify", "telegram_id": key, "status": "expired"},
+                    {
+                        "event": "pin_verify",
+                        "telegram_user_hash": hash_value(key),
+                        "status": "expired",
+                    },
                     ensure_ascii=False,
                 ),
             )
@@ -130,7 +136,11 @@ async def verify_pin_challenge(telegram_user_id: str, entered: str) -> str:
             logger.info(
                 "%s",
                 json.dumps(
-                    {"event": "pin_verify", "telegram_id": key, "status": "locked"},
+                    {
+                        "event": "pin_verify",
+                        "telegram_user_hash": hash_value(key),
+                        "status": "locked",
+                    },
                     ensure_ascii=False,
                 ),
             )
@@ -147,7 +157,7 @@ async def verify_pin_challenge(telegram_user_id: str, entered: str) -> str:
                 json.dumps(
                     {
                         "event": "pin_verify",
-                        "telegram_id": key,
+                        "telegram_user_hash": hash_value(key),
                         "status": status,
                         "attempts": ch.attempts,
                     },
@@ -167,7 +177,7 @@ async def verify_pin_challenge(telegram_user_id: str, entered: str) -> str:
                 json.dumps(
                     {
                         "event": "pin_verify",
-                        "telegram_id": key,
+                        "telegram_user_hash": hash_value(key),
                         "status": status,
                         "attempts": ch.attempts,
                     },
@@ -182,9 +192,10 @@ async def verify_pin_challenge(telegram_user_id: str, entered: str) -> str:
             json.dumps(
                 {
                     "event": "pin_verify",
-                    "telegram_id": key,
+                    "telegram_user_hash": hash_value(key),
                     "status": "ok",
-                    "phone_normalized": ch.phone_normalized,
+                    "phone_hash": hash_value(ch.phone_normalized),
+                    "phone_tail": id_tail(ch.phone_normalized, length=2),
                 },
                 ensure_ascii=False,
             ),

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -74,3 +76,18 @@ class PinVerifyTests(unittest.IsolatedAsyncioTestCase):
         await clear_challenge("3")
         self.assertIsNone(await issue_pin_challenge("", "+79005553535"))
         self.assertIsNone(await issue_pin_challenge("3", ""))
+
+    async def test_pin_logs_do_not_expose_plaintext_or_full_phone(self) -> None:
+        await clear_challenge("4")
+        logger = logging.getLogger("magistrcheckbot")
+        with self.assertLogs(logger, level="INFO") as cm:
+            issued = await issue_pin_challenge("4", "+79005553535")
+        self.assertIsNotNone(issued)
+        assert issued is not None
+        plain, _length = issued
+        payload = json.loads(cm.records[-1].getMessage())
+
+        self.assertNotIn("pin_plaintext", payload)
+        self.assertNotIn("phone_normalized", payload)
+        self.assertNotIn(plain, cm.output[-1])
+        self.assertNotIn("+79005553535", cm.output[-1])

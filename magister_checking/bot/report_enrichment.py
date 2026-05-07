@@ -29,6 +29,12 @@ from magister_checking.drive_urls import (
     extract_google_file_id,
     is_google_drive_folder_url,
 )
+from magister_checking.observability import (
+    google_error_fields,
+    hash_value,
+    id_tail,
+    structured_extra,
+)
 from magister_checking.report_parser import ParsedReport, parse_intermediate_report
 from magister_checking.summary_pipeline import resolve_report_google_doc_id
 
@@ -44,6 +50,58 @@ def _service_account_credentials(config: BotConfig) -> Credentials:
     return Credentials.from_service_account_file(
         str(config.google_service_account_json),
         scopes=GOOGLE_SCOPES,
+    )
+
+
+def _log_google_success(
+    *,
+    api: str,
+    method: str,
+    operation: str,
+    resource_kind: str = "",
+    resource_id: str = "",
+) -> None:
+    logger.info(
+        "google.api.success",
+        extra=structured_extra(
+            event="google.api.success",
+            category="google.api",
+            api=api,
+            method=method,
+            operation=operation,
+            status="success",
+            resource_kind=resource_kind,
+            resource_id_hash=hash_value(resource_id),
+            file_id_hash=hash_value(resource_id),
+            file_id_tail=id_tail(resource_id),
+        ),
+    )
+
+
+def _log_google_error(
+    exc: BaseException,
+    *,
+    api: str,
+    method: str,
+    operation: str,
+    resource_kind: str = "",
+    resource_id: str = "",
+) -> None:
+    logger.warning(
+        "google.api.error",
+        extra=structured_extra(
+            event="google.api.error",
+            category="google.api",
+            api=api,
+            method=method,
+            operation=operation,
+            status="failed",
+            resource_kind=resource_kind,
+            resource_id_hash=hash_value(resource_id),
+            file_id_hash=hash_value(resource_id),
+            file_id_tail=id_tail(resource_id),
+            **google_error_fields(exc),
+        ),
     )
 
 
@@ -175,7 +233,22 @@ def _analyze_dissertation_fields(
     file_id = extract_google_file_id(dissertation_url)
     try:
         diss_doc = docs_service.documents().get(documentId=file_id).execute()
-    except Exception:  # noqa: BLE001
+        _log_google_success(
+            api="docs",
+            method="documents.get",
+            operation="enrich_dissertation_document",
+            resource_kind="dissertation",
+            resource_id=file_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_google_error(
+            exc,
+            api="docs",
+            method="documents.get",
+            operation="enrich_dissertation_document",
+            resource_kind="dissertation",
+            resource_id=file_id,
+        )
         data = download_drive_file_bytes(drive_service=drive_service, file_id=file_id)
         if not data:
             return (
@@ -194,7 +267,7 @@ def _analyze_dissertation_fields(
         dissertation_title = detect_dissertation_title_from_docx_bytes(data)
         dissertation_language = detect_dissertation_language_from_docx_bytes(data)
         warn_if_unusual_language(
-            dissertation_language, context=f"dissertation_url={dissertation_url}"
+            dissertation_language, context=f"dissertation_file_hash={hash_value(file_id)}"
         )
         return pages_total, sources_count, compliance, dissertation_title, dissertation_language
 
@@ -209,7 +282,7 @@ def _analyze_dissertation_fields(
     dissertation_title = detect_dissertation_title_from_gdoc(diss_doc)
     dissertation_language = detect_dissertation_language_from_gdoc(diss_doc)
     warn_if_unusual_language(
-        dissertation_language, context=f"dissertation_url={dissertation_url}"
+        dissertation_language, context=f"dissertation_file_hash={hash_value(file_id)}"
     )
     return pages_total, sources_count, compliance, dissertation_title, dissertation_language
 
@@ -314,6 +387,13 @@ def build_sheet_enrichment(
             report_url, drive_service=drive_service
         )
     except Exception as exc:  # noqa: BLE001
+        _log_google_error(
+            exc,
+            api="drive",
+            method="files.get",
+            operation="resolve_report_google_doc_id",
+            resource_kind="report_document",
+        )
         logger.warning(
             "report_enrichment: resolve_report_google_doc_id failed: %s",
             _exc_one_line(exc),
@@ -334,6 +414,14 @@ def build_sheet_enrichment(
     try:
         report_doc = docs_service.documents().get(documentId=report_doc_id).execute()
     except Exception as exc:  # noqa: BLE001
+        _log_google_error(
+            exc,
+            api="docs",
+            method="documents.get",
+            operation="enrich_report_document",
+            resource_kind="report_document",
+            resource_id=report_doc_id,
+        )
         logger.warning(
             "report_enrichment: documents().get(report) failed: %s",
             _exc_one_line(exc, limit=400),
@@ -345,6 +433,13 @@ def build_sheet_enrichment(
             dissertation_detail=_DETAIL_ENRICHMENT_SKIP_CHILD_LINKS,
             publication_detail=_DETAIL_ENRICHMENT_SKIP_CHILD_LINKS,
         )
+    _log_google_success(
+        api="docs",
+        method="documents.get",
+        operation="enrich_report_document",
+        resource_kind="report_document",
+        resource_id=report_doc_id,
+    )
 
     try:
         parsed = parse_intermediate_report(report_doc)

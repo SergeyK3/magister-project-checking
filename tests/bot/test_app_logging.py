@@ -169,6 +169,29 @@ class ConfigureLoggingTests(unittest.TestCase):
         # Без exc_info поле не появляется (минимизация шума).
         self.assertNotIn("exc_info", payload)
 
+    def test_json_formatter_emits_whitelisted_extra_fields(self) -> None:
+        record = logging.LogRecord(
+            name="magistrcheckbot.unit",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=42,
+            msg="retry.row_check.completed",
+            args=(),
+            exc_info=None,
+            func="some_func",
+        )
+        record.event = "retry.row_check.completed"
+        record.trace_id = "tr_test"
+        record.row_number = 7
+        record.phone_normalized = "+77051234567"
+
+        payload = json.loads(_JsonLogFormatter().format(record))
+
+        self.assertEqual(payload["event"], "retry.row_check.completed")
+        self.assertEqual(payload["trace_id"], "tr_test")
+        self.assertEqual(payload["row_number"], 7)
+        self.assertNotIn("phone_normalized", payload)
+
     def test_logger_exception_includes_traceback_in_file(self) -> None:
         """``logger.exception(...)`` пишет ``exc_info`` с traceback в JSON-файл.
 

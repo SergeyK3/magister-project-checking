@@ -2048,6 +2048,7 @@ async def spravka_receive_target(
             apply=True,
             only_if_changed=False,
             history_source="bot",
+            trigger="spravka",
         )
     except ValueError as exc:
         await _try_mark_recheck_error(cfg, row_number)
@@ -2608,6 +2609,7 @@ async def _do_recheck(
             apply=True,
             only_if_changed=only_if_changed,
             history_source=history_source,
+            trigger=report_trigger,
         )
     except ValueError as exc:
         await _try_mark_recheck_error(cfg, row_number)

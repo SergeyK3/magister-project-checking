@@ -16,6 +16,12 @@ from googleapiclient.http import MediaIoBaseDownload
 from magister_checking.bot.config import BotConfig
 from magister_checking.bot.sheets_repo import GOOGLE_SCOPES
 from magister_checking.drive_urls import extract_google_folder_id
+from magister_checking.observability import (
+    google_error_fields,
+    hash_value,
+    id_tail,
+    structured_extra,
+)
 from magister_checking.snapshot_drive import _snapshot_folder_urls
 
 logger = logging.getLogger(__name__)
@@ -70,6 +76,20 @@ def list_snapshot_json_candidates(
         if page_token:
             kwargs["pageToken"] = page_token
         resp = drive.files().list(**kwargs).execute()
+        logger.info(
+            "google.api.success",
+            extra=structured_extra(
+                event="google.api.success",
+                category="google.api",
+                api="drive",
+                method="files.list",
+                operation="snapshot_pick_list",
+                status="success",
+                row_number=row_number,
+                folder_id_hash=hash_value(folder_id),
+                folder_id_tail=id_tail(folder_id),
+            ),
+        )
         for f in resp.get("files", []):
             name = str(f.get("name") or "")
             if name_re.match(name):
@@ -85,6 +105,16 @@ def pick_latest_snapshot_for_row(config: BotConfig, row_number: int) -> LatestSn
 
     urls = _snapshot_folder_urls(config)
     if not urls:
+        logger.info(
+            "snapshot.pick.not_configured",
+            extra=structured_extra(
+                event="snapshot.pick.not_configured",
+                category="snapshot.pick",
+                operation="pick_latest_snapshot_for_row",
+                status="skipped",
+                row_number=row_number,
+            ),
+        )
         return None
 
     best: LatestSnapshotPick | None = None
@@ -93,19 +123,110 @@ def pick_latest_snapshot_for_row(config: BotConfig, row_number: int) -> LatestSn
     try:
         creds = _service_account_creds_from_config(config)
         drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception:  # noqa: BLE001
-        logger.exception("Drive API: подготовка списка снимков")
+        logger.info(
+            "google.api.success",
+            extra=structured_extra(
+                event="google.api.success",
+                category="google.api",
+                api="drive",
+                method="build",
+                operation="snapshot_pick_prepare",
+                status="success",
+                row_number=row_number,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "snapshot.pick.drive_prepare_failed",
+            extra=structured_extra(
+                event="snapshot.pick.drive_prepare_failed",
+                category="snapshot.pick",
+                operation="pick_latest_snapshot_for_row",
+                status="failed",
+                row_number=row_number,
+                **google_error_fields(exc),
+            ),
+        )
+        logger.warning(
+            "google.api.error",
+            extra=structured_extra(
+                event="google.api.error",
+                category="google.api",
+                api="drive",
+                method="build",
+                operation="snapshot_pick_prepare",
+                status="failed",
+                row_number=row_number,
+                **google_error_fields(exc),
+            ),
+        )
         return None
 
+    candidate_count = 0
     for folder_url in urls:
         try:
             folder_id = extract_google_folder_id(folder_url)
         except ValueError as exc:
-            logger.warning("pick_latest_snapshot: папка %s — %s", folder_url, exc)
+            logger.warning(
+                "snapshot.pick.invalid_folder_url",
+                extra=structured_extra(
+                    event="snapshot.pick.invalid_folder_url",
+                    category="snapshot.pick",
+                    operation="pick_latest_snapshot_for_row",
+                    status="skipped",
+                    row_number=row_number,
+                    error_class=type(exc).__name__,
+                ),
+            )
             continue
 
-        candidates = list_snapshot_json_candidates(
-            folder_id=folder_id, drive=drive, row_number=row_number
+        try:
+            candidates = list_snapshot_json_candidates(
+                folder_id=folder_id, drive=drive, row_number=row_number
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "snapshot.pick.list_failed",
+                extra=structured_extra(
+                    event="snapshot.pick.list_failed",
+                    category="snapshot.pick",
+                    operation="pick_latest_snapshot_for_row",
+                    status="failed",
+                    row_number=row_number,
+                    folder_id_hash=hash_value(folder_id),
+                    folder_id_tail=id_tail(folder_id),
+                    **google_error_fields(exc),
+                ),
+            )
+            logger.warning(
+                "google.api.error",
+                extra=structured_extra(
+                    event="google.api.error",
+                    category="google.api",
+                    api="drive",
+                    method="files.list",
+                    operation="snapshot_pick_list",
+                    status="failed",
+                    row_number=row_number,
+                    folder_id_hash=hash_value(folder_id),
+                    folder_id_tail=id_tail(folder_id),
+                    **google_error_fields(exc),
+                ),
+            )
+            raise
+        candidate_count += len(candidates)
+        logger.info(
+            "snapshot.pick.folder_listed",
+            extra=structured_extra(
+                event="snapshot.pick.folder_listed",
+                category="snapshot.pick",
+                operation="pick_latest_snapshot_for_row",
+                status="success",
+                row_number=row_number,
+                folder_id_hash=hash_value(folder_id),
+                folder_id_tail=id_tail(folder_id),
+                snapshot_candidate_count=len(candidates),
+            ),
         )
         for cand in candidates:
             fid = str(cand.get("id") or "")
@@ -117,21 +238,106 @@ def pick_latest_snapshot_for_row(config: BotConfig, row_number: int) -> LatestSn
                 best_mtime = mt
                 best = LatestSnapshotPick(file_id=fid, name=name, modified_time=mt)
 
+    if best is None:
+        logger.info(
+            "snapshot.pick.not_found",
+            extra=structured_extra(
+                event="snapshot.pick.not_found",
+                category="snapshot.pick",
+                operation="pick_latest_snapshot_for_row",
+                status="not_found",
+                row_number=row_number,
+                folder_count=len(urls),
+                snapshot_candidate_count=candidate_count,
+                snapshot_pick_result="not_found",
+            ),
+        )
+        return None
+
+    logger.info(
+        "snapshot.pick.found",
+        extra=structured_extra(
+            event="snapshot.pick.found",
+            category="snapshot.pick",
+            operation="pick_latest_snapshot_for_row",
+            status="found",
+            row_number=row_number,
+            folder_count=len(urls),
+            snapshot_candidate_count=candidate_count,
+            snapshot_pick_result="found",
+            file_id_hash=hash_value(best.file_id),
+            file_id_tail=id_tail(best.file_id),
+        ),
+    )
     return best
 
 
 def download_drive_file_bytes(config: BotConfig, file_id: str) -> bytes:
     """Читает содержимое файла на Drive (в т.ч. Shared Drive)."""
 
-    creds = _service_account_creds_from_config(config)
-    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
-    fh = io.BytesIO()
-    req = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
-    downloader = MediaIoBaseDownload(fh, req)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return fh.getvalue()
+    try:
+        creds = _service_account_creds_from_config(config)
+        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        fh = io.BytesIO()
+        req = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        data = fh.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "snapshot.pick.download_failed",
+            extra=structured_extra(
+                event="snapshot.pick.download_failed",
+                category="snapshot.pick",
+                operation="download_drive_file_bytes",
+                status="failed",
+                file_id_hash=hash_value(file_id),
+                file_id_tail=id_tail(file_id),
+                **google_error_fields(exc),
+            ),
+        )
+        logger.warning(
+            "google.api.error",
+            extra=structured_extra(
+                event="google.api.error",
+                category="google.api",
+                api="drive",
+                method="files.get_media",
+                operation="snapshot_pick_download",
+                status="failed",
+                file_id_hash=hash_value(file_id),
+                file_id_tail=id_tail(file_id),
+                **google_error_fields(exc),
+            ),
+        )
+        raise
+    logger.info(
+        "google.api.success",
+        extra=structured_extra(
+            event="google.api.success",
+            category="google.api",
+            api="drive",
+            method="files.get_media",
+            operation="snapshot_pick_download",
+            status="success",
+            file_id_hash=hash_value(file_id),
+            file_id_tail=id_tail(file_id),
+        ),
+    )
+    logger.info(
+        "snapshot.pick.download_success",
+        extra=structured_extra(
+            event="snapshot.pick.download_success",
+            category="snapshot.pick",
+            operation="download_drive_file_bytes",
+            status="success",
+            file_id_hash=hash_value(file_id),
+            file_id_tail=id_tail(file_id),
+        ),
+    )
+    return data
 
 
 def wrap_commission_html_for_browser(fragment: str) -> str:

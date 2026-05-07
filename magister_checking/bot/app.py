@@ -94,6 +94,7 @@ from magister_checking.bot.handlers import (
     supervisor_registered_list_command,
     supervisor_unregistered_list_command,
 )
+from magister_checking.observability import safe_log_record_fields
 
 logger = logging.getLogger("magistrcheckbot")
 
@@ -141,6 +142,7 @@ class _JsonLogFormatter(logging.Formatter):
             "lineno": record.lineno,
             "message": record.getMessage(),
         }
+        payload.update(safe_log_record_fields(record))
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)

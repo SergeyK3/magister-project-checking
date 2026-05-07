@@ -310,7 +310,7 @@ class Stage3TypePolicyTests(unittest.TestCase):
         self.assertTrue(any("«Заключение ЛКБ»" in i for i in result.issues))
         self.assertTrue(
             any(
-                "конкретный pdf файл" in i.lower()
+                "папк" in i.lower() and "лкб" in i.lower()
                 for i in result.issues
             )
         )

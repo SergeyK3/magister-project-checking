@@ -324,11 +324,26 @@ def _extra_kind_mismatch_hints(
     parts: list[str] = []
     pk = policy.column_key
 
-    if pk == "lkb_url" and kind == "drive_folder":
-        parts.append(
-            " для ЛКБ нужно указывать ссылку не на папку, "
-            "а на конкретный pdf файл."
-        )
+    if pk == "lkb_url":
+        if kind == "drive_folder" or _folder_word_in_google_url(url):
+            parts.append(
+                " Ссылка содержит …/folders/… (папка Google Drive). Для заключения ЛКБ "
+                "нужна ссылка на конкретный файл (PDF или Google Doc), а не на каталог."
+            )
+
+    if pk == "dissertation_url":
+        if kind == "drive_folder" or _folder_word_in_google_url(url):
+            parts.append(
+                " Ссылка ведёт на папку Drive. Для диссертации укажите Google Doc или файл .docx "
+                "на Drive, а не папку (в адресе не должно быть …/folders/…)."
+            )
+
+    if pk == "publication_url":
+        if kind == "drive_folder" or _folder_word_in_google_url(url):
+            parts.append(
+                " Ссылка ведёт на папку Drive. Для публикации нужен конкретный документ (PDF или Google Doc), "
+                "а не каталог."
+            )
 
     if pk == "report_url":
         if kind == "drive_folder" or _folder_word_in_google_url(url):

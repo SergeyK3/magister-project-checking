@@ -405,6 +405,9 @@ def build_application(config: BotConfig) -> Application:
             ),
         ],
         allow_reentry=True,
+        # CallbackQueryHandler в states (inline-кнопки): иначе PTB предупреждает,
+        # что отслеживание по сообщению выключено — см. FAQ про per_*.
+        per_message=True,
     )
 
     application.add_handler(conv_handler)

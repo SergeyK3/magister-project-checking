@@ -1,0 +1,64 @@
+@startuml
+title User Identification Algorithm
+
+[*] --> START
+
+state "Команда /start" as START
+state "Запись Telegram ID\nво временную переменную" as SAVE_TG
+
+state "TgID найден\nв Магистранты?" as Q_MAG_TG <<choice>>
+state "TgID найден\nв админ?" as Q_ADMIN_TG <<choice>>
+state "TgID найден\nв научрук?" as Q_SUP_TG <<choice>>
+
+state "Запрос ФИО" as ASK_FIO
+state "Запись ФИО\nво временную переменную" as SAVE_FIO
+
+state "ФИО найдено\nв Магистранты?" as Q_MAG_FIO <<choice>>
+state "ФИО найдено\nв админ?" as Q_ADMIN_FIO <<choice>>
+state "ФИО найдено\nв научрук?" as Q_SUP_FIO <<choice>>
+
+state "Запись TgID и данных\nв таблицу Регистрация" as BIND_MAG
+state "Запись TgID и данных\nв таблицу админ" as BIND_ADMIN
+state "Запись TgID и данных\nв таблицу научрук" as BIND_SUP
+
+state "Меню магистранта" as MENU_MAG
+state "Меню админа" as MENU_ADMIN
+state "Меню научрука" as MENU_SUP
+state "Пользователь не найден.\nОбратитесь к научруку" as DENIED
+
+START --> SAVE_TG
+SAVE_TG --> Q_MAG_TG
+
+Q_MAG_TG --> MENU_MAG : да
+Q_MAG_TG --> Q_ADMIN_TG : нет
+
+Q_ADMIN_TG --> MENU_ADMIN : да
+Q_ADMIN_TG --> Q_SUP_TG : нет
+
+Q_SUP_TG --> MENU_SUP : да
+Q_SUP_TG --> ASK_FIO : нет
+
+ASK_FIO --> SAVE_FIO
+SAVE_FIO --> Q_MAG_FIO
+
+Q_MAG_FIO --> BIND_MAG : да
+Q_MAG_FIO --> Q_ADMIN_FIO : нет
+
+BIND_MAG --> MENU_MAG
+
+Q_ADMIN_FIO --> BIND_ADMIN : да
+Q_ADMIN_FIO --> Q_SUP_FIO : нет
+
+BIND_ADMIN --> MENU_ADMIN
+
+Q_SUP_FIO --> BIND_SUP : да
+Q_SUP_FIO --> DENIED : нет
+
+BIND_SUP --> MENU_SUP
+
+MENU_MAG --> [*]
+MENU_ADMIN --> [*]
+MENU_SUP --> [*]
+DENIED --> [*]
+
+@enduml

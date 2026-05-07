@@ -24,7 +24,11 @@ from magister_checking.dissertation_metrics import (
     count_pdf_pages_via_drive_export,
     download_drive_file_bytes,
 )
-from magister_checking.drive_urls import extract_google_file_id, is_google_drive_folder_url
+from magister_checking.drive_urls import (
+    classify_drive_url,
+    extract_google_file_id,
+    is_google_drive_folder_url,
+)
 from magister_checking.report_parser import ParsedReport, parse_intermediate_report
 from magister_checking.summary_pipeline import resolve_report_google_doc_id
 
@@ -214,7 +218,66 @@ def _link_value(url: str | None) -> str:
     return (url or "").strip() or URL_MISSING
 
 
-def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, str]:
+def _is_drive_folder_url(url: str) -> bool:
+    u = (url or "").strip()
+    return bool(u) and (
+        is_google_drive_folder_url(u) or classify_drive_url(u) == "drive_folder"
+    )
+
+
+def _link_value_document_field(
+    url: str | None,
+    link_label: str,
+    student_warnings: list[str] | None,
+    *,
+    field_title: str,
+) -> str:
+    """ЛКБ / диссертация / публикация: не папка Drive, а конкретный документ."""
+
+    u = (url or "").strip()
+    if not u:
+        return URL_MISSING
+    if _is_drive_folder_url(u):
+        if student_warnings is not None:
+            student_warnings.append(
+                f"«{field_title}»: в промежуточном отчёте указана ссылка на папку Google Drive "
+                f"(…/folders/…). Нужна ссылка на конкретный файл документа, не на каталог — исправьте в отчёте."
+            )
+        return _link_column_error(
+            link_label,
+            "в отчёте указана ссылка на папку Google Drive (…/folders/…); нужен конкретный документ (файл), не каталог.",
+        )
+    return u
+
+
+def _link_value_project_folder_field(
+    url: str | None,
+    student_warnings: list[str] | None,
+) -> str:
+    """Папка магистерского проекта: только каталог …/folders/…."""
+
+    u = (url or "").strip()
+    if not u:
+        return URL_MISSING
+    if is_google_drive_folder_url(u):
+        return u
+    if student_warnings is not None:
+        student_warnings.append(
+            "«Папка магистерского проекта»: в промежуточном отчёте должна быть ссылка именно на папку Google Drive "
+            "(в адресе …/folders/…), а не на один файл или документ."
+        )
+    return _link_column_error(
+        _LINK_LABEL_PROJECT,
+        "ожидается ссылка на папку Google Drive (в адресе …/folders/…), а не на отдельный файл или документ.",
+    )
+
+
+def build_sheet_enrichment(
+    config: BotConfig,
+    user_form: UserForm,
+    *,
+    student_warnings: list[str] | None = None,
+) -> dict[str, str]:
     """Собирает доп. поля для листа регистрации по report_url.
 
     Возвращает только значения, которые можно положить в пользовательские
@@ -222,6 +285,10 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
 
     Сбой на этапе «разрешить id / скачать Doc / разобрать таблицу» обрабатывается
     отдельно с понятными сообщениями **по каждому из четырёх полей ссылок**.
+
+    ``student_warnings``: если передан список, в него добавляются короткие фразы
+    для показа магистранту в Telegram при сохранении регистрации (папка вместо
+    документа и наоборот).
     """
 
     report_url = (user_form.report_url or "").strip()
@@ -303,41 +370,66 @@ def build_sheet_enrichment(config: BotConfig, user_form: UserForm) -> dict[str, 
     )
     publication_url = parsed.results_article_url or parsed.review_article_url or ""
 
-    try:
-        (
-            pages_total,
-            sources_count,
-            compliance,
-            dissertation_title,
-            dissertation_language,
-        ) = _analyze_dissertation_fields(
-            docs_service=docs_service,
-            drive_service=drive_service,
-            dissertation_url=parsed.dissertation_url,
-            parsed=parsed,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "report_enrichment: _analyze_dissertation_fields failed: %s",
-            _exc_one_line(exc),
-        )
-        (
-            pages_total,
-            sources_count,
-            compliance,
-            dissertation_title,
-            dissertation_language,
-        ) = _empty_metric_result()
-        pages_total = _link_column_error(
-            "Метрики диссертации",
-            f"ошибка анализа файла диссертации ({_exc_one_line(exc)})",
-        )
+    diss_raw = (parsed.dissertation_url or "").strip()
+    diss_cell = _link_value_document_field(
+        parsed.dissertation_url,
+        _LINK_LABEL_DISS,
+        student_warnings,
+        field_title="Диссертация",
+    )
+    pages_total = ""
+    sources_count = ""
+    compliance = ""
+    dissertation_title = ""
+    dissertation_language = ""
+    if diss_raw and not _is_drive_folder_url(diss_raw):
+        try:
+            (
+                pages_total,
+                sources_count,
+                compliance,
+                dissertation_title,
+                dissertation_language,
+            ) = _analyze_dissertation_fields(
+                docs_service=docs_service,
+                drive_service=drive_service,
+                dissertation_url=parsed.dissertation_url,
+                parsed=parsed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "report_enrichment: _analyze_dissertation_fields failed: %s",
+                _exc_one_line(exc),
+            )
+            (
+                pages_total,
+                sources_count,
+                compliance,
+                dissertation_title,
+                dissertation_language,
+            ) = _empty_metric_result()
+            pages_total = _link_column_error(
+                "Метрики диссертации",
+                f"ошибка анализа файла диссертации ({_exc_one_line(exc)})",
+            )
 
     return {
-        "project_folder_url": _link_value(project_folder_url),
-        "lkb_url": _link_value(parsed.lkb_url),
-        "dissertation_url": _link_value(parsed.dissertation_url),
-        "publication_url": _link_value(publication_url),
+        "project_folder_url": _link_value_project_folder_field(
+            project_folder_url, student_warnings
+        ),
+        "lkb_url": _link_value_document_field(
+            parsed.lkb_url,
+            _LINK_LABEL_LKB,
+            student_warnings,
+            field_title="Заключение ЛКБ",
+        ),
+        "dissertation_url": diss_cell,
+        "publication_url": _link_value_document_field(
+            publication_url,
+            _LINK_LABEL_PUBL,
+            student_warnings,
+            field_title="Публикация",
+        ),
         "pages_total": pages_total,
         "sources_count": sources_count,
         "compliance": compliance,

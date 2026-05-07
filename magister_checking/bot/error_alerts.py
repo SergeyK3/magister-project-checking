@@ -9,11 +9,14 @@ import traceback
 from typing import TYPE_CHECKING
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
-from magister_checking.bot.google_api_errors import is_google_sheets_rate_limit
+from magister_checking.bot.google_api_errors import (
+    GOOGLE_SHEETS_RATE_LIMIT_REGISTRATION_RETRY,
+    is_google_sheets_rate_limit,
+)
 from magister_checking.bot.handlers import CONFIG_BOT_DATA_KEY
 
 if TYPE_CHECKING:
@@ -94,6 +97,20 @@ async def on_handler_error(update: object, context: ContextTypes.DEFAULT_TYPE) -
             "Временный лимит Google Sheets/API (429); алерт админам не отправляем: %s",
             err,
         )
+        if isinstance(update, Update):
+            chat = update.effective_chat
+            msg = update.effective_message
+            if chat is not None and chat.type == ChatType.PRIVATE:
+                note = GOOGLE_SHEETS_RATE_LIMIT_REGISTRATION_RETRY
+                try:
+                    if msg is not None:
+                        await msg.reply_text(note)
+                    else:
+                        await context.bot.send_message(chat_id=chat.id, text=note)
+                except Exception:
+                    logger.exception(
+                        "Не удалось отправить пользователю подсказку про лимит Google Sheets (429)"
+                    )
         return
 
     uid_maybe = getattr(getattr(update, "effective_user", None), "id", None)

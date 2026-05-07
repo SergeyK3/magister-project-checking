@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram import Chat, Message, Update, User
+from telegram.constants import ChatType
 from telegram.error import NetworkError
 from telegram.ext import ContextTypes
 
@@ -108,7 +109,7 @@ class OnHandlerErrorTests(unittest.TestCase):
         asyncio.run(_run())
 
     def test_google_sheets_429_skips_alerts(self) -> None:
-        """Временный лимит Google (429) — только warning, без рассылки админам."""
+        """Временный лимит Google (429) — без алертов админам; без update пользователю не пишем."""
 
         async def _run() -> None:
             cfg = _minimal_config(alert=(111,))
@@ -121,6 +122,41 @@ class OnHandlerErrorTests(unittest.TestCase):
             ctx.error = RuntimeError("APIError: [429]: Quota exceeded")
             await on_handler_error(MagicMock(), ctx)
             send_mock.assert_not_awaited()
+
+        asyncio.run(_run())
+
+    def test_google_sheets_429_replies_in_private_chat(self) -> None:
+        """При 429 в личке магистранту отправляется подсказка повторить через 5–10 минут."""
+
+        async def _run() -> None:
+            cfg = _minimal_config(alert=(111,))
+            application = build_application(cfg)
+            send_mock = AsyncMock()
+            ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+            ctx.application = application
+            ctx.bot = MagicMock()
+            ctx.bot.send_message = send_mock
+
+            chat = Chat(id=555, type=ChatType.PRIVATE)
+            user = User(id=42, first_name="a", is_bot=False)
+            msg = Message(
+                message_id=1,
+                date=datetime.now(tz=timezone.utc),
+                chat=chat,
+                from_user=user,
+            )
+            reply_mock = AsyncMock()
+            upd = Update(update_id=1, message=msg)
+            ctx.error = RuntimeError("APIError: [429]: Quota exceeded")
+
+            with patch.object(Message, "reply_text", reply_mock):
+                await on_handler_error(upd, ctx)
+
+            send_mock.assert_not_awaited()
+            reply_mock.assert_awaited_once()
+            text = reply_mock.await_args.args[0]
+            self.assertIn("/start", text)
+            self.assertIn("5", text)
 
         asyncio.run(_run())
 

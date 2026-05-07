@@ -89,6 +89,13 @@ class BotConfig:
     завязанные на этот лист, отключены. Переменная окружения:
     ``MAGISTRANTS_WORKSHEET_NAME``."""
 
+    require_phone_pin: bool = False
+    """Одноразовый PIN по телефону из таблицы перед привязкой / сохранением анкеты.
+
+    Код не отправляется по SMS — он только в логе бота. По умолчанию выключено.
+
+    Включение: env ``BOT_REQUIRE_PHONE_PIN`` (1 / true / yes / on)."""
+
     @property
     def log_level_name(self) -> str:
         return logging.getLevelName(self.log_level)
@@ -194,6 +201,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     persistence_file_raw = _read_env("BOT_PERSISTENCE_FILE")
     log_file_raw = _read_env("BOT_LOG_FILE")
     alert_chat_ids_raw = _read_env("BOT_ALERT_CHAT_IDS")
+    require_phone_pin_raw = _read_env("BOT_REQUIRE_PHONE_PIN")
     force_ipv4_raw = _read_env("BOT_TELEGRAM_FORCE_IPV4")
     docx_conv_raw = (
         _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
@@ -242,6 +250,7 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         telegram_force_ipv4=_parse_env_bool(force_ipv4_raw, default=False),
         project_snapshot_output_folder_urls=project_snapshot_output_folder_urls,
         magistrants_worksheet_name=magistrants_worksheet_raw.strip(),
+        require_phone_pin=_parse_env_bool(require_phone_pin_raw, default=False),
     )
 
 

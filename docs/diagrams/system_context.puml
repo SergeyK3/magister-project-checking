@@ -1,0 +1,38 @@
+@startuml
+title System Context
+
+actor Магистрант
+actor Научрук
+actor Админ
+
+rectangle "Telegram Bot" {
+[FSM]
+[Command Router]
+[Validation Pipeline]
+}
+
+database "Google Sheets"
+
+cloud "Google Drive"
+
+cloud "Google Docs API"
+
+file "JSON Snapshots"
+
+Магистрант --> [FSM]
+Научрук --> [FSM]
+Админ --> [FSM]
+
+[FSM] --> [Command Router]
+
+[Command Router] --> [Validation Pipeline]
+
+[Validation Pipeline] --> "Google Sheets"
+
+[Validation Pipeline] --> "Google Drive"
+
+[Validation Pipeline] --> "Google Docs API"
+
+[Validation Pipeline] --> "JSON Snapshots"
+
+@enduml

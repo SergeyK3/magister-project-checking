@@ -169,6 +169,7 @@ USER_DATA_STUDENT_REMINDER_DRAFT = "student_reminder_draft"
 USER_DATA_STUDENT_BULK_ENTRIES = "student_reminder_bulk_entries"
 USER_DATA_PIN_CONTEXT_KEY = "pin_verify_context"
 USER_DATA_PIN_REGISTER_EXTRA_KEY = "pin_verify_register_extra"
+USER_DATA_ENRICHMENT_WARNINGS_KEY = "enrichment_student_warnings"
 
 ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
@@ -177,24 +178,33 @@ BULK_STUDENT_REMINDER_MAX_ROWS = 40
 
 CONFIG_BOT_DATA_KEY = "bot_config"
 
-HELP_REPLY_TEXT_STUDENT = (
-    "Команды бота (магистрант):\n\n"
-    "/start — регистрация: привязка к строке в таблице «Регистрация» или "
-    "продолжение анкеты. Числовой Telegram ID подставляется из вашего "
-    "аккаунта автоматически.\n"
-    "/register — первичная регистрация (анкета с нуля).\n"
-    "/status — кратко: ваша строка в «Регистрация» (если уже привязаны).\n"
-    "/recheck — повторить проверку промежуточного отчёта (когда вы уже в таблице)\n"
-    "/cancel — прервать текущий диалог\n"
-    "/spravka — краткий отчёт по проверке по вашей строке (как после /recheck)\n"
-    "/help — эта справка\n\n"
-    "При привязке к строке или перед сохранением анкеты бот может попросить одноразовый "
-    "код по телефону из таблицы (см. лог бота в учебном контуре).\n\n"
-    f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n\n"
-    "Меню команд (кнопка у поля ввода) подтягивается после перезапуска бота.\n\n"
-    "Полные материалы для комиссии и проверка чужой строки — у администраторов; "
-    "при необходимости обратитесь к куратору."
-)
+def _student_help_text(*, require_phone_pin: bool) -> str:
+    pin_note = (
+        "При привязке к строке или перед сохранением анкеты бот может попросить одноразовый "
+        "код по телефону из таблицы (см. лог бота в учебном контуре; SMS не отправляется).\n\n"
+        if require_phone_pin
+        else ""
+    )
+    return (
+        "Команды бота (магистрант):\n\n"
+        "/start — регистрация: привязка к строке в таблице «Регистрация» или "
+        "продолжение анкеты. Числовой Telegram ID подставляется из вашего "
+        "аккаунта автоматически.\n"
+        "/register — первичная регистрация (анкета с нуля).\n"
+        "/status — кратко: ваша строка в «Регистрация» (если уже привязаны).\n"
+        "/recheck — повторить проверку промежуточного отчёта (когда вы уже в таблице)\n"
+        "/cancel — прервать текущий диалог\n"
+        "/spravka — краткий отчёт по проверке по вашей строке (как после /recheck)\n"
+        "/help — эта справка\n\n"
+        f"{pin_note}"
+        f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n\n"
+        "Меню команд (кнопка у поля ввода) подтягивается после перезапуска бота.\n\n"
+        "Полные материалы для комиссии и проверка чужой строки — у администраторов; "
+        "при необходимости обратитесь к куратору."
+    )
+
+
+HELP_REPLY_TEXT_STUDENT = _student_help_text(require_phone_pin=False)
 
 HELP_REPLY_TEXT_ADMIN = (
     "Команды бота (администратор):\n\n"
@@ -239,7 +249,10 @@ HELP_REPLY_TEXT = HELP_REPLY_TEXT_ADMIN
 
 
 def help_reply_for_user(
-    *, is_admin: bool, is_supervisor: bool = False
+    *,
+    is_admin: bool,
+    is_supervisor: bool = False,
+    require_phone_pin: bool = False,
 ) -> str:
     """Текст /help: приоритет админ → научрук → магистрант."""
 
@@ -247,7 +260,7 @@ def help_reply_for_user(
         return HELP_REPLY_TEXT_ADMIN
     if is_supervisor:
         return HELP_REPLY_TEXT_SUPERVISOR
-    return HELP_REPLY_TEXT_STUDENT
+    return _student_help_text(require_phone_pin=require_phone_pin)
 
 
 def default_bot_commands() -> list[BotCommand]:
@@ -830,6 +843,8 @@ async def _finalize_bind_attachment(
     cfg = _bot_config(context)
     user_form = _get_user_form(context)
     msg = update.effective_message
+    dashboard_rate_note = ""
+    magistrants_rate_note = ""
 
     async with _REGISTRATION_SHEETS_LOCK:
         worksheet = await _call_blocking(get_worksheet, cfg)
@@ -863,6 +878,7 @@ async def _finalize_bind_attachment(
             )
             if is_google_sheets_rate_limit(sync_exc):
                 logger.warning("Google Sheets rate limit после привязки (Dashboard)")
+                dashboard_rate_note = "\n\n" + GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
         try:
             await _call_blocking(sync_magistrants_registration_status, cfg)
         except Exception as mag_exc:  # noqa: BLE001
@@ -872,10 +888,14 @@ async def _finalize_bind_attachment(
             )
             if is_google_sheets_rate_limit(mag_exc):
                 logger.warning("Google Sheets rate limit после привязки (магистранты)")
+                magistrants_rate_note = "\n\n" + GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
     context.user_data[USER_DATA_BIND_ROW_KEY] = None
     reply = msg or update.message
+    rate_notes = dashboard_rate_note + magistrants_rate_note
     if reply is not None:
-        await reply.reply_text(f"Привязал ваш Telegram к строке {row_number}.")
+        await reply.reply_text(
+            f"Привязал ваш Telegram к строке {row_number}.{rate_notes}"
+        )
     return await _resume_registration_from_row(
         update,
         context,
@@ -953,6 +973,8 @@ async def _finalize_registration_confirm(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     extra_values: dict[str, str],
+    *,
+    student_notes: tuple[str, ...] = (),
 ) -> int:
     """Запись анкеты после «да» (сразу или после успешного PIN)."""
 
@@ -1002,6 +1024,9 @@ async def _finalize_registration_confirm(
 
     missing = get_missing_fields(user_form)
     rate_notes = dashboard_rate_note + magistrants_rate_note
+    notes_block = ""
+    if student_notes:
+        notes_block = "\n\nВнимание:\n" + "\n".join(f"• {n}" for n in student_notes)
     if missing:
         await msg.reply_text(
             "Данные сохранены.\n\n"
@@ -1011,6 +1036,7 @@ async def _finalize_registration_confirm(
             "Спасибо. Регистрация сохранена.\n"
             "Позже вы можете снова нажать /start и продолжить."
             + rate_notes
+            + notes_block
         )
     else:
         await msg.reply_text(
@@ -1020,7 +1046,8 @@ async def _finalize_registration_confirm(
             "Спасибо. Регистрация завершена.\n\n"
             "Чтобы запустить проверку вашего отчёта прямо сейчас — "
             "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /recheck."
-            + rate_notes,
+            + rate_notes
+            + notes_block,
             reply_markup=build_recheck_keyboard(row_num),
         )
 
@@ -1062,12 +1089,14 @@ async def receive_pin_input(
     if result == PinVerifyResult.EXPIRED:
         context.user_data.pop(USER_DATA_PIN_CONTEXT_KEY, None)
         context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+        context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
         await msg.reply_text("Время действия кода истекло. Начните с шага подтверждения заново (/start).")
         return ConversationHandler.END
 
     if result in {PinVerifyResult.LOCKED, PinVerifyResult.NO_CHALLENGE}:
         context.user_data.pop(USER_DATA_PIN_CONTEXT_KEY, None)
         context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+        context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
         await msg.reply_text(
             "Слишком много неверных попыток или сессия устарела. Начните сначала: /start."
         )
@@ -1079,6 +1108,7 @@ async def receive_pin_input(
     if kind == "bind":
         row_number = context.user_data.get(USER_DATA_BIND_ROW_KEY)
         context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+        context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
         if not row_number:
             await msg.reply_text("Привязка сброшена. Нажмите /start.")
             return ConversationHandler.END
@@ -1088,20 +1118,27 @@ async def receive_pin_input(
 
     if kind == "claim":
         context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+        context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
         return await _finalize_claim_attachment(update, context)
 
     if kind == "register_save":
         extras = context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+        enrich_notes = context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
+        notes_tuple = tuple(enrich_notes) if isinstance(enrich_notes, list) else ()
         extra_values: dict[str, str]
         if isinstance(extras, dict):
             extra_values = {str(k): str(v) for k, v in extras.items()}
         else:
             extra_values = {}
         return await _finalize_registration_confirm(
-            update, context, extra_values=extra_values
+            update,
+            context,
+            extra_values=extra_values,
+            student_notes=notes_tuple,
         )
 
     context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+    context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
     await msg.reply_text("Неизвестный сценарий. /start.")
     return ConversationHandler.END
 
@@ -1315,7 +1352,7 @@ async def confirm_claim(
     phone_canon = normalize_phone_ru_kz(
         (await _call_blocking(phone_text_from_worksheet_row, wsheet, int(row_number)) or "").strip()
     )
-    if phone_canon:
+    if phone_canon and cfg.require_phone_pin:
         issued = await issue_pin_challenge(user_form.telegram_id or "", phone_canon)
         if issued is not None:
             _, pin_len = issued
@@ -1323,11 +1360,12 @@ async def confirm_claim(
             await update.message.reply_text(_pin_challenge_prompt_text(pin_len))
             return PIN_VERIFY_INPUT
 
-    logger.info(
-        'claim telegram attach without PIN: missing normalized phone sheet_label=%s row=%s',
-        sheet_label,
-        row_number,
-    )
+    if not phone_canon:
+        logger.info(
+            'claim telegram attach without PIN: missing normalized phone sheet_label=%s row=%s',
+            sheet_label,
+            row_number,
+        )
     return await _finalize_claim_attachment(update, context)
 
 
@@ -2453,7 +2491,7 @@ async def confirm_bind(
             return await _start_new_registration(update, context)
 
     phone_canon = normalize_phone_ru_kz((candidate.phone or "").strip())
-    if phone_canon:
+    if phone_canon and cfg.require_phone_pin:
         issued = await issue_pin_challenge(user_form.telegram_id or "", phone_canon)
         if issued is not None:
             _, pin_len = issued
@@ -2461,10 +2499,11 @@ async def confirm_bind(
             await update.message.reply_text(_pin_challenge_prompt_text(pin_len))
             return PIN_VERIFY_INPUT
 
-    logger.info(
-        "bind telegram attach without PIN: missing normalized phone row=%s",
-        row_number,
-    )
+    if not phone_canon:
+        logger.info(
+            "bind telegram attach without PIN: missing normalized phone row=%s",
+            row_number,
+        )
     return await _finalize_bind_attachment(update, context, row_number=int(row_number))
 
 
@@ -2601,9 +2640,12 @@ async def ask_confirm(
     _refresh_status(user_form)
     _record_action(user_form, "confirmed_save")
     extra_values: dict[str, str] = {}
+    enrich_warnings: list[str] = []
     if user_form.report_url:
         try:
-            extra_values.update(build_sheet_enrichment(cfg, user_form))
+            extra_values.update(
+                build_sheet_enrichment(cfg, user_form, student_warnings=enrich_warnings)
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Не удалось обогатить строку отчёта для telegram_id=%s",
@@ -2611,20 +2653,27 @@ async def ask_confirm(
             )
 
     phone_canon = normalize_phone_ru_kz((user_form.phone or "").strip())
-    if phone_canon:
+    if phone_canon and cfg.require_phone_pin:
         issued = await issue_pin_challenge(user_form.telegram_id or "", phone_canon)
         if issued is not None:
             _, pin_len = issued
             context.user_data[USER_DATA_PIN_CONTEXT_KEY] = {"kind": "register_save"}
             context.user_data[USER_DATA_PIN_REGISTER_EXTRA_KEY] = dict(extra_values)
+            context.user_data[USER_DATA_ENRICHMENT_WARNINGS_KEY] = list(enrich_warnings)
             await msg.reply_text(_pin_challenge_prompt_text(pin_len))
             return PIN_VERIFY_INPUT
 
-    logger.info(
-        "registration save without PIN: no normalized phone telegram_id=%s",
-        user_form.telegram_id or "?",
+    if not phone_canon:
+        logger.info(
+            "registration save without PIN: no normalized phone telegram_id=%s",
+            user_form.telegram_id or "?",
+        )
+    return await _finalize_registration_confirm(
+        update,
+        context,
+        extra_values=extra_values,
+        student_notes=tuple(enrich_warnings),
     )
-    return await _finalize_registration_confirm(update, context, extra_values=extra_values)
 
 
 RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "diff"}
@@ -3396,6 +3445,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await clear_challenge(user_form.telegram_id or "")
     context.user_data.pop(USER_DATA_PIN_CONTEXT_KEY, None)
     context.user_data.pop(USER_DATA_PIN_REGISTER_EXTRA_KEY, None)
+    context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
     context.user_data[USER_DATA_CLAIM_TARGET_KEY] = None
     context.user_data[USER_DATA_CLAIM_ROW_KEY] = None
     context.user_data[USER_DATA_BIND_ROW_KEY] = None
@@ -3419,8 +3469,13 @@ async def help_command(
     if msg is not None:
         is_ad = _is_admin(update, context)
         is_sup = _is_supervisor(update, context)
+        cfg = _bot_config(context)
         await msg.reply_text(
-            help_reply_for_user(is_admin=is_ad, is_supervisor=is_sup)
+            help_reply_for_user(
+                is_admin=is_ad,
+                is_supervisor=is_sup,
+                require_phone_pin=cfg.require_phone_pin,
+            )
         )
 
 

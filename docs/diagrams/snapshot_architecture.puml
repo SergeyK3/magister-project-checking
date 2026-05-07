@@ -1,0 +1,27 @@
+@startuml
+title Snapshot Architecture
+
+package "Validation Pipeline" {
+
+[Intermediate Report]
+[Link Validation]
+[Dissertation Analysis]
+[Report Generator]
+
+}
+
+database "Google Sheets" {
+[Registration]
+}
+
+file "JSON Snapshot" as snapshot
+
+[Intermediate Report] --> snapshot
+[Link Validation] --> snapshot
+[Dissertation Analysis] --> snapshot
+
+snapshot --> [Report Generator]
+
+snapshot --> [Registration]
+
+@enduml

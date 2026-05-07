@@ -119,6 +119,103 @@ class BuildSheetEnrichmentTests(unittest.TestCase):
         self.assertEqual(result["dissertation_title"], "")
         self.assertEqual(result["dissertation_language"], "русский")
 
+    def test_folder_link_fields_fill_cells_and_student_warnings(self) -> None:
+        """ЛКБ/публикация как папка → пояснение в ячейке и строки для чата."""
+        folder = "https://drive.google.com/drive/folders/1b1d5_pDItzhy7jMRym2KJbo1b7MCJu9a"
+        parsed = ParsedReport(
+            lkb_status="да",
+            lkb_url=folder,
+            dissertation_url="https://docs.google.com/document/d/diss/edit",
+            review_article_url=None,
+            review_article_note="",
+            results_article_url=folder,
+            project_folder_url=folder,
+            declared_pages_total=None,
+            declared_pages_review=None,
+            declared_sources_review=None,
+            declared_formatting_ok=None,
+        )
+        config = MagicMock()
+        user_form = UserForm(report_url="https://docs.google.com/document/d/report/edit")
+        docs_service = MagicMock()
+        report_req = MagicMock()
+        report_req.execute.return_value = {"body": {"content": []}}
+        diss_req = MagicMock()
+        diss_req.execute.return_value = _dissertation_doc()
+        docs_service.documents.return_value.get.side_effect = [report_req, diss_req]
+        drive_service = MagicMock()
+        warns: list[str] = []
+
+        with patch(
+            "magister_checking.bot.report_enrichment._service_account_credentials",
+            return_value=MagicMock(),
+        ), patch(
+            "magister_checking.bot.report_enrichment.build",
+            side_effect=[docs_service, drive_service],
+        ), patch(
+            "magister_checking.bot.report_enrichment.resolve_report_google_doc_id",
+            return_value="report-id",
+        ), patch(
+            "magister_checking.bot.report_enrichment.parse_intermediate_report",
+            return_value=parsed,
+        ), patch(
+            "magister_checking.bot.report_enrichment.count_pdf_pages_via_drive_export",
+            return_value=42,
+        ):
+            result = build_sheet_enrichment(config, user_form, student_warnings=warns)
+
+        self.assertIn("folders", result["lkb_url"].lower())
+        self.assertIn("folders", result["publication_url"].lower())
+        self.assertEqual(result["project_folder_url"], folder)
+        self.assertEqual(len(warns), 2)
+
+    def test_project_folder_as_file_cell_error_and_warning(self) -> None:
+        file_url = "https://drive.google.com/file/d/onlyfile/view"
+        parsed = ParsedReport(
+            lkb_status="да",
+            lkb_url="https://drive.google.com/file/d/lkb/view",
+            dissertation_url="https://docs.google.com/document/d/diss/edit",
+            review_article_url=None,
+            review_article_note="",
+            results_article_url="https://drive.google.com/file/d/pub/view",
+            project_folder_url=file_url,
+            declared_pages_total=None,
+            declared_pages_review=None,
+            declared_sources_review=None,
+            declared_formatting_ok=None,
+        )
+        config = MagicMock()
+        user_form = UserForm(report_url="https://docs.google.com/document/d/report/edit")
+        docs_service = MagicMock()
+        report_req = MagicMock()
+        report_req.execute.return_value = {"body": {"content": []}}
+        diss_req = MagicMock()
+        diss_req.execute.return_value = _dissertation_doc()
+        docs_service.documents.return_value.get.side_effect = [report_req, diss_req]
+        drive_service = MagicMock()
+        warns: list[str] = []
+
+        with patch(
+            "magister_checking.bot.report_enrichment._service_account_credentials",
+            return_value=MagicMock(),
+        ), patch(
+            "magister_checking.bot.report_enrichment.build",
+            side_effect=[docs_service, drive_service],
+        ), patch(
+            "magister_checking.bot.report_enrichment.resolve_report_google_doc_id",
+            return_value="report-id",
+        ), patch(
+            "magister_checking.bot.report_enrichment.parse_intermediate_report",
+            return_value=parsed,
+        ), patch(
+            "magister_checking.bot.report_enrichment.count_pdf_pages_via_drive_export",
+            return_value=42,
+        ):
+            result = build_sheet_enrichment(config, user_form, student_warnings=warns)
+
+        self.assertIn("папк", result["project_folder_url"].lower())
+        self.assertTrue(warns)
+
 
 def _run_enrichment_with_parsed(
     parsed: ParsedReport,

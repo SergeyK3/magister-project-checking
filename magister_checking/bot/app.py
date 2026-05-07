@@ -97,6 +97,10 @@ from magister_checking.bot.handlers import (
 
 logger = logging.getLogger("magistrcheckbot")
 
+RUSSIAN_START_COMMAND_PATTERN = r"^/старт(?:@\w+)?(?:\s|$)"
+RUSSIAN_SPRAVKA_COMMAND_PATTERN = r"^/справка(?:@\w+)?(?:\s|$)"
+RUSSIAN_EXIT_COMMAND_PATTERN = r"^/выход(?:@\w+)?(?:\s|$)"
+
 
 _NOISY_LOGGERS_WITH_TOKEN = ("httpx", "httpcore", "telegram.ext.Updater", "telegram.bot")
 """Логгеры, которые на INFO печатают URL с секретным TELEGRAM_BOT_TOKEN.
@@ -328,6 +332,18 @@ def build_application(config: BotConfig) -> Application:
     pin_input_message_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private, receive_pin_input
     )
+    russian_start_handler = MessageHandler(
+        filters.Regex(RUSSIAN_START_COMMAND_PATTERN) & private,
+        start,
+    )
+    russian_spravka_handler = MessageHandler(
+        filters.Regex(RUSSIAN_SPRAVKA_COMMAND_PATTERN) & private,
+        spravka_start,
+    )
+    russian_exit_handler = MessageHandler(
+        filters.Regex(RUSSIAN_EXIT_COMMAND_PATTERN) & private,
+        cancel,
+    )
     spravka_target_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private,
         spravka_receive_target,
@@ -336,6 +352,8 @@ def build_application(config: BotConfig) -> Application:
         name="registration",
         persistent=True,
         entry_points=[
+            russian_start_handler,
+            russian_spravka_handler,
             CommandHandler("start", start, filters=private),
             CommandHandler("register", register_command, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
@@ -383,6 +401,9 @@ def build_application(config: BotConfig) -> Application:
             SPRAVKA_ASK_TARGET: [spravka_target_handler],
         },
         fallbacks=[
+            russian_exit_handler,
+            russian_start_handler,
+            russian_spravka_handler,
             CommandHandler("cancel", cancel, filters=private),
             CommandHandler("start", start, filters=private),
             CommandHandler("register", register_command, filters=private),

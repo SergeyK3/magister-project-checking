@@ -9,7 +9,12 @@ from tempfile import TemporaryDirectory
 from telegram.ext import CommandHandler, ConversationHandler, MessageHandler
 
 from magister_checking.bot import handlers as h
-from magister_checking.bot.app import build_application
+from magister_checking.bot.app import (
+    RUSSIAN_EXIT_COMMAND_PATTERN,
+    RUSSIAN_SPRAVKA_COMMAND_PATTERN,
+    RUSSIAN_START_COMMAND_PATTERN,
+    build_application,
+)
 from magister_checking.bot.config import BotConfig
 
 
@@ -40,31 +45,9 @@ class Phase0CommandInventoryTests(unittest.TestCase):
         self.assertEqual(
             [(c.command, c.description) for c in h.default_bot_commands()],
             [
-                ("start", "Регистрация или продолжить анкету"),
-                ("help", "Список команд и подсказки"),
-                ("recheck", "Повторить проверку отчёта"),
-                ("cancel", "Прервать текущий диалог"),
-                ("admin", "Панель администратора"),
-                ("project_card", "PDF-карточка проекта (админы)"),
-                ("student_message", "Сообщение магистранту (админы)"),
-                (
-                    "student_message_bulk",
-                    "Стандартное напоминание списку строк (админы)",
-                ),
-                ("spravka", "Справка: магистр., комиссия, PDF, JSON→текст"),
-                ("stats", "Сводка Dashboard в чат (админы)"),
-                ("sync_dashboard", "Обновить лист Dashboard (админы)"),
-                ("sync_magistrants", "Синхронизация листа магистрантов (админы)"),
-                ("register", "Первичная регистрация (магистрант)"),
-                ("status", "Статус магистранта / научрука"),
-                (
-                    "unreg",
-                    "Незарегистрированные (научрук); админ: ФИО научрука — превью",
-                ),
-                (
-                    "reg_list",
-                    "Зарегистрированные (научрук); админ: ФИО научрука — превью",
-                ),
+                ("start", "Запуск и регистрация"),
+                ("spravka", "Справка и проверка проекта"),
+                ("help", "Подсказки по работе с ботом"),
             ],
         )
 
@@ -156,6 +139,14 @@ class Phase0CommandInventoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            [
+                item.callback.__name__
+                for item in conv.entry_points
+                if isinstance(item, MessageHandler)
+            ][:2],
+            ["start", "spravka_start"],
+        )
+        self.assertEqual(
             sorted(conv.states.keys()),
             sorted(
                 [
@@ -193,6 +184,14 @@ class Phase0CommandInventoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            [
+                item.callback.__name__
+                for item in conv.fallbacks
+                if isinstance(item, MessageHandler)
+            ][:3],
+            ["cancel", "start", "spravka_start"],
+        )
+        self.assertEqual(
             _command_inventory(conv.states[h.ASK_FIELD]),
             [(("skip",), "skip_field")],
         )
@@ -210,6 +209,11 @@ class Phase0CommandInventoryTests(unittest.TestCase):
         ]
         self.assertEqual(len(group_1_message_handlers), 1)
         self.assertIs(group_1_message_handlers[0].callback, h.on_project_snapshot_json_file)
+
+    def test_public_russian_command_alias_patterns_are_registered(self) -> None:
+        self.assertEqual(RUSSIAN_START_COMMAND_PATTERN, r"^/старт(?:@\w+)?(?:\s|$)")
+        self.assertEqual(RUSSIAN_SPRAVKA_COMMAND_PATTERN, r"^/справка(?:@\w+)?(?:\s|$)")
+        self.assertEqual(RUSSIAN_EXIT_COMMAND_PATTERN, r"^/выход(?:@\w+)?(?:\s|$)")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,8 @@ class StudentNotifyTextTests(unittest.TestCase):
     def test_standard_without_name(self) -> None:
         text = build_standard_reminder()
         self.assertIn("/start", text)
-        self.assertIn("/recheck", text)
+        self.assertIn("/справка", text)
+        self.assertNotIn("/recheck", text)
         self.assertNotIn("Замечания", text)
 
     def test_standard_with_name(self) -> None:

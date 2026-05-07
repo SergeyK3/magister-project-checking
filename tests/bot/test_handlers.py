@@ -857,21 +857,8 @@ class HelpAndCommandsTests(unittest.TestCase):
             slugs,
             [
                 "start",
-                "help",
-                "recheck",
-                "cancel",
-                "admin",
-                "project_card",
-                "student_message",
-                "student_message_bulk",
                 "spravka",
-                "stats",
-                "sync_dashboard",
-                "sync_magistrants",
-                "register",
-                "status",
-                "unreg",
-                "reg_list",
+                "help",
             ],
         )
 
@@ -886,7 +873,9 @@ class HelpAndCommandsTests(unittest.TestCase):
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("магистрант", text)
         self.assertIn("/start", text)
-        self.assertIn("/recheck", text)
+        self.assertIn("/справка", text)
+        self.assertIn("/spravka", text)
+        self.assertNotIn("/recheck", text)
         self.assertNotIn("/stats", text)
         self.assertNotIn("/admin", text)
 
@@ -899,14 +888,15 @@ class HelpAndCommandsTests(unittest.TestCase):
             _run(help_command(update, ctx))
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("администратор", text)
-        self.assertIn("/stats", text)
-        self.assertIn("/admin", text)
+        self.assertIn("/справка", text)
+        self.assertNotIn("/stats", text)
+        self.assertNotIn("/admin", text)
 
     def test_help_reply_for_user_routing(self) -> None:
-        self.assertIn("/stats", help_reply_for_user(is_admin=True))
+        self.assertIn("администратор", help_reply_for_user(is_admin=True))
         self.assertNotIn("/stats", help_reply_for_user(is_admin=False))
         self.assertIn("научный руководитель", help_reply_for_user(is_admin=False, is_supervisor=True).lower())
-        self.assertIn("/stats", help_reply_for_user(is_admin=True, is_supervisor=True))
+        self.assertIn("администратор", help_reply_for_user(is_admin=True, is_supervisor=True))
 
 
 class SpravkaHandlerTests(unittest.TestCase):
@@ -1175,7 +1165,8 @@ class RecheckHandlerTests(unittest.TestCase):
 
         run.assert_not_called()
         msg = update.message.reply_text.await_args_list[-1].args[0]
-        self.assertIn("/recheck", msg)
+        self.assertIn("/справка", msg)
+        self.assertNotIn("/recheck", msg)
         self.assertIn("следующим сообщением", msg)
         self.assertNotIn("не привязан", msg)
         self.assertNotIn("Сначала пройдите регистрацию", msg)

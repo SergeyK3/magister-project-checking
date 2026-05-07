@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import io
 import logging
 import re
 from typing import Awaitable, Callable, List, Optional
 
 from telegram import (
-    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
@@ -35,7 +32,6 @@ from magister_checking.bot.models import (
     REQUIRED_FIELDS,
     SHEET_HEADER,
     UserForm,
-    compute_fill_status,
     get_missing_field_keys,
     get_missing_fields,
 )
@@ -87,6 +83,57 @@ from magister_checking.bot.validation import (
     check_report_url_target_kind,
     normalize_fio_user_input,
     normalize_text,
+)
+from magister_checking.bot.admin_message_helpers import (
+    ADMIN_PROJECT_CARD_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BUTTON,
+    ADMSTUB_CALLBACK_CONFIRM_PATTERN,
+    ADMSTU_CALLBACK_CONFIRM_PATTERN,
+    ADMSTU_CALLBACK_TEMPLATE_PATTERN,
+    BULK_STUDENT_REMINDER_MAX_ROWS,
+    _admin_keyboard,
+    _bulk_delivery_summary_line,
+    _parse_bulk_student_row_numbers,
+    _student_reminder_bulk_confirm_keyboard,
+    _student_reminder_confirm_keyboard,
+    _student_reminder_preview_text,
+    _student_reminder_template_keyboard,
+)
+from magister_checking.bot.registration_helpers import (
+    HELP_REPLY_TEXT,
+    HELP_REPLY_TEXT_ADMIN,
+    HELP_REPLY_TEXT_STUDENT,
+    HELP_REPLY_TEXT_SUPERVISOR,
+    _fio_query_matches_row_fio,
+    _is_skip_text,
+    _refresh_status,
+    _registration_timestamp,
+    _review_prompt_text,
+    _set_telegram_identity,
+    _split_text_chunks,
+    _summary_text,
+    default_bot_commands,
+    help_reply_for_user,
+)
+from magister_checking.bot.role_claim_helpers import (
+    _format_row_summary,
+    _start_role_keyboard_mag,
+    _start_role_keyboard_main,
+)
+from magister_checking.bot.spravka_retry_helpers import (
+    RECHECK_BUTTON_LABEL,
+    RECHECK_CALLBACK_DATA,
+    RECHECK_CALLBACK_PATTERN,
+    SPRAVKA_CALLBACK_COMMISSION,
+    SPRAVKA_CALLBACK_PDF,
+    SPRAVKA_CALLBACK_TELEGRAM,
+    SPRAVKA_RETRY_ONLY_IF_CHANGED,
+    _iter_telegram_spravka_chunks,
+    _parse_recheck_callback_row,
+    _parse_recheck_command_parts,
+    _recheck_reply_markup_after_check,
+    build_recheck_keyboard,
 )
 from magister_checking.project_card_pipeline import generate_project_card_pdf
 from magister_checking.project_snapshot import project_snapshot_from_json_str
@@ -150,10 +197,6 @@ ROLE_PICK, CLAIM_ASK_FIO, CLAIM_CONFIRM = 7, 8, 9
 ) = (10, 11, 12, 13, 14, 15, 16)
 PIN_VERIFY_INPUT = 17
 
-ADMSTU_CALLBACK_TEMPLATE_PATTERN = r"^admstu:(std|stdex|cust)$"
-ADMSTU_CALLBACK_CONFIRM_PATTERN = r"^admstu:(send|cancel)$"
-ADMSTUB_CALLBACK_CONFIRM_PATTERN = r"^admstub:(send|cancel)$"
-
 USER_DATA_FORM_KEY = "form_data"
 USER_DATA_PENDING_KEY = "pending_fields"
 USER_DATA_CURRENT_KEY = "current_field"
@@ -171,88 +214,7 @@ USER_DATA_PIN_CONTEXT_KEY = "pin_verify_context"
 USER_DATA_PIN_REGISTER_EXTRA_KEY = "pin_verify_register_extra"
 USER_DATA_ENRICHMENT_WARNINGS_KEY = "enrichment_student_warnings"
 
-ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
-ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
-ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание по строкам"
-BULK_STUDENT_REMINDER_MAX_ROWS = 40
-
 CONFIG_BOT_DATA_KEY = "bot_config"
-
-def _student_help_text(*, require_phone_pin: bool) -> str:
-    pin_note = (
-        "При привязке к строке или перед сохранением анкеты бот может попросить одноразовый "
-        "код по телефону из таблицы (см. лог бота в учебном контуре; SMS не отправляется).\n\n"
-        if require_phone_pin
-        else ""
-    )
-    return (
-        "Команды бота (магистрант):\n\n"
-        "/start — регистрация: привязка к строке в таблице «Регистрация» или "
-        "продолжение анкеты. Числовой Telegram ID подставляется из вашего "
-        "аккаунта автоматически.\n"
-        "/справка — запустить проверку проекта и получить краткую справку "
-        "(если клиент Telegram не принимает кириллицу, используйте /spravka).\n"
-        "/help — эта справка\n\n"
-        f"{pin_note}"
-        f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n"
-        "Если нужно прервать текущий диалог, отправьте /выход.\n\n"
-        "Меню команд (кнопка у поля ввода) подтягивается после перезапуска бота.\n\n"
-        "Полные материалы для комиссии и проверка чужой строки — у администраторов; "
-        "при необходимости обратитесь к куратору."
-    )
-
-
-HELP_REPLY_TEXT_STUDENT = _student_help_text(require_phone_pin=False)
-
-HELP_REPLY_TEXT_ADMIN = (
-    "Команды бота (администратор):\n\n"
-    "/start — регистрация, привязка к строке таблицы или продолжение анкеты\n"
-    "/справка — кратко для магистранта, полный текст для комиссии в чате, PDF, "
-    "либо вложенный JSON с Drive в человекочитаемый вид (режимы «чужой строки» "
-    "и JSON — у админа; латинский alias — /spravka)\n"
-    "/help — эта справка\n\n"
-    f"В анкете поле можно пропустить: отправьте {SKIP_TOKEN} или /skip.\n"
-    "Если нужно прервать текущий диалог, отправьте /выход.\n\n"
-    "Меню команд (кнопка у поля ввода) подтягивается после перезапуска бота."
-)
-
-HELP_REPLY_TEXT_SUPERVISOR = (
-    "Команды бота (научный руководитель):\n\n"
-    "/start — при первом входе: выбор роли и привязка к строке в листе "
-    f"«{SUPERVISORS_WORKSHEET_NAME}» по ФИО (как в таблице), если ещё не привязаны\n"
-    "/справка — проверка проекта и справка по вашей строке; латинский alias — /spravka\n"
-    "/help — эта справка\n"
-    "/выход — прервать текущий диалог (если бот ожидает ввод)\n\n"
-    "Проверка отчётов и анкета — в сценарии магистранта (/start)."
-)
-
-# Обратная совместимость: раньше был один объединённый текст.
-HELP_REPLY_TEXT = HELP_REPLY_TEXT_ADMIN
-
-
-def help_reply_for_user(
-    *,
-    is_admin: bool,
-    is_supervisor: bool = False,
-    require_phone_pin: bool = False,
-) -> str:
-    """Текст /help: приоритет админ → научрук → магистрант."""
-
-    if is_admin:
-        return HELP_REPLY_TEXT_ADMIN
-    if is_supervisor:
-        return HELP_REPLY_TEXT_SUPERVISOR
-    return _student_help_text(require_phone_pin=require_phone_pin)
-
-
-def default_bot_commands() -> list[BotCommand]:
-    """Команды для ``BotFather`` / меню Telegram (короткие описания ≤256 симв.)."""
-
-    return [
-        BotCommand("start", "Запуск и регистрация"),
-        BotCommand("spravka", "Справка и проверка проекта"),
-        BotCommand("help", "Подсказки по работе с ботом"),
-    ]
 
 
 def _format_user_visible_exc(exc: BaseException, *, limit: int = 480) -> str:
@@ -298,18 +260,6 @@ def _get_user_form(context: ContextTypes.DEFAULT_TYPE) -> UserForm:
     return form
 
 
-def _admin_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [ADMIN_PROJECT_CARD_BUTTON],
-            [ADMIN_STUDENT_MESSAGE_BUTTON],
-            [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
 def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     for key in (
         USER_DATA_STUDENT_REMINDER_ROW,
@@ -318,64 +268,6 @@ def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         USER_DATA_STUDENT_BULK_ENTRIES,
     ):
         context.user_data.pop(key, None)
-
-
-def _student_reminder_template_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Стандартное напоминание", callback_data="admstu:std")],
-            [
-                InlineKeyboardButton(
-                    "Стандарт + замечания (до 3 строк)",
-                    callback_data="admstu:stdex",
-                )
-            ],
-            [InlineKeyboardButton("Только свой текст", callback_data="admstu:cust")],
-        ]
-    )
-
-
-def _student_reminder_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Отправить", callback_data="admstu:send"),
-                InlineKeyboardButton("Отмена", callback_data="admstu:cancel"),
-            ]
-        ]
-    )
-
-
-def _student_reminder_preview_text(draft: str) -> str:
-    return (
-        "Предпросмотр:\n"
-        "════════════════════\n"
-        f"{draft}\n"
-        "════════════════════"
-    )
-
-
-def _start_role_keyboard_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Магистрант", callback_data="start:pick:mag")],
-            [InlineKeyboardButton("Научный руководитель", callback_data="start:pick:sup")],
-            [InlineKeyboardButton("Администратор", callback_data="start:pick:admin")],
-        ]
-    )
-
-
-def _start_role_keyboard_mag() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Новая регистрация", callback_data="start:mag:new")],
-            [
-                InlineKeyboardButton(
-                    "Уже есть запись (по ФИО)", callback_data="start:mag:bind"
-                )
-            ],
-        ]
-    )
 
 
 def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -402,16 +294,6 @@ def _message_for_bot_reply(update: Update):
     return update.effective_message
 
 
-def _set_telegram_identity(user_form: UserForm, update: Update) -> None:
-    tg_user = update.effective_user
-    if tg_user is None:
-        return
-    user_form.telegram_id = str(tg_user.id)
-    user_form.telegram_username = tg_user.username or ""
-    user_form.telegram_first_name = tg_user.first_name or ""
-    user_form.telegram_last_name = tg_user.last_name or ""
-
-
 def _set_pending_fields(
     context: ContextTypes.DEFAULT_TYPE, fields_to_ask: List[str]
 ) -> None:
@@ -436,70 +318,6 @@ def _current_field(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
 def _record_action(user_form: UserForm, action: str) -> None:
     user_form.last_action = action
     logger.debug("user %s -> %s", user_form.telegram_id or "?", action)
-
-
-def _refresh_status(user_form: UserForm) -> None:
-    """Обновляет ``fill_status`` в памяти: анкета и сохранённые итоги проверки §12."""
-
-    base = compute_fill_status(user_form)
-    raw = (user_form.fill_status or "").strip()
-    try:
-        current_enum = FillStatus(raw) if raw else None
-    except ValueError:
-        current_enum = None
-
-    post_check = {
-        FillStatus.OK,
-        FillStatus.NEED_FIX,
-        FillStatus.ERROR,
-        FillStatus.CHECKING,
-    }
-
-    if base in (FillStatus.NEW, FillStatus.PARTIAL):
-        user_form.fill_status = base.value
-        return
-
-    if current_enum in post_check:
-        user_form.fill_status = current_enum.value
-        return
-
-    user_form.fill_status = FillStatus.REGISTERED.value
-
-
-def _summary_text(user_form: UserForm) -> str:
-    lines = [
-        f"ФИО: {user_form.fio or '—'}",
-        f"Группа: {user_form.group_name or '—'}",
-        f"Место работы: {user_form.workplace or '—'}",
-        f"Должность: {user_form.position or '—'}",
-        f"Телефон: {user_form.phone or '—'}",
-        f"Научный руководитель: {user_form.supervisor or '—'}",
-        f"Ссылка на отчет: {user_form.report_url or '—'}",
-        "",
-        "Первичная проверка ссылки:",
-        f"- формат URL: {user_form.report_url_valid or '—'}",
-        f"- доступность: {user_form.report_url_accessible or '—'}",
-        "",
-        f"Статус заполнения: {user_form.fill_status or '—'}",
-        "",
-        "Подтвердите сохранение: да / нет",
-    ]
-    return "\n".join(lines)
-
-
-def _review_prompt_text() -> str:
-    return (
-        "Сейчас я покажу данные, которые будут сохранены в таблицу.\n\n"
-        "Пожалуйста, внимательно проверьте их.\n"
-        "Если всё верно, напишите: Да.\n"
-        f"Если есть ошибка, пройдём вопросы заново: для верных ответов отправляйте {SKIP_TOKEN}, "
-        "а неверный ответ перепишите."
-    )
-
-
-def _registration_timestamp() -> str:
-    now = datetime.now()
-    return f"{now.day:02d}.{now.month:02d}.{now.year} {now.hour}:{now.minute:02d}:{now.second:02d}"
 
 
 async def _call_blocking(func, /, *args, **kwargs):
@@ -582,34 +400,8 @@ async def _deliver_reminder_text_and_snapshot(
     return True, attach_note
 
 
-_TELEGRAM_SPRAVKA_MAX = 4000
-"""Запас под лимит 4096 символов одного ``sendMessage`` (справка, отчёты)."""
-
-SPRAVKA_CALLBACK_TELEGRAM = "spravka:telegram"
-SPRAVKA_CALLBACK_PDF = "spravka:pdf"
-SPRAVKA_CALLBACK_COMMISSION = "spravka:commission"
-
 # Макс. размер JSON-файла project snapshot, принимаемого в чат (байты)
 _SNAPSHOT_JSON_MAX_BYTES = 1_500_000
-
-
-def _iter_telegram_spravka_chunks(
-    text: str, max_len: int = _TELEGRAM_SPRAVKA_MAX
-) -> list[str]:
-    if len(text) <= max_len:
-        return [text]
-    out: list[str] = []
-    rest = text
-    while rest:
-        if len(rest) <= max_len:
-            out.append(rest)
-            break
-        cut = rest.rfind("\n", 0, max_len)
-        if cut == -1 or cut < max_len // 2:
-            cut = max_len
-        out.append(rest[:cut])
-        rest = rest[cut:].lstrip("\n")
-    return out
 
 
 async def _reply_spravka_to_message(
@@ -662,11 +454,6 @@ def _format_spravka_text_from_recheck(
         view=view,
         as_html=as_html,
     )
-
-
-def _is_skip_text(raw: str) -> bool:
-    stripped = (raw or "").strip()
-    return stripped in {SKIP_TOKEN, "/skip"}
 
 
 def _resolve_project_card_target_row(
@@ -1101,18 +888,6 @@ async def receive_pin_input(
     context.user_data.pop(USER_DATA_ENRICHMENT_WARNINGS_KEY, None)
     await msg.reply_text("Неизвестный сценарий. /start.")
     return ConversationHandler.END
-
-
-def _format_row_summary(form: UserForm) -> str:
-    """Короткое описание найденной анкеты для подтверждения привязки."""
-
-    return (
-        f"ФИО: {form.fio or '—'}\n"
-        f"Группа: {form.group_name or '—'}\n"
-        f"Место работы: {form.workplace or '—'}\n"
-        f"Должность: {form.position or '—'}\n"
-        f"Научный руководитель: {form.supervisor or '—'}"
-    )
 
 
 async def _claim_worksheet_for_target(
@@ -1786,53 +1561,6 @@ async def student_reminder_confirm_callback(
 
     _clear_student_reminder(context)
     return ConversationHandler.END
-
-
-def _student_reminder_bulk_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Отправить всем", callback_data="admstub:send"),
-                InlineKeyboardButton("Отмена", callback_data="admstub:cancel"),
-            ]
-        ]
-    )
-
-
-def _parse_bulk_student_row_numbers(raw: str) -> tuple[list[int] | None, str | None]:
-    """Разбор строки вида ``5 7 12`` или ``5,12,15`` — только целые номера строк (≥ 2)."""
-
-    parts = [p for p in re.split(r"[\s,;]+", (raw or "").strip()) if p.strip()]
-    if not parts:
-        return None, "Список номеров строк пустой. Пример: «5 7 9» или «12,15,20»."
-    rows: list[int] = []
-    for p in parts:
-        if not p.isdigit():
-            return None, (
-                "Укажите только номера строк (целые числа), через пробел, запятую или перевод строки. "
-                f"Не понял фрагмент: {p!r}."
-            )
-        rows.append(int(p))
-    out: list[int] = []
-    seen: set[int] = set()
-    for n in rows:
-        if n in seen:
-            continue
-        seen.add(n)
-        out.append(n)
-    return out, None
-
-
-def _bulk_delivery_summary_line(row_no: int, ok: bool, detail: str) -> str:
-    if not ok:
-        return f"• стр. {row_no}: ошибка — {detail[:200]}"
-    if "Вложена HTML-справка" in detail:
-        return f"• стр. {row_no}: отправлено + HTML снимок"
-    if "Вложение снимка не добавлено" in detail:
-        return f"• стр. {row_no}: текст да, вложение снимка — ошибка (см. лог)"
-    if "не найден в папках Drive" in detail:
-        return f"• стр. {row_no}: текст да, снимка на Drive нет"
-    return f"• стр. {row_no}: отправлено"
 
 
 async def student_message_bulk_start(
@@ -2682,63 +2410,6 @@ async def ask_confirm(
     )
 
 
-RECHECK_QUICK_TOKENS = {"quick", "only-if-changed", "only_if_changed", "fast", "diff"}
-"""Ключевые слова, после которых legacy ``/recheck`` работает как ``--only-if-changed``.
-
-По умолчанию legacy ``/recheck`` запускает полный прогон (handoff §8 —
-diff_detection режим «full by default»), но магистрант может написать ``/recheck quick``,
-чтобы получить ответ «без изменений» без повторной нагрузки на Drive."""
-
-SPRAVKA_RETRY_ONLY_IF_CHANGED = True
-"""Канонический публичный ``/справка`` не дублирует снимки при неизменных входах."""
-
-RECHECK_BUTTON_LABEL = "🔄 Перепроверить"
-RECHECK_CALLBACK_DATA = "recheck:full"
-RECHECK_CALLBACK_PATTERN = r"^recheck:full(?::\d+)?$"
-"""Шаблон callback: ``recheck:full`` или ``recheck:full:<номер строки>`` для админской
-перепроверки без повторного ввода цели (кнопка под отчётом по той же строке)."""
-
-
-def _parse_recheck_callback_row(callback_data: str | None) -> int | None:
-    if not callback_data:
-        return None
-    parts = callback_data.strip().split(":")
-    if len(parts) != 3 or parts[0] != "recheck" or parts[1] != "full":
-        return None
-    try:
-        return int(parts[2])
-    except ValueError:
-        return None
-
-
-def _parse_recheck_command_parts(
-    message_text: str, *, default_only_if_changed: bool = False
-) -> tuple[bool, str | None]:
-    """Разбор текста retry-команды.
-
-    Возвращает ``(only_if_changed, target)``, где ``target`` — номер строки или ФИО
-    (всё, что осталось после удаления токенов ``quick`` / ``only-if-changed`` и т.д.).
-    Только администраторы могут передать непустой ``target`` (см. ``recheck`` /
-    ``spravka_start``). Для legacy ``/recheck`` default — full; для публичной
-    ``/справка`` default — only-if-changed, чтобы повтор без изменений не писал
-    лишний JSON snapshot.
-    """
-
-    parts = (message_text or "").strip().split()
-    if len(parts) < 2:
-        return default_only_if_changed, None
-    body = parts[1:]
-    only_if_changed = default_only_if_changed
-    collected: list[str] = []
-    for token in body:
-        if token.strip().lower() in RECHECK_QUICK_TOKENS:
-            only_if_changed = True
-        else:
-            collected.append(token)
-    target = " ".join(collected).strip() or None
-    return only_if_changed, target
-
-
 def _clear_admin_recheck_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(USER_DATA_ADMIN_RECHECK_PENDING, None)
     context.user_data.pop(USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED, None)
@@ -2810,28 +2481,6 @@ async def admin_recheck_pending_receive(
     )
 
 
-def build_recheck_keyboard(row_number: int | None = None) -> InlineKeyboardMarkup:
-    """Inline-кнопка под итоговым отчётом и финалом регистрации.
-
-    Inline (а не Reply) — чтобы кнопка была привязана к конкретному сообщению
-    и пропадала после нажатия (см. ``recheck_button``). Это снижает риск
-    случайного двойного запуска тяжёлого пайплайна.
-
-    Если передан ``row_number``, в callback кладётся ``recheck:full:<row>``, чтобы
-    администратор (без своей строки в «Регистрация») мог перепроверить ту же цель
-    кнопкой, не вводя номер снова. Магистрант всё равно ищется по ``telegram_id``.
-    """
-
-    payload = (
-        RECHECK_CALLBACK_DATA
-        if row_number is None
-        else f"{RECHECK_CALLBACK_DATA}:{row_number}"
-    )
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(RECHECK_BUTTON_LABEL, callback_data=payload)]]
-    )
-
-
 async def _try_mark_recheck_error(cfg: BotConfig, row_number: int) -> None:
     """После сбоя ``/recheck`` помечает строку ``ERROR`` (п.12 ТЗ), если колонка есть."""
 
@@ -2880,14 +2529,6 @@ async def _send_recheck_reply(
             )
         else:
             return
-
-
-def _recheck_reply_markup_after_check(
-    row_number: int, *, attach_kb: bool
-) -> InlineKeyboardMarkup | None:
-    """Inline «Перепроверить» только если callback сможет подставить строку (см. ``recheck_button``)."""
-
-    return build_recheck_keyboard(row_number) if attach_kb else None
 
 
 async def _do_recheck(
@@ -3129,48 +2770,6 @@ async def recheck_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _do_recheck(
         update, context, only_if_changed=False, row_number_override=row_override
     )
-
-
-_TELEGRAM_TEXT_SOFT_LIMIT = 3900
-
-
-def _split_text_chunks(text: str, limit: int = _TELEGRAM_TEXT_SOFT_LIMIT) -> List[str]:
-    if len(text) <= limit:
-        return [text]
-    lines = text.split("\n")
-    chunks: List[str] = []
-    buf: List[str] = []
-    size = 0
-    for line in lines:
-        line_len = len(line) + 1
-        if buf and size + line_len > limit:
-            chunks.append("\n".join(buf))
-            buf = [line]
-            size = line_len
-        else:
-            buf.append(line)
-            size += line_len
-    if buf:
-        chunks.append("\n".join(buf))
-    return chunks
-
-
-def _fio_query_matches_row_fio(fio_query_norm: str, row_fio_norm: str) -> bool:
-    if not fio_query_norm or not row_fio_norm:
-        return False
-    if fio_query_norm in row_fio_norm or row_fio_norm in fio_query_norm:
-        return True
-    q_parts = fio_query_norm.split()
-    r_parts = row_fio_norm.split()
-    if not q_parts:
-        return False
-    for i, qp in enumerate(q_parts):
-        if i >= len(r_parts):
-            return False
-        rp = r_parts[i]
-        if not (rp.startswith(qp) or qp.startswith(rp) or qp in rp or rp in qp):
-            return False
-    return True
 
 
 async def register_command(

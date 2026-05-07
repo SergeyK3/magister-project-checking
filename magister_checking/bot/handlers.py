@@ -135,6 +135,8 @@ from magister_checking.bot.spravka_retry_helpers import (
     _recheck_reply_markup_after_check,
     build_recheck_keyboard,
 )
+from magister_checking.bot.ops_diagnostics import collect_ops_row_diagnostics
+from magister_checking.bot.ops_render import render_ops_row_diagnostics
 from magister_checking.project_card_pipeline import generate_project_card_pdf
 from magister_checking.project_snapshot import project_snapshot_from_json_str
 from magister_checking.snapshot_render import (
@@ -1180,6 +1182,47 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def ops_row(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: компактная read-only диагностика строки без raw dumps и управляющих кнопок."""
+
+    if update.message is None:
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+        )
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await update.message.reply_text("Использование: /ops_row <номер строки>")
+        return
+    try:
+        row_number = int(str(args[0]).strip())
+    except ValueError:
+        await update.message.reply_text("Номер строки должен быть целым числом.")
+        return
+    if row_number < 2:
+        await update.message.reply_text("Укажите номер строки данных (2 или больше).")
+        return
+
+    cfg = _bot_config(context)
+    try:
+        diagnostics = await _call_blocking(collect_ops_row_diagnostics, cfg, row_number)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось сформировать /ops_row для row=%s", row_number)
+        await update.message.reply_text(
+            "Не удалось получить диагностику строки.\n\n"
+            f"{_user_message_for_api_failure(exc, audience='admin')}"
+        )
+        return
+
+    await update.message.reply_text(
+        render_ops_row_diagnostics(diagnostics),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def admin_sync_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3157,6 +3200,7 @@ __all__ = [
     "receive_field",
     "receive_pin_input",
     "on_project_snapshot_json_file",
+    "ops_row",
     "recheck",
     "recheck_button",
     "register_command",

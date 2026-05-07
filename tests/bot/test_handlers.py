@@ -60,6 +60,7 @@ class _FakeContext:
     def __init__(self, worksheet: FakeWorksheet) -> None:
         self.bot_data: dict = {handlers.CONFIG_BOT_DATA_KEY: MagicMock()}
         self.user_data: dict = {}
+        self.args: list[str] = []
         self._worksheet = worksheet
 
 
@@ -1038,6 +1039,56 @@ class AdminStatsTests(unittest.TestCase):
         body = update.message.reply_text.await_args.args[0]
         self.assertIn("Сводка", body)
         self.assertIn("Всего регистраций: 1", body)
+
+    def test_ops_row_denies_non_admin_without_collecting(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.args = ["2"]
+        update = _make_update(text="/ops_row 2")
+
+        with _patch_admin_check(False), patch(
+            "magister_checking.bot.handlers.collect_ops_row_diagnostics"
+        ) as collect:
+            _run(handlers.ops_row(update, ctx))
+
+        collect.assert_not_called()
+        self.assertIn("только администраторам", update.message.reply_text.await_args.args[0])
+
+    def test_ops_row_admin_sends_html_diagnostics(self) -> None:
+        from magister_checking.bot.ops_diagnostics import OpsRowDiagnostics
+
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.args = ["2"]
+        update = _make_update(text="/ops_row 2")
+        diag = OpsRowDiagnostics(row_number=2, fio="Иванов И.И.", fill_status="OK")
+
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.collect_ops_row_diagnostics",
+            return_value=diag,
+        ) as collect:
+            _run(handlers.ops_row(update, ctx))
+
+        collect.assert_called_once()
+        self.assertEqual(collect.call_args.args[1], 2)
+        self.assertEqual(update.message.reply_text.await_args.kwargs.get("parse_mode"), "HTML")
+        body = update.message.reply_text.await_args.args[0]
+        self.assertIn("Ops row 2", body)
+        self.assertIn("Иванов", body)
+
+    def test_ops_row_admin_requires_numeric_data_row(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.args = ["1"]
+        update = _make_update(text="/ops_row 1")
+
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.collect_ops_row_diagnostics"
+        ) as collect:
+            _run(handlers.ops_row(update, ctx))
+
+        collect.assert_not_called()
+        self.assertIn("2 или больше", update.message.reply_text.await_args.args[0])
 
     def test_admin_sync_dashboard_calls_sync(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])

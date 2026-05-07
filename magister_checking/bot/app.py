@@ -77,6 +77,7 @@ from magister_checking.bot.handlers import (
     skip_field,
     spravka_choose,
     on_project_snapshot_json_file,
+    ops_row,
     spravka_receive_target,
     spravka_start,
     start,
@@ -445,6 +446,7 @@ def build_application(config: BotConfig) -> Application:
 
     application.add_handler(CommandHandler("admin", admin_menu, filters=private))
     application.add_handler(CommandHandler("stats", admin_stats, filters=private))
+    application.add_handler(CommandHandler("ops_row", ops_row, filters=private))
     application.add_handler(
         CommandHandler("sync_dashboard", admin_sync_dashboard, filters=private)
     )

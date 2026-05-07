@@ -109,6 +109,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("start",), "group_start_use_private_chat"),
                 (("admin",), "admin_menu"),
                 (("stats",), "admin_stats"),
+                (("ops_row",), "ops_row"),
                 (("sync_dashboard",), "admin_sync_dashboard"),
                 (("sync_magistrants",), "admin_sync_magistrants"),
                 (("status",), "status_command"),

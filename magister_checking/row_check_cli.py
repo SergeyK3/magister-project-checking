@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -75,6 +76,14 @@ from magister_checking.drive_urls import (
     classify_drive_url,
     extract_google_file_id,
 )
+from magister_checking.observability import (
+    fingerprint_prefix,
+    google_error_fields,
+    hash_value,
+    id_tail,
+    set_trace_id,
+    structured_extra,
+)
 from magister_checking.snapshot_drive import try_upload_project_snapshot_json
 from magister_checking.report_parser import ParsedReport, parse_intermediate_report
 from magister_checking.summary_pipeline import resolve_report_google_doc_id
@@ -111,6 +120,74 @@ class RowLocator:
 
     row_number: int | None = None
     fio: str | None = None
+
+
+def _row_locator_kind(locator: RowLocator) -> str:
+    if locator.row_number is not None:
+        return "row_number"
+    if locator.fio:
+        return "fio"
+    return "missing"
+
+
+def _duration_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
+
+
+def _log_google_api_success(
+    *,
+    api: str,
+    method: str,
+    operation: str,
+    row_number: int | None = None,
+    resource_kind: str = "",
+    resource_id: str = "",
+) -> None:
+    logger.info(
+        "google.api.success",
+        extra=structured_extra(
+            event="google.api.success",
+            category="google.api",
+            api=api,
+            method=method,
+            operation=operation,
+            status="success",
+            row_number=row_number,
+            resource_kind=resource_kind,
+            resource_id_hash=hash_value(resource_id),
+            file_id_hash=hash_value(resource_id),
+            file_id_tail=id_tail(resource_id),
+        ),
+    )
+
+
+def _log_google_api_error(
+    exc: BaseException,
+    *,
+    api: str,
+    method: str,
+    operation: str,
+    row_number: int | None = None,
+    resource_kind: str = "",
+    resource_id: str = "",
+) -> None:
+    logger.warning(
+        "google.api.error",
+        extra=structured_extra(
+            event="google.api.error",
+            category="google.api",
+            api=api,
+            method=method,
+            operation=operation,
+            status="failed",
+            row_number=row_number,
+            resource_kind=resource_kind,
+            resource_id_hash=hash_value(resource_id),
+            file_id_hash=hash_value(resource_id),
+            file_id_tail=id_tail(resource_id),
+            **google_error_fields(exc),
+        ),
+    )
 
 
 def _service_account_credentials(config: BotConfig) -> Credentials:
@@ -156,6 +233,7 @@ def _try_load_report_document(
     docs_service: Any,
     drive_service: Any,
     docx_conversion_folder_id: str = "",
+    row_number: int | None = None,
 ) -> tuple[Any | None, bool]:
     """Пытается получить тело Google Doc по ссылке на отчёт.
 
@@ -182,8 +260,25 @@ def _try_load_report_document(
             conversion_folder_id=docx_conversion_folder_id,
         ) as loadable_id:
             doc = docs_service.documents().get(documentId=loadable_id).execute()
+            _log_google_api_success(
+                api="docs",
+                method="documents.get",
+                operation="load_report_document",
+                row_number=row_number,
+                resource_kind="report_document",
+                resource_id=loadable_id,
+            )
             return doc, False
     except HttpError as exc:
+        _log_google_api_error(
+            exc,
+            api="docs",
+            method="documents.get",
+            operation="load_report_document",
+            row_number=row_number,
+            resource_kind="report_document",
+            resource_id=doc_id,
+        )
         status = getattr(exc.resp, "status", None)
         try:
             code = int(status) if status is not None else 0
@@ -191,7 +286,16 @@ def _try_load_report_document(
             code = 0
         denied = code in (403, 401)
         return None, denied
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _log_google_api_error(
+            exc,
+            api="docs",
+            method="documents.get",
+            operation="load_report_document",
+            row_number=row_number,
+            resource_kind="report_document",
+            resource_id=doc_id,
+        )
         return None, False
 
 
@@ -329,7 +433,7 @@ def _build_accessibility_map(urls: list[str]) -> dict[str, bool]:
 
 
 def _download_drive_file_bytes_all_drives(
-    *, drive_service: Any, file_id: str
+    *, drive_service: Any, file_id: str, row_number: int | None = None
 ) -> bytes | None:
     """Скачивает файл с Drive (alt=media) с поддержкой Shared Drive.
 
@@ -358,9 +462,35 @@ def _download_drive_file_bytes_all_drives(
         while not done:
             _status, done = downloader.next_chunk()
         data = fh.getvalue()
+        _log_google_api_success(
+            api="drive",
+            method="files.get_media",
+            operation="download_drive_file_bytes_all_drives",
+            row_number=row_number,
+            resource_kind="drive_file",
+            resource_id=file_id,
+        )
         return data if data else None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _log_google_api_error(
+            exc,
+            api="drive",
+            method="files.get_media",
+            operation="download_drive_file_bytes_all_drives",
+            row_number=row_number,
+            resource_kind="drive_file",
+            resource_id=file_id,
+        )
         return None
+
+
+def _try_download_drive_file_bytes_all_drives(
+    *, drive_service: Any, file_id: str, row_number: int | None = None
+) -> bytes | None:
+    kwargs: dict[str, Any] = {"drive_service": drive_service, "file_id": file_id}
+    if row_number is not None:
+        kwargs["row_number"] = row_number
+    return _download_drive_file_bytes_all_drives(**kwargs)
 
 
 def _try_load_dissertation_metrics_and_meta(
@@ -368,6 +498,7 @@ def _try_load_dissertation_metrics_and_meta(
     dissertation_url: str,
     docs_service: Any,
     drive_service: Any,
+    row_number: int | None = None,
 ) -> tuple[DissertationMetrics | None, str, str]:
     """Загружает диссертацию: метрики Stage 4 + название и язык для листа.
 
@@ -385,9 +516,26 @@ def _try_load_dissertation_metrics_and_meta(
     if kind == "google_doc":
         try:
             doc = docs_service.documents().get(documentId=file_id).execute()
-        except Exception:  # noqa: BLE001
-            data = _download_drive_file_bytes_all_drives(
-                drive_service=drive_service, file_id=file_id
+            _log_google_api_success(
+                api="docs",
+                method="documents.get",
+                operation="load_dissertation_document",
+                row_number=row_number,
+                resource_kind="dissertation",
+                resource_id=file_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log_google_api_error(
+                exc,
+                api="docs",
+                method="documents.get",
+                operation="load_dissertation_document",
+                row_number=row_number,
+                resource_kind="dissertation",
+                resource_id=file_id,
+            )
+            data = _try_download_drive_file_bytes_all_drives(
+                drive_service=drive_service, file_id=file_id, row_number=row_number
             )
             if not data:
                 return None, "", ""
@@ -398,7 +546,7 @@ def _try_load_dissertation_metrics_and_meta(
             title = detect_dissertation_title_from_docx_bytes(data)
             language = detect_dissertation_language_from_docx_bytes(data)
             warn_if_unusual_language(
-                language, context=f"dissertation_url={dissertation_url}"
+                language, context=f"dissertation_file_hash={hash_value(file_id)}"
             )
             return metrics, title, language
         try:
@@ -413,13 +561,13 @@ def _try_load_dissertation_metrics_and_meta(
         title = detect_dissertation_title_from_gdoc(doc)
         language = detect_dissertation_language_from_gdoc(doc)
         warn_if_unusual_language(
-            language, context=f"dissertation_url={dissertation_url}"
+            language, context=f"dissertation_file_hash={hash_value(file_id)}"
         )
         return metrics, title, language
 
     if kind == "drive_file":
-        data = _download_drive_file_bytes_all_drives(
-            drive_service=drive_service, file_id=file_id
+        data = _try_download_drive_file_bytes_all_drives(
+            drive_service=drive_service, file_id=file_id, row_number=row_number
         )
         if not data:
             return None, "", ""
@@ -430,7 +578,7 @@ def _try_load_dissertation_metrics_and_meta(
         title = detect_dissertation_title_from_docx_bytes(data)
         language = detect_dissertation_language_from_docx_bytes(data)
         warn_if_unusual_language(
-            language, context=f"dissertation_url={dissertation_url}"
+            language, context=f"dissertation_file_hash={hash_value(file_id)}"
         )
         return metrics, title, language
 
@@ -471,7 +619,7 @@ def _try_load_dissertation_metrics(
 
 
 def _prefetch_drive_file_mimes(
-    *, urls: list[str], drive_service: Any
+    *, urls: list[str], drive_service: Any, row_number: int | None = None
 ) -> dict[str, str]:
     """Для всех drive_file URL получает mimeType через Drive API.
 
@@ -500,7 +648,24 @@ def _prefetch_drive_file_mimes(
                 .get(fileId=file_id, fields="mimeType", supportsAllDrives=True)
                 .execute()
             )
-        except Exception:  # noqa: BLE001
+            _log_google_api_success(
+                api="drive",
+                method="files.get",
+                operation="prefetch_drive_file_mime",
+                row_number=row_number,
+                resource_kind="drive_file",
+                resource_id=file_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log_google_api_error(
+                exc,
+                api="drive",
+                method="files.get",
+                operation="prefetch_drive_file_mime",
+                row_number=row_number,
+                resource_kind="drive_file",
+                resource_id=file_id,
+            )
             continue
         mime = (meta or {}).get("mimeType") or ""
         if mime:
@@ -508,7 +673,9 @@ def _prefetch_drive_file_mimes(
     return mimes
 
 
-def _get_drive_modified_time(*, drive_service: Any, file_id: str) -> str:
+def _get_drive_modified_time(
+    *, drive_service: Any, file_id: str, row_number: int | None = None
+) -> str:
     """``modifiedTime`` файла в Drive (RFC3339) или ``""`` при ошибке.
 
     Используется для re-check fingerprint (handoff §8 — diff_detection):
@@ -524,7 +691,24 @@ def _get_drive_modified_time(*, drive_service: Any, file_id: str) -> str:
             .get(fileId=file_id, fields="modifiedTime", supportsAllDrives=True)
             .execute()
         )
-    except Exception:  # noqa: BLE001
+        _log_google_api_success(
+            api="drive",
+            method="files.get",
+            operation="get_drive_modified_time",
+            row_number=row_number,
+            resource_kind="report_document",
+            resource_id=file_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_google_api_error(
+            exc,
+            api="drive",
+            method="files.get",
+            operation="get_drive_modified_time",
+            row_number=row_number,
+            resource_kind="report_document",
+            resource_id=file_id,
+        )
         return ""
     return str((meta or {}).get("modifiedTime") or "")
 
@@ -621,6 +805,7 @@ def run_row_check(
     apply: bool = False,
     only_if_changed: bool = False,
     history_source: str = "cli",
+    trigger: str = "row_check",
 ) -> RowCheckReport:
     """Основной glue: открывает таблицу, подгружает артефакты, запускает пайплайн.
 
@@ -643,6 +828,25 @@ def run_row_check(
     ``supervisor_status`` (научник запустил через /status ФИО подопечного в боте).
     """
 
+    started_at = time.perf_counter()
+    set_trace_id()
+    row_resolution = _row_locator_kind(locator)
+    logger.info(
+        "retry.row_check.start",
+        extra=structured_extra(
+            event="retry.row_check.start",
+            category="retry.row_check",
+            operation="run_row_check",
+            status="started",
+            trigger=trigger,
+            history_source=history_source,
+            row_resolution=row_resolution,
+            row_number=locator.row_number,
+            apply=apply,
+            only_if_changed=only_if_changed,
+        ),
+    )
+
     spreadsheet = get_spreadsheet(config)
     worksheet = spreadsheet.worksheet(_REGISTRATION_WORKSHEET_NAME)
     row_number = _resolve_row_number(worksheet, locator)
@@ -660,6 +864,7 @@ def run_row_check(
         docs_service=docs_service,
         drive_service=drive_service,
         docx_conversion_folder_id=config.docx_conversion_folder_id,
+        row_number=row_number,
     )
 
     parsed_report = _try_parse_report(report_document) if report_document else None
@@ -679,7 +884,7 @@ def run_row_check(
         report_url=report_url, drive_service=drive_service
     )
     report_modified_time = _get_drive_modified_time(
-        drive_service=drive_service, file_id=report_file_id
+        drive_service=drive_service, file_id=report_file_id, row_number=row_number
     )
     fingerprint = _compute_recheck_fingerprint(
         report_url=report_url,
@@ -690,6 +895,25 @@ def run_row_check(
     if only_if_changed:
         last = read_last_recheck_entry(spreadsheet, row_number)
         if last is not None and last.fingerprint == fingerprint:
+            logger.info(
+                "retry.row_check.unchanged",
+                extra=structured_extra(
+                    event="retry.row_check.unchanged",
+                    category="retry.row_check",
+                    operation="run_row_check",
+                    status="unchanged",
+                    trigger=trigger,
+                    history_source=history_source,
+                    row_resolution=row_resolution,
+                    row_number=row_number,
+                    apply=apply,
+                    only_if_changed=only_if_changed,
+                    unchanged=True,
+                    last_history_found=True,
+                    duration_ms=_duration_ms(started_at),
+                    source_fingerprint_hash_prefix=fingerprint_prefix(fingerprint),
+                ),
+            )
             return RowCheckReport(
                 fio=user.fio or "",
                 row_number=row_number,
@@ -722,7 +946,7 @@ def run_row_check(
         # сказать «PDF/DOCX». Если drive_service недоступен (ошибка
         # ранее), вызовы внутри будут падать в except и просто пропускаться.
         link_mime_types = _prefetch_drive_file_mimes(
-            urls=stage3_urls, drive_service=drive_service
+            urls=stage3_urls, drive_service=drive_service, row_number=row_number
         )
 
     # Stage 4 IO: метрики диссертации, если Stage 3 имеет шанс пройти.
@@ -748,6 +972,7 @@ def run_row_check(
                 dissertation_url=diss_url,
                 docs_service=docs_service,
                 drive_service=drive_service,
+                row_number=row_number,
             )
 
     pipeline_report = run_row_pipeline(
@@ -811,6 +1036,8 @@ def run_row_check(
         if pipeline_report.stopped_at is None:
             pipeline_report.stopped_at = "stage1"
 
+    history_write = "skipped"
+    snapshot_upload_count = 0
     if apply:
         if report_url_target_message:
             # Дублируем сообщение в колонку «Проверка ссылки» для админа,
@@ -861,11 +1088,12 @@ def run_row_check(
                     fingerprint=fingerprint,
                 ),
             )
+            history_write = "success"
         except Exception:  # noqa: BLE001
             # История — вспомогательный артефакт. Если что-то пошло не
             # так (нет прав на add_worksheet, лимиты Sheets), не валим
             # основной flow проверки: магистрант увидел результат.
-            pass
+            history_write = "failed"
 
         try:
             user_after = load_user(worksheet, row_number)
@@ -878,13 +1106,35 @@ def run_row_check(
                 trigger="row_check_apply",
                 source_fingerprint=fingerprint,
             )
-            try_upload_project_snapshot_json(config, drive_snap)
+            snapshot_links = try_upload_project_snapshot_json(config, drive_snap)
+            snapshot_upload_count = len(snapshot_links)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Сохранение JSON-снимка в Google Drive (PROJECT_CARD_OUTPUT_FOLDER_URL)"
             )
 
     pipeline_report.source_fingerprint = fingerprint
+    logger.info(
+        "retry.row_check.completed",
+        extra=structured_extra(
+            event="retry.row_check.completed",
+            category="retry.row_check",
+            operation="run_row_check",
+            status="success",
+            trigger=trigger,
+            history_source=history_source,
+            row_resolution=row_resolution,
+            row_number=row_number,
+            apply=apply,
+            only_if_changed=only_if_changed,
+            unchanged=False,
+            stopped_at=pipeline_report.stopped_at,
+            duration_ms=_duration_ms(started_at),
+            history_write=history_write,
+            snapshot_upload_count=snapshot_upload_count,
+            source_fingerprint_hash_prefix=fingerprint_prefix(fingerprint),
+        ),
+    )
     return pipeline_report
 
 

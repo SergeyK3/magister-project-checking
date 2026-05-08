@@ -19,6 +19,7 @@ except ImportError:  # python-dotenv не обязателен в рантайм
 DEFAULT_WORKSHEET_NAME = "Регистрация"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_PERSISTENCE_FILE = Path("state") / "magistrcheckbot_state.pickle"
+DEFAULT_JOIN_GROUP_TITLE = "Магистр аттестация КОЗМ"
 """Путь по умолчанию к файлу PicklePersistence.
 
 Интерпретируется относительно текущей рабочей директории на момент запуска
@@ -96,6 +97,20 @@ class BotConfig:
 
     Включение: env ``BOT_REQUIRE_PHONE_PIN`` (1 / true / yes / on)."""
 
+    telegram_join_group_chat_id: int | None = None
+    """Целевой chat_id группы для автоодобрения заявок.
+
+    Источник: env ``BOT_JOIN_GROUP_CHAT_ID`` или ``TELEGRAM_JOIN_GROUP_CHAT_ID``.
+    Если не задан, бот сверяет название чата с ``telegram_join_group_title``."""
+
+    telegram_join_group_title: str = DEFAULT_JOIN_GROUP_TITLE
+    """Название целевой группы для заявок, если chat_id ещё не известен."""
+
+    telegram_join_group_invite_link: str = ""
+    """Invite-ссылка в группу с включённым Approve new members.
+
+    Источник: env ``BOT_JOIN_GROUP_INVITE_LINK`` или ``TELEGRAM_JOIN_GROUP_INVITE_LINK``."""
+
     @property
     def log_level_name(self) -> str:
         return logging.getLevelName(self.log_level)
@@ -147,6 +162,15 @@ def _parse_alert_chat_ids(raw: Optional[str]) -> tuple[int, ...]:
                 "(ожидаются целые chat_id через запятую)"
             ) from exc
     return tuple(out)
+
+
+def _parse_optional_int(raw: Optional[str], *, env_name: str) -> int | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(str(raw).strip())
+    except ValueError as exc:
+        raise ConfigError(f"Некорректный {env_name}: {raw!r} (ожидается целое chat_id)") from exc
 
 
 def _parse_env_bool(raw: Optional[str], *, default: bool = False) -> bool:
@@ -203,6 +227,19 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
     alert_chat_ids_raw = _read_env("BOT_ALERT_CHAT_IDS")
     require_phone_pin_raw = _read_env("BOT_REQUIRE_PHONE_PIN")
     force_ipv4_raw = _read_env("BOT_TELEGRAM_FORCE_IPV4")
+    join_group_chat_id_raw = (
+        _read_env("BOT_JOIN_GROUP_CHAT_ID")
+        or _read_env("TELEGRAM_JOIN_GROUP_CHAT_ID")
+    )
+    join_group_title = (
+        _read_env("BOT_JOIN_GROUP_TITLE", DEFAULT_JOIN_GROUP_TITLE)
+        or DEFAULT_JOIN_GROUP_TITLE
+    )
+    join_group_invite_link = (
+        _read_env("BOT_JOIN_GROUP_INVITE_LINK")
+        or _read_env("TELEGRAM_JOIN_GROUP_INVITE_LINK")
+        or ""
+    )
     docx_conv_raw = (
         _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_URL")
         or _read_env("GOOGLE_DRIVE_BUFFER_FOLDER_ID")
@@ -251,6 +288,11 @@ def load_config(*, dotenv_path: Optional[Path] = None) -> BotConfig:
         project_snapshot_output_folder_urls=project_snapshot_output_folder_urls,
         magistrants_worksheet_name=magistrants_worksheet_raw.strip(),
         require_phone_pin=_parse_env_bool(require_phone_pin_raw, default=False),
+        telegram_join_group_chat_id=_parse_optional_int(
+            join_group_chat_id_raw, env_name="BOT_JOIN_GROUP_CHAT_ID"
+        ),
+        telegram_join_group_title=join_group_title.strip(),
+        telegram_join_group_invite_link=join_group_invite_link.strip(),
     )
 
 

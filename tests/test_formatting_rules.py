@@ -130,10 +130,13 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         report = evaluate_formatting_compliance(m, self.rules)
         self.assertFalse(report.compliance)
         self.assertIn("не соответствует", report.text)
-        self.assertIn("1,83", report.text)  # фактическое верхнее
-        self.assertIn("0,75", report.text)  # фактическое правое
-        self.assertIn("внизу слева", report.text)
-        self.assertIn("внизу справа", report.text)  # требование
+        self.assertNotIn("верхнее 1,83", report.text)  # в пределах допуска 0,2 см
+        self.assertIn("нижнее 2,12, а должно быть 1 см", report.text)
+        self.assertIn("левое 1,75, а должно быть 3 см", report.text)
+        self.assertIn("правое 0,75, а должно быть 1 см", report.text)
+        self.assertIn("нумерация страниц: внизу слева", report.text)
+        self.assertNotIn("Нужно:", report.text)
+        self.assertIn("а должна быть внизу справа", report.text)
         self.assertIn("1 из 9", report.text)
         self.assertIn("в Google Docs может не отображаться", report.text)
 
@@ -155,6 +158,8 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         # 1/1 секций — coverage warning не должен сработать.
         self.assertNotIn("в Google Docs может не отображаться", report.text)
         self.assertIn("шрифт «Times New Roman»: 0%", report.text)
+        self.assertNotIn("кегль 14 pt", report.text)
+        self.assertNotIn("межстрочный интервал", report.text)
         self.assertIn("внизу по центру", report.text)
 
     def test_maradzhapova_case(self) -> None:
@@ -178,6 +183,9 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         # не блокируем по нему. Блокирует только position.
         self.assertIn("3 из 7 секций", report.text)
         self.assertIn("кегль 14 pt: 84%", report.text)
+        self.assertIn("нижнее 2, а должно быть 1 см", report.text)
+        self.assertNotIn("шрифт «Times New Roman»", report.text)
+        self.assertNotIn("межстрочный интервал", report.text)
 
     def test_missing_numbering_blocks_compliance(self) -> None:
         m = _metrics(
@@ -211,6 +219,7 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         m = _metrics(bibliography_heading_warning=warn)
         report = evaluate_formatting_compliance(m, self.rules)
         self.assertFalse(report.compliance)
+        self.assertIn("СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ", report.text)
         self.assertIn("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", report.text)
         self.assertIn("не соответствует", report.text)
 

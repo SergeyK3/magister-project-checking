@@ -38,9 +38,10 @@ from magister_checking.bot.sheets_repo import (
     apply_row_check_updates,
     find_rows_by_fio,
     get_spreadsheet,
+    load_registration_row_context,
     load_user,
+    load_sheet_enrichment_for_row,
     read_last_recheck_entry,
-    read_sheet_link_overrides_for_row,
     write_dissertation_meta_columns,
 )
 from magister_checking.bot.report_enrichment import build_sheet_enrichment
@@ -205,7 +206,7 @@ def load_user_enrichment_for_row(
     spreadsheet = get_spreadsheet(config)
     worksheet = spreadsheet.worksheet(_REGISTRATION_WORKSHEET_NAME)
     user = load_user(worksheet, row_number)
-    return user, build_sheet_enrichment(config, user)
+    return user, load_sheet_enrichment_for_row(worksheet, row_number)
 
 
 def _resolve_row_number(
@@ -850,8 +851,9 @@ def run_row_check(
     spreadsheet = get_spreadsheet(config)
     worksheet = spreadsheet.worksheet(_REGISTRATION_WORKSHEET_NAME)
     row_number = _resolve_row_number(worksheet, locator)
-    user: UserForm = load_user(worksheet, row_number)
-    sheet_link_overrides = read_sheet_link_overrides_for_row(worksheet, row_number)
+    row_context = load_registration_row_context(worksheet, row_number)
+    user: UserForm = row_context.user
+    sheet_link_overrides = row_context.sheet_link_overrides
 
     report_url = (user.report_url or "").strip()
 
@@ -1059,6 +1061,7 @@ def run_row_check(
             stage3_cells=pipeline_report.stage3_cells,
             stage4_cells=pipeline_report.stage4_cells,
             fill_status=fill_status_update,
+            field_map=row_context.field_map,
         )
         if pipeline_report.stage4.executed and (
             dissertation_title_for_sheet or dissertation_language_for_sheet
@@ -1069,6 +1072,7 @@ def run_row_check(
                     row_number,
                     title=dissertation_title_for_sheet,
                     language=dissertation_language_for_sheet,
+                    field_map=row_context.field_map,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -1096,7 +1100,24 @@ def run_row_check(
             history_write = "failed"
 
         try:
-            user_after = load_user(worksheet, row_number)
+            user_after = replace(
+                user,
+                report_url_valid=(
+                    report_url_valid
+                    if report_url_valid is not None
+                    else user.report_url_valid
+                ),
+                report_url_accessible=(
+                    report_url_accessible
+                    if report_url_accessible is not None
+                    else user.report_url_accessible
+                ),
+                fill_status=(
+                    fill_status_update
+                    if fill_status_update is not None
+                    else user.fill_status
+                ),
+            )
             extras = build_sheet_enrichment(config, user_after)
             drive_snap = build_project_snapshot(
                 user=user_after,

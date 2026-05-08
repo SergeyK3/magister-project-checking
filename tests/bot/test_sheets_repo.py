@@ -25,13 +25,16 @@ from magister_checking.bot.sheets_repo import (
     DASHBOARD_WORKSHEET_NAME,
     ensure_header,
     find_row_by_telegram_id,
+    find_magistrants_rows_by_fio,
     find_rows_by_fio,
     format_dashboard_telegram_message,
     get_or_create_worksheet,
     get_telegram_id_at_row,
     is_admin_telegram_id,
     is_supervisor_telegram_id,
+    load_registration_row_context,
     load_user,
+    load_magistrants_user,
     magistrants_sheet_column_indices,
     SUPERVISORS_WORKSHEET_NAME,
     read_last_recheck_entry,
@@ -62,6 +65,7 @@ class FakeWorksheet:
         self.rows: List[List[str]] = [list(r) for r in (rows or [])]
         self.update_calls: List[tuple] = []
         self.batch_update_calls: List[tuple] = []
+        self.batch_get_calls: List[list[str]] = []
         self.append_row_calls: List[tuple] = []
         self.id = sheet_id
         self.spreadsheet = spreadsheet
@@ -96,6 +100,17 @@ class FakeWorksheet:
 
     def get_all_values(self) -> List[List[str]]:
         return [list(r) for r in self.rows]
+
+    def batch_get(self, ranges: list[str]) -> List[List[List[str]]]:
+        self.batch_get_calls.append(list(ranges))
+        out: List[List[List[str]]] = []
+        for range_a1 in ranges:
+            start, _, _end = range_a1.partition(":")
+            row_digits = "".join(ch for ch in start if ch.isdigit())
+            row_number = int(row_digits or "0")
+            values = self.row_values(row_number)
+            out.append([values] if values else [])
+        return out
 
     def update(self, range_a1: str, values: List[List[str]]) -> None:
         self.update_calls.append((range_a1, values))
@@ -493,6 +508,33 @@ class LoadUserTests(unittest.TestCase):
         self.assertEqual(user.telegram_username, "user")
         self.assertEqual(user.fio, "")
         self.assertEqual(user.last_action, "")
+
+    def test_registration_row_context_uses_single_batch_get(self) -> None:
+        header = list(SHEET_HEADER) + [
+            "ссылка на магистерский проект",
+            "ссылка на лкб",
+        ]
+        row = [""] * len(header)
+        row[SHEET_HEADER.index("telegram_id")] = "123"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        row[SHEET_HEADER.index("report_url")] = "https://docs.google.com/document/d/r/edit"
+        row[len(SHEET_HEADER)] = "https://drive.google.com/drive/folders/project"
+        row[len(SHEET_HEADER) + 1] = "https://drive.google.com/file/d/lkb/view"
+        ws = FakeWorksheet([header, row])
+
+        ctx = load_registration_row_context(ws, 2)
+
+        self.assertEqual(ws.batch_get_calls, [["1:1", "2:2"]])
+        self.assertEqual(ctx.user.telegram_id, "123")
+        self.assertEqual(ctx.user.fio, "Иванов И.И.")
+        self.assertEqual(
+            ctx.sheet_link_overrides["project_folder_url"],
+            "https://drive.google.com/drive/folders/project",
+        )
+        self.assertEqual(
+            ctx.sheet_link_overrides["lkb_url"],
+            "https://drive.google.com/file/d/lkb/view",
+        )
 
 
 class FioBindingTests(unittest.TestCase):
@@ -1324,8 +1366,85 @@ class ReadLastRecheckEntryTests(unittest.TestCase):
         self.assertEqual(entry.passed, "no")
         self.assertEqual(entry.issues, "issue")
 
+    def test_uses_findall_column_lookup_when_available(self) -> None:
+        class _Cell:
+            def __init__(self, row: int) -> None:
+                self.row = row
+
+        class _FindallWorksheet(FakeWorksheet):
+            def __init__(self, rows: List[List[str]]) -> None:
+                super().__init__(rows)
+                self.get_all_values_calls = 0
+                self.findall_calls: list[tuple[str, int | None]] = []
+
+            def findall(self, query: str, in_column: int | None = None) -> list[_Cell]:
+                self.findall_calls.append((query, in_column))
+                return [
+                    _Cell(idx)
+                    for idx, row in enumerate(self.rows, start=1)
+                    if in_column is not None
+                    and in_column - 1 < len(row)
+                    and str(row[in_column - 1]) == query
+                ]
+
+            def get_all_values(self) -> List[List[str]]:
+                self.get_all_values_calls += 1
+                return super().get_all_values()
+
+        spreadsheet = FakeSpreadsheet()
+        ws = _FindallWorksheet(
+            [
+                list(RECHECK_HISTORY_HEADER),
+                ["t1", "3", "X", "cli", "", "yes", "", "", "", "", "fp_old"],
+                ["t2", "5", "Y", "bot", "", "yes", "", "", "", "", "fp_other"],
+                ["t3", "3", "X", "bot", "", "no", "issue", "", "", "", "fp_new"],
+            ]
+        )
+        spreadsheet.worksheets[RECHECK_HISTORY_WORKSHEET_NAME] = ws
+
+        entry = read_last_recheck_entry(spreadsheet, 3)
+
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry.timestamp, "t3")
+        self.assertEqual(entry.fingerprint, "fp_new")
+        self.assertEqual(ws.findall_calls, [("3", 2)])
+        self.assertEqual(ws.get_all_values_calls, 0)
+
 
 class SyncMagistrantsRegistrationStatusTests(unittest.TestCase):
+    def test_find_and_load_magistrants_user_by_fio(self) -> None:
+        mag_ws = FakeWorksheet(
+            [
+                [
+                    "№",
+                    "ФИО магистранта",
+                    "Спец",
+                    "Телефон",
+                    "Научный руководитель (ссылка)",
+                    "Регистрация",
+                ],
+                [
+                    "1",
+                    "Иванов Иван Иванович",
+                    "",
+                    "8 999 000-00-00",
+                    "Петров П.П.",
+                    "нет",
+                ],
+                ["2", "Петров Пётр", "", "9990001111", "Иванов И.И.", "нет"],
+            ]
+        )
+
+        self.assertEqual(
+            find_magistrants_rows_by_fio(mag_ws, "иванов  иван иванович"),
+            [2],
+        )
+        user = load_magistrants_user(mag_ws, 2)
+        self.assertEqual(user.fio, "Иванов Иван Иванович")
+        self.assertEqual(user.phone, "+79990000000")
+        self.assertEqual(user.supervisor, "Петров П.П.")
+
     def test_updates_phone_and_registration_from_registration_sheet(self) -> None:
         mag_header = [
             "№",

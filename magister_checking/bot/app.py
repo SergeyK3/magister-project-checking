@@ -14,6 +14,7 @@ import httpx
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
@@ -27,6 +28,7 @@ from magister_checking.bot.config import BotConfig
 from magister_checking.bot.error_alerts import on_handler_error
 from magister_checking.bot.handlers import (
     ADMIN_PROJECT_CARD_BUTTON,
+    ADMIN_STATS_BUTTON,
     ADMIN_STUDENT_MESSAGE_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
     ADMSTUB_CALLBACK_CONFIRM_PATTERN,
@@ -42,6 +44,10 @@ from magister_checking.bot.handlers import (
     PIN_VERIFY_INPUT,
     PROJECT_CARD_ASK_TARGET,
     RECHECK_CALLBACK_PATTERN,
+    ROLE_MENU_HELP_BUTTON,
+    ROLE_MENU_REGISTER_BUTTON,
+    ROLE_MENU_SPRAVKA_BUTTON,
+    ROLE_MENU_STATUS_BUTTON,
     ROLE_PICK,
     SPRAVKA_ASK_TARGET,
     SPRAVKA_MENU,
@@ -57,12 +63,14 @@ from magister_checking.bot.handlers import (
     admin_stats,
     admin_sync_dashboard,
     admin_sync_magistrants,
+    agent_debug_update_probe,
     ask_confirm,
     cancel,
     confirm_bind,
     confirm_claim,
     default_bot_commands,
     group_start_use_private_chat,
+    group_join_request,
     help_command,
     project_card_receive_target,
     project_card_start,
@@ -70,6 +78,10 @@ from magister_checking.bot.handlers import (
     receive_claim_fio,
     receive_field,
     receive_pin_input,
+    role_menu_help,
+    role_menu_register,
+    role_menu_spravka,
+    role_menu_status,
     recheck,
     recheck_button,
     register_command,
@@ -83,6 +95,10 @@ from magister_checking.bot.handlers import (
     start,
     start_role_callback,
     status_command,
+    supervisor_menu_status,
+    SUPERVISOR_REGISTERED_BUTTON,
+    SUPERVISOR_STATUS_BUTTON,
+    SUPERVISOR_UNREGISTERED_BUTTON,
     student_message_bulk_start,
     student_reminder_bulk_confirm_callback,
     student_reminder_bulk_receive_rows,
@@ -264,6 +280,7 @@ def build_application(config: BotConfig) -> Application:
 
     private = filters.ChatType.PRIVATE
 
+    application.add_handler(MessageHandler(filters.ALL, agent_debug_update_probe), group=-2)
     application.add_handler(CommandHandler("help", help_command, filters=private), group=-1)
 
     application.add_handler(
@@ -273,6 +290,7 @@ def build_application(config: BotConfig) -> Application:
             filters=filters.ChatType.GROUPS,
         ),
     )
+    application.add_handler(ChatJoinRequestHandler(group_join_request))
 
     field_message_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private, receive_field
@@ -347,6 +365,38 @@ def build_application(config: BotConfig) -> Application:
         filters.Regex(RUSSIAN_EXIT_COMMAND_PATTERN) & private,
         cancel,
     )
+    role_menu_spravka_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ROLE_MENU_SPRAVKA_BUTTON) + "$") & private,
+        role_menu_spravka,
+    )
+    role_menu_register_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ROLE_MENU_REGISTER_BUTTON) + "$") & private,
+        role_menu_register,
+    )
+    role_menu_status_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ROLE_MENU_STATUS_BUTTON) + "$") & private,
+        role_menu_status,
+    )
+    role_menu_help_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ROLE_MENU_HELP_BUTTON) + "$") & private,
+        role_menu_help,
+    )
+    supervisor_status_handler = MessageHandler(
+        filters.Regex("^" + re.escape(SUPERVISOR_STATUS_BUTTON) + "$") & private,
+        supervisor_menu_status,
+    )
+    supervisor_unregistered_handler = MessageHandler(
+        filters.Regex("^" + re.escape(SUPERVISOR_UNREGISTERED_BUTTON) + "$") & private,
+        supervisor_unregistered_list_command,
+    )
+    supervisor_registered_handler = MessageHandler(
+        filters.Regex("^" + re.escape(SUPERVISOR_REGISTERED_BUTTON) + "$") & private,
+        supervisor_registered_list_command,
+    )
+    admin_stats_button_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ADMIN_STATS_BUTTON) + "$") & private,
+        admin_stats,
+    )
     spravka_target_handler = MessageHandler(
         filters.TEXT & ~filters.COMMAND & private,
         spravka_receive_target,
@@ -355,8 +405,10 @@ def build_application(config: BotConfig) -> Application:
         name="registration",
         persistent=True,
         entry_points=[
+            russian_exit_handler,
             russian_start_handler,
             russian_spravka_handler,
+            CommandHandler("cancel", cancel, filters=private),
             CommandHandler("start", start, filters=private),
             CommandHandler("register", register_command, filters=private),
             CommandHandler("project_card", project_card_start, filters=private),
@@ -376,6 +428,14 @@ def build_application(config: BotConfig) -> Application:
                 & private,
                 student_message_bulk_start,
             ),
+            role_menu_spravka_handler,
+            role_menu_register_handler,
+            role_menu_status_handler,
+            role_menu_help_handler,
+            supervisor_status_handler,
+            supervisor_unregistered_handler,
+            supervisor_registered_handler,
+            admin_stats_button_handler,
         ],
         states={
             ROLE_PICK: [start_role_callback_handler],
@@ -427,11 +487,16 @@ def build_application(config: BotConfig) -> Application:
                 & private,
                 student_message_bulk_start,
             ),
+            role_menu_spravka_handler,
+            role_menu_register_handler,
+            role_menu_status_handler,
+            role_menu_help_handler,
+            supervisor_status_handler,
+            supervisor_unregistered_handler,
+            supervisor_registered_handler,
+            admin_stats_button_handler,
         ],
         allow_reentry=True,
-        # CallbackQueryHandler в states (inline-кнопки): иначе PTB предупреждает,
-        # что отслеживание по сообщению выключено — см. FAQ про per_*.
-        per_message=True,
     )
 
     application.add_handler(conv_handler)

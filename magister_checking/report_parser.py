@@ -23,6 +23,14 @@ def _first_doc_link(links: list[HyperlinkRecord]) -> str | None:
     return None
 
 
+def _first_url(links: list[HyperlinkRecord]) -> str | None:
+    for h in links:
+        url = (h.url or "").strip()
+        if url.startswith(("http://", "https://")):
+            return url
+    return None
+
+
 def _join_value_cell_texts(value_cells: list[Any]) -> str:
     parts: list[str] = []
     for c in value_cells:
@@ -259,11 +267,12 @@ def _fill_from_plain_text(out: ParsedReport, document: dict[str, Any]) -> None:
         if out.lkb_url:
             out.lkb_status = "да"
 
-    # Статьи: если есть docs-link в строке — считаем ссылкой; если «вставить ссылку» — оставляем пусто
+    # Статьи: забираем любую http(s)-ссылку. Stage 3 отдельно проверит,
+    # что публикация — Google Doc или PDF-файл на Drive.
     if not out.review_article_url:
         for ln in lines:
             if _LINE_REVIEW_ART.match(ln):
-                mm = _DOC_URL_IN_ROW.search(ln)
+                mm = _ANY_URL.search(ln)
                 if mm:
                     out.review_article_url = mm.group(0).rstrip(".,;)")
                 break
@@ -271,9 +280,22 @@ def _fill_from_plain_text(out: ParsedReport, document: dict[str, Any]) -> None:
     if not out.results_article_url:
         for ln in lines:
             if _LINE_RESULTS_ART.match(ln):
-                mm = _DOC_URL_IN_ROW.search(ln)
+                mm = _ANY_URL.search(ln)
                 if mm:
                     out.results_article_url = mm.group(0).rstrip(".,;)")
+                break
+
+    if out.publication_url is None and not out.results_article_url:
+        for ln in lines:
+            low = ln.lower()
+            if not (
+                "публикац" in low
+                or ("стать" in low and ("результат" in low or "опубликов" in low))
+            ):
+                continue
+            mm = _ANY_URL.search(ln)
+            if mm:
+                out.publication_url = mm.group(0).rstrip(".,;)")
                 break
 
     # Универсальный «следующая строка» fallback для разметки, где заголовок
@@ -361,6 +383,7 @@ def parse_intermediate_report(document: dict[str, Any]) -> ParsedReport:
             for c in row:
                 row_links.extend(c.links)
             doc_link = _first_doc_link(row_links)
+            any_link = _first_url(row_links)
 
             if (
                 "место" in label_key
@@ -412,32 +435,32 @@ def parse_intermediate_report(document: dict[str, Any]) -> ParsedReport:
             out.raw_labels_hit.append(label[:80])
 
             if matched_rule == "lkb":
-                out.lkb_url = doc_link or out.lkb_url
+                out.lkb_url = any_link or out.lkb_url
                 low_txt = row_text.lower()
                 if re.search(r"\bнет\b", low_txt) and not re.search(r"\bесть\b", low_txt):
                     out.lkb_status = "нет"
-                elif re.search(r"\bесть\b", low_txt) or doc_link:
+                elif re.search(r"\bесть\b", low_txt) or any_link:
                     out.lkb_status = "да"
                 else:
                     out.lkb_status = "?"
             elif matched_rule == "dissertation":
-                if doc_link:
-                    out.dissertation_url = doc_link
+                if any_link:
+                    out.dissertation_url = any_link
             elif matched_rule in ("review_article", "review_article_alt"):
-                if doc_link and not out.review_article_url:
-                    out.review_article_url = doc_link
+                if any_link and not out.review_article_url:
+                    out.review_article_url = any_link
                 if not out.review_article_note:
                     out.review_article_note = _note_from_text(row_text)
             elif matched_rule in ("results_article", "results_article_alt"):
-                if doc_link:
-                    out.results_article_url = doc_link
+                if any_link:
+                    out.results_article_url = any_link
 
     if out.lkb_status == "?" and out.lkb_url:
         out.lkb_status = "да"
 
-    # Fallback: если поля для сводной не найдены таблицей, ищем в абзацах.
-    if not out.workplace or not out.job_title or not out.supervisor:
-        _fill_from_plain_text(out, document)
+    # Fallback: ищем в абзацах не только поля сводной, но и ссылки, которые
+    # могли быть не в таблице или быть Drive/PDF-ссылками вместо Google Doc.
+    _fill_from_plain_text(out, document)
 
     return out
 

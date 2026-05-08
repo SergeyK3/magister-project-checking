@@ -191,6 +191,29 @@ class DetectTitleFromGdocTests(unittest.TestCase):
             "ДОЛЖНОСТНЫХ ИНСТРУКЦИЙ МЕДИЦИНСКОЙ ОРГАНИЗАЦИИ",
         )
 
+    def test_govt_template_academic_degree_marker_with_extra_word(self) -> None:
+        document = _document(
+            [
+                _paragraph("НАО «Медицинский университет Астана»\n"),
+                _paragraph("СЕРИКОВА ТАЛШЫН КАЙРГАЛИЕВНА\n"),
+                _paragraph(
+                    "ОПТИМИЗАЦИЯ АМБУЛАТОРНОЙ МЕДИЦИНСКОЙ ПОМОЩИ БОЛЬНЫМ "
+                    "С РЕВМАТОЛОГИЧЕСКИМИ ЗАБОЛЕВАНИЯМИ\n"
+                ),
+                _paragraph("7M10105 – «Менеджмент в здравоохранении»\n"),
+                _paragraph(
+                    "Диссертация на соискание академической степени магистра "
+                    "медицинских наук\n"
+                ),
+                _paragraph("Актуальность темы\n", heading_level=1),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_gdoc(document),
+            "ОПТИМИЗАЦИЯ АМБУЛАТОРНОЙ МЕДИЦИНСКОЙ ПОМОЩИ БОЛЬНЫМ "
+            "С РЕВМАТОЛОГИЧЕСКИМИ ЗАБОЛЕВАНИЯМИ",
+        )
+
     def test_govt_template_caps_title_above_degree_marker_kk(self) -> None:
         # Структура реальной диссертации Камзебаевой.
         document = _document(

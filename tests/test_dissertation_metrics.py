@@ -105,6 +105,26 @@ class DissertationMetricsTests(unittest.TestCase):
         )
         self.assertEqual(analyze_dissertation(kz).sources_count, 5)
 
+    def test_google_doc_counts_structural_bibliography_list_when_numbers_hidden(self) -> None:
+        """Google Docs API может не включать auto-numbering в plain text."""
+
+        def bullet(text: str) -> dict:
+            paragraph = _paragraph(text)["paragraph"]
+            paragraph["bullet"] = {"listId": "bib-list", "nestingLevel": 0}
+            return {"paragraph": paragraph}
+
+        doc = _document(
+            [
+                _paragraph("Текст…\n"),
+                _paragraph("СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ\n"),
+                bullet("Источник с DOI 10.1007/s00296-023-05343-0 и pp. 853-859.\n"),
+                bullet("Второй источник без видимого номера.\n"),
+                bullet("Третий источник.\n"),
+            ]
+        )
+
+        self.assertEqual(analyze_dissertation(doc).sources_count, 3)
+
     def test_maradzhapova_bibliography_glued_block_and_parenthesis_index(self) -> None:
         """Мараджапова: как в макете отчёта (см. test_maradzhapova_layout_publication_on_next_line) —
         плотная вёрстка; плюс нумерация `1) …` в отдельных абзацах.

@@ -463,7 +463,9 @@ def build_sheet_enrichment(
     project_folder_url = parsed.project_folder_url or (
         report_url if is_google_drive_folder_url(report_url) else ""
     )
-    publication_url = parsed.results_article_url or parsed.review_article_url or ""
+    publication_url = (
+        parsed.publication_url or parsed.results_article_url or parsed.review_article_url or ""
+    )
 
     diss_raw = (parsed.dissertation_url or "").strip()
     diss_cell = _link_value_document_field(

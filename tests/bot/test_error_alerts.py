@@ -156,7 +156,8 @@ class OnHandlerErrorTests(unittest.TestCase):
             reply_mock.assert_awaited_once()
             text = reply_mock.await_args.args[0]
             self.assertIn("/start", text)
-            self.assertIn("5", text)
+            self.assertIn("30", text)
+            self.assertIn("60", text)
 
         asyncio.run(_run())
 

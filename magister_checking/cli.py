@@ -436,7 +436,7 @@ def cmd_check_row(ns: argparse.Namespace) -> int:
     # чтобы пометка «(запись в лист выполнена)» не печаталась.
     applied_effective = ns.apply and not report.unchanged
     row = report.row_number or ns.row
-    if not report.unchanged and row is not None:
+    if applied_effective and row is not None:
         u, ex = load_user_enrichment_for_row(config, row)
         print(
             format_report(

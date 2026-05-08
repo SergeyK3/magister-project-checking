@@ -90,7 +90,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
             self.assertEqual(conv.name, "registration")
             self.assertTrue(conv.persistent)
             self.assertTrue(conv.allow_reentry)
-            self.assertTrue(conv.per_message)
+            self.assertFalse(conv.per_message)
             self.assertEqual(
                 sorted(conv.states),
                 sorted(
@@ -132,6 +132,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                 [type(item).__name__ for item in group_zero],
                 [
                     "CommandHandler",
+                    "ChatJoinRequestHandler",
                     "ConversationHandler",
                     "CommandHandler",
                     "CommandHandler",
@@ -190,16 +191,26 @@ class Phase4BRoutingContractTests(unittest.TestCase):
             self.assertEqual(
                 _message_routes(conv.entry_points),
                 [
+                    "cancel",
                     "start",
                     "spravka_start",
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
+                    "role_menu_spravka",
+                    "role_menu_register",
+                    "role_menu_status",
+                    "role_menu_help",
+                    "supervisor_menu_status",
+                    "supervisor_unregistered_list_command",
+                    "supervisor_registered_list_command",
+                    "admin_stats",
                 ],
             )
             self.assertEqual(
                 _command_routes(conv.entry_points),
                 [
+                    (("cancel",), "cancel"),
                     (("start",), "start"),
                     (("register",), "register_command"),
                     (("project_card",), "project_card_start"),
@@ -217,6 +228,14 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
+                    "role_menu_spravka",
+                    "role_menu_register",
+                    "role_menu_status",
+                    "role_menu_help",
+                    "supervisor_menu_status",
+                    "supervisor_unregistered_list_command",
+                    "supervisor_registered_list_command",
+                    "admin_stats",
                 ],
             )
             self.assertEqual(

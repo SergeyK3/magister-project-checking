@@ -361,6 +361,18 @@ class DissertationMetaInEnrichmentTests(unittest.TestCase):
 
 
 class PublicationUrlTests(unittest.TestCase):
+    def test_prefers_explicit_publication_url(self) -> None:
+        parsed = _parsed(
+            publication_url="https://drive.google.com/file/d/publication/view",
+            results_article_url="https://docs.google.com/document/d/results/edit",
+            review_article_url="https://docs.google.com/document/d/review/edit",
+        )
+        result = _run_enrichment_with_parsed(parsed)
+        self.assertEqual(
+            result["publication_url"],
+            "https://drive.google.com/file/d/publication/view",
+        )
+
     def test_prefers_results_article_url(self) -> None:
         parsed = _parsed(
             results_article_url="https://docs.google.com/document/d/results/edit",

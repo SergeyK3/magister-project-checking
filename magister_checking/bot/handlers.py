@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import logging
 import re
+import time
+from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
 from telegram import (
@@ -51,6 +55,7 @@ from magister_checking.bot.sheets_repo import (
     ADMINS_WORKSHEET_NAME,
     SUPERVISORS_WORKSHEET_NAME,
     attach_telegram_to_row,
+    find_magistrants_rows_by_fio,
     find_row_by_telegram_id,
     find_rows_by_fio,
     get_spreadsheet,
@@ -61,11 +66,13 @@ from magister_checking.bot.sheets_repo import (
     fio_text_from_worksheet_row,
     phone_text_from_worksheet_row,
     is_admin_telegram_id,
+    is_magistrant_telegram_id,
     is_supervisor_telegram_id,
     magistrants_sheet_column_indices,
     build_dashboard_rows,
     format_dashboard_telegram_message,
     load_row_values,
+    load_magistrants_user,
     load_user,
     normalize_fio,
     registration_students_by_fio_phone,
@@ -85,6 +92,7 @@ from magister_checking.bot.validation import (
     normalize_text,
 )
 from magister_checking.bot.admin_message_helpers import (
+    ADMIN_STATS_BUTTON,
     ADMIN_PROJECT_CARD_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
     ADMIN_STUDENT_MESSAGE_BUTTON,
@@ -92,19 +100,29 @@ from magister_checking.bot.admin_message_helpers import (
     ADMSTU_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_TEMPLATE_PATTERN,
     BULK_STUDENT_REMINDER_MAX_ROWS,
+    ROLE_MENU_HELP_BUTTON,
+    ROLE_MENU_REGISTER_BUTTON,
+    ROLE_MENU_SPRAVKA_BUTTON,
+    ROLE_MENU_STATUS_BUTTON,
+    SUPERVISOR_REGISTERED_BUTTON,
+    SUPERVISOR_STATUS_BUTTON,
+    SUPERVISOR_UNREGISTERED_BUTTON,
     _admin_keyboard,
     _bulk_delivery_summary_line,
     _parse_bulk_student_row_numbers,
+    _student_keyboard,
     _student_reminder_bulk_confirm_keyboard,
     _student_reminder_confirm_keyboard,
     _student_reminder_preview_text,
     _student_reminder_template_keyboard,
+    _supervisor_keyboard,
 )
 from magister_checking.bot.registration_helpers import (
     HELP_REPLY_TEXT,
     HELP_REPLY_TEXT_ADMIN,
     HELP_REPLY_TEXT_STUDENT,
     HELP_REPLY_TEXT_SUPERVISOR,
+    START_NOTICE_TEXT,
     _fio_query_matches_row_fio,
     _is_skip_text,
     _refresh_status,
@@ -164,11 +182,261 @@ from magister_checking.row_check_cli import (
 
 logger = logging.getLogger("magistrcheckbot")
 _REGISTRATION_SHEETS_LOCK = asyncio.Lock()
+_AGENT_DEBUG_LOG_PATH = "debug-af735b.log"
+_AGENT_DEBUG_SESSION_ID = "af735b"
+LONG_RESPONSE_WAIT_TEXT = (
+    "Подтвердите сохранение вашего промежуточного отчета: да/нет. "
+    "Потом ждите ответа до 2 минут."
+)
+SPRAVKA_AFTER_CONFIRM_HINT_TEXT = (
+    'Дождитесь подтверждения о сохранении записи. Потом подождите еще пару минут '
+    'и для получение справки о состоянии отчета выберите в меню команду '
+    '"Справка и проверка отчета"'
+)
+STUDENT_SPRAVKA_ADMIN_FEEDBACK_TEXT = (
+    "Если отчет по справке не соотвествует действительности, перешлите его в личку "
+    "админу и прокомментируйте, что не так с отчетом. Еще раз перечитайте "
+    "действующие правила оформления и внесите исправления!"
+)
+
+
+def _agent_debug_hash(value: object) -> str:
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _agent_debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    payload = {
+        "sessionId": _AGENT_DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _is_private_chat(update: Update) -> bool:
     chat = update.effective_chat
     return chat is not None and chat.type == ChatType.PRIVATE
+
+
+def _join_request_matches_target_group(cfg: BotConfig, request) -> bool:
+    """True, если заявка пришла из настроенной группы аттестации."""
+
+    chat = getattr(request, "chat", None)
+    if chat is None:
+        return False
+    target_chat_id = getattr(cfg, "telegram_join_group_chat_id", None)
+    if target_chat_id is not None:
+        try:
+            return int(getattr(chat, "id", 0)) == int(target_chat_id)
+        except (TypeError, ValueError):
+            return False
+    target_title = (getattr(cfg, "telegram_join_group_title", "") or "").strip()
+    chat_title = (getattr(chat, "title", "") or "").strip()
+    return bool(target_title and chat_title and chat_title == target_title)
+
+
+def _group_join_whitelist_hit(cfg: BotConfig, telegram_id: str) -> bool:
+    """Белый список для автоодобрения заявки в группу."""
+
+    tid = str(telegram_id or "").strip()
+    if not tid:
+        return False
+    try:
+        worksheet = get_worksheet(cfg)
+        if find_row_by_telegram_id(worksheet, tid) is not None:
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("group join whitelist: registration lookup failed")
+    return (
+        is_magistrant_telegram_id(cfg, tid)
+        or is_admin_telegram_id(cfg, tid)
+        or is_supervisor_telegram_id(cfg, tid)
+    )
+
+
+def _pending_group_joins_from_chat_data(chat_data: dict) -> dict:
+    pending = chat_data.setdefault(CHAT_DATA_PENDING_GROUP_JOINS, {})
+    if not isinstance(pending, dict):
+        pending = {}
+        chat_data[CHAT_DATA_PENDING_GROUP_JOINS] = pending
+    return pending
+
+
+async def _try_send_group_join_dm(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str) -> None:
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text)
+    except Exception:  # noqa: BLE001
+        logger.info("group join: не удалось отправить личное сообщение user_id=%s", user_id)
+
+
+async def _send_group_invite_link_if_configured(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """После записи в таблицу даёт пользователю ссылку для заявки в группу."""
+
+    cfg = _bot_config(context)
+    link = (getattr(cfg, "telegram_join_group_invite_link", "") or "").strip()
+    if not link:
+        return
+    msg = update.effective_message
+    if msg is None:
+        return
+    title = (getattr(cfg, "telegram_join_group_title", "") or "").strip()
+    group_label = f" «{title}»" if title else ""
+    await msg.reply_text(
+        f"Ссылка на Telegram-группу{group_label}:\n{link}\n\n"
+        "Откройте ссылку и подайте заявку на вступление. "
+        "Бот проверит вашу регистрацию и одобрит заявку автоматически."
+    )
+
+
+async def group_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Автоодобрение заявок в группу «Магистр аттестация КОЗМ»."""
+
+    request = update.chat_join_request
+    if request is None:
+        return
+    cfg = _bot_config(context)
+    if not _join_request_matches_target_group(cfg, request):
+        logger.info(
+            "group join: ignore non-target chat_id=%s title=%s",
+            getattr(getattr(request, "chat", None), "id", ""),
+            getattr(getattr(request, "chat", None), "title", ""),
+        )
+        return
+
+    user = request.from_user
+    user_id = int(user.id)
+    telegram_id = str(user_id)
+    allowed = await _call_blocking(_group_join_whitelist_hit, cfg, telegram_id)
+    if allowed:
+        await context.bot.approve_chat_join_request(
+            chat_id=request.chat.id,
+            user_id=user_id,
+        )
+        logger.info(
+            "group join: approved chat_id=%s user_id=%s",
+            request.chat.id,
+            user_id,
+        )
+        await _try_send_group_join_dm(
+            context,
+            user_id,
+            "Доступ к группе «Магистр аттестация КОЗМ» открыт.",
+        )
+        return
+
+    pending = _pending_group_joins_from_chat_data(context.chat_data)
+    pending[telegram_id] = {
+        "chat_id": int(request.chat.id),
+        "chat_title": getattr(request.chat, "title", "") or "",
+        "requested_at": int(time.time()),
+    }
+    logger.info(
+        "group join: pending chat_id=%s user_id=%s",
+        request.chat.id,
+        user_id,
+    )
+    await _try_send_group_join_dm(
+        context,
+        user_id,
+        "Заявка в группу получена, но ваш Telegram ID ещё не найден в учётных списках. "
+        "Откройте личный чат с ботом и завершите регистрацию через /start.",
+    )
+
+
+async def _try_approve_pending_group_join(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    telegram_id: str,
+) -> None:
+    """После регистрации/привязки пробует одобрить ранее ожидавшую заявку."""
+
+    tid = str(telegram_id or "").strip()
+    if not tid:
+        return
+    application = getattr(context, "application", None)
+    all_chat_data = getattr(application, "chat_data", None)
+    if not all_chat_data:
+        return
+
+    cfg = _bot_config(context)
+    if not await _call_blocking(_group_join_whitelist_hit, cfg, tid):
+        return
+
+    for chat_id_key, chat_data in list(all_chat_data.items()):
+        if not isinstance(chat_data, dict):
+            continue
+        pending = chat_data.get(CHAT_DATA_PENDING_GROUP_JOINS)
+        if not isinstance(pending, dict) or tid not in pending:
+            continue
+        payload = pending[tid]
+        chat_id = payload.get("chat_id", chat_id_key) if isinstance(payload, dict) else chat_id_key
+        try:
+            await context.bot.approve_chat_join_request(
+                chat_id=int(chat_id),
+                user_id=int(tid),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "group join: pending approval failed chat_id=%s user_id=%s",
+                chat_id,
+                tid,
+            )
+            return
+        pending.pop(tid, None)
+        logger.info("group join: pending approved chat_id=%s user_id=%s", chat_id, tid)
+        msg = update.effective_message
+        if msg is not None:
+            await msg.reply_text("Доступ к группе «Магистр аттестация КОЗМ» открыт.")
+        return
+
+
+async def agent_debug_update_probe(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Temporary debug probe: logs sanitized update arrival before regular handlers."""
+
+    msg = update.effective_message
+    raw_text = msg.text if msg is not None else ""
+    command = ""
+    if raw_text and raw_text.startswith("/"):
+        command = raw_text.split(maxsplit=1)[0].split("@", 1)[0]
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H1,H2,H5",
+        location="magister_checking/bot/handlers.py:agent_debug_update_probe",
+        message="update reached application",
+        data={
+            "has_message": msg is not None,
+            "has_text": bool(raw_text),
+            "command": command,
+            "chat_type": getattr(update.effective_chat, "type", ""),
+            "user_hash": _agent_debug_hash(getattr(update.effective_user, "id", "")),
+        },
+    )
+    # endregion
 
 
 async def group_start_use_private_chat(
@@ -208,6 +476,9 @@ USER_DATA_CLAIM_ROW_KEY = "claim_candidate_row"
 USER_DATA_SPRAVKA_MODE = "spravka_mode"
 USER_DATA_ADMIN_RECHECK_PENDING = "admin_recheck_pending"
 USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED = "admin_recheck_only_if_changed"
+USER_DATA_SUPERVISOR_STATUS_PENDING = "supervisor_status_pending"
+USER_DATA_SUPERVISOR_STATUS_PENDING_AT = "supervisor_status_pending_at"
+CHAT_DATA_PENDING_GROUP_JOINS = "pending_group_join_requests"
 USER_DATA_STUDENT_REMINDER_ROW = "student_reminder_row"
 USER_DATA_STUDENT_REMINDER_FIO = "student_reminder_fio"
 USER_DATA_STUDENT_REMINDER_DRAFT = "student_reminder_draft"
@@ -217,6 +488,17 @@ USER_DATA_PIN_REGISTER_EXTRA_KEY = "pin_verify_register_extra"
 USER_DATA_ENRICHMENT_WARNINGS_KEY = "enrichment_student_warnings"
 
 CONFIG_BOT_DATA_KEY = "bot_config"
+_TELEGRAM_ROLE_CACHE_TTL_SECONDS = 180.0
+
+
+@dataclass(frozen=True)
+class _TelegramRoleCacheEntry:
+    role: str
+    row_number: int | None
+    expires_at: float
+
+
+_TELEGRAM_ROLE_CACHE: dict[str, _TelegramRoleCacheEntry] = {}
 
 
 def _format_user_visible_exc(exc: BaseException, *, limit: int = 480) -> str:
@@ -260,6 +542,85 @@ def _get_user_form(context: ContextTypes.DEFAULT_TYPE) -> UserForm:
         form = UserForm()
         context.user_data[USER_DATA_FORM_KEY] = form
     return form
+
+
+def clear_telegram_role_cache() -> None:
+    """Test/admin helper: drop ephemeral role lookup cache."""
+
+    _TELEGRAM_ROLE_CACHE.clear()
+
+
+def _telegram_role_cache_key(config: BotConfig, telegram_id: str) -> str:
+    sheet_id = str(getattr(config, "spreadsheet_id", "") or "")
+    worksheet_name = str(getattr(config, "worksheet_name", "") or "")
+    return f"{sheet_id}:{worksheet_name}:{str(telegram_id).strip()}"
+
+
+def _cached_telegram_role(
+    config: BotConfig, telegram_id: str
+) -> _TelegramRoleCacheEntry | None:
+    key = _telegram_role_cache_key(config, telegram_id)
+    entry = _TELEGRAM_ROLE_CACHE.get(key)
+    if entry is None:
+        return None
+    if entry.expires_at <= time.time():
+        _TELEGRAM_ROLE_CACHE.pop(key, None)
+        return None
+    return entry
+
+
+def _store_telegram_role(
+    config: BotConfig,
+    telegram_id: str,
+    *,
+    role: str,
+    row_number: int | None = None,
+) -> None:
+    key = _telegram_role_cache_key(config, telegram_id)
+    _TELEGRAM_ROLE_CACHE[key] = _TelegramRoleCacheEntry(
+        role=role,
+        row_number=row_number,
+        expires_at=time.time() + _TELEGRAM_ROLE_CACHE_TTL_SECONDS,
+    )
+
+
+def _resolve_telegram_role(
+    config: BotConfig,
+    worksheet,
+    telegram_id: str,
+    *,
+    load_student: bool = False,
+) -> tuple[str, int | None, UserForm | None]:
+    """Resolve Telegram role with a short in-memory cache; Sheets remains canonical."""
+
+    tid = str(telegram_id or "").strip()
+    if not tid:
+        return "unknown", None, None
+
+    cached = _cached_telegram_role(config, tid)
+    if cached is not None:
+        return cached.role, cached.row_number, None
+
+    row_number = find_row_by_telegram_id(worksheet, tid)
+    loaded_user: UserForm | None = None
+    if row_number:
+        if load_student:
+            loaded_user = load_user(worksheet, row_number)
+        _store_telegram_role(
+            config, tid, role="student", row_number=int(row_number)
+        )
+        return "student", int(row_number), loaded_user
+
+    if is_admin_telegram_id(config, tid):
+        _store_telegram_role(config, tid, role="admin")
+        return "admin", None, None
+
+    if is_supervisor_telegram_id(config, tid):
+        _store_telegram_role(config, tid, role="supervisor")
+        return "supervisor", None, None
+
+    _store_telegram_role(config, tid, role="unknown")
+    return "unknown", None, None
 
 
 def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -439,7 +800,7 @@ def _format_spravka_text_from_recheck(
     applied_effective = not report.unchanged
     if not report.unchanged:
         user_row, extra_values = load_user_enrichment_for_row(cfg, row_number)
-        return format_report(
+        text = format_report(
             report,
             applied=applied_effective,
             user=user_row,
@@ -449,13 +810,17 @@ def _format_spravka_text_from_recheck(
             view=view,
             as_html=as_html,
         )
-    return format_report(
-        report,
-        applied=applied_effective,
-        trigger=trigger,
-        view=view,
-        as_html=as_html,
-    )
+    else:
+        text = format_report(
+            report,
+            applied=applied_effective,
+            trigger=trigger,
+            view=view,
+            as_html=as_html,
+        )
+    if view == "student":
+        text = f"{text}\n\n{STUDENT_SPRAVKA_ADMIN_FEEDBACK_TEXT}"
+    return text
 
 
 def _resolve_project_card_target_row(
@@ -503,6 +868,7 @@ async def _prompt_next(
         _record_action(user_form, "show_summary")
         await msg.reply_text(_review_prompt_text())
         await msg.reply_text(_summary_text(user_form))
+        await msg.reply_text(LONG_RESPONSE_WAIT_TEXT)
         return ASK_CONFIRM
 
     _record_action(user_form, f"ask_{next_field}")
@@ -524,7 +890,8 @@ async def _start_new_registration(
     user_form = _get_user_form(context)
     _record_action(user_form, "start_new")
     await msg.reply_text(
-        "Здравствуйте.\n\n"
+        START_NOTICE_TEXT
+        + "\n\n"
         "Бот поможет зарегистрироваться для промежуточной аттестации магистрантов.\n"
         "Я последовательно задам вопросы и сохраню данные в таблицу.\n\n"
         f"Если какое-то поле хотите заполнить позже, отправьте {SKIP_TOKEN} или /skip.\n\n"
@@ -534,18 +901,53 @@ async def _start_new_registration(
     return await _prompt_next(update, context)
 
 
+async def _start_registration_from_magistrants_row(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    worksheet,
+    row_number: int,
+    sheet_title: str,
+) -> int:
+    """Начинает регистрацию, предзаполнив поля из master-листа магистрантов."""
+
+    loaded = await _call_blocking(load_magistrants_user, worksheet, row_number)
+    _set_telegram_identity(loaded, update)
+    context.user_data[USER_DATA_FORM_KEY] = loaded
+    _record_action(loaded, "bind_from_magistrants")
+
+    msg = _message_for_bot_reply(update)
+    if msg is None:
+        return ConversationHandler.END
+
+    await msg.reply_text(
+        f"Нашёл запись в листе «{sheet_title}», строка {row_number}:\n\n"
+        f"{_format_row_summary(loaded)}\n\n"
+        "Эти данные подставлю в анкету. Недостающие поля дозаполним и сохраним "
+        "регистрацию в лист «Регистрация»."
+    )
+    _set_pending_fields(context, get_missing_field_keys(loaded))
+    return await _prompt_next(update, context)
+
+
 async def _resume_registration_from_row(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     *,
     row_number: int,
     action: str,
+    worksheet=None,
+    loaded_user: UserForm | None = None,
 ) -> int:
     """Переключает диалог в режим продолжения регистрации по существующей строке."""
 
-    cfg = _bot_config(context)
-    worksheet = await _call_blocking(get_worksheet, cfg)
-    loaded = await _call_blocking(load_user, worksheet, row_number)
+    if loaded_user is None:
+        if worksheet is None:
+            cfg = _bot_config(context)
+            worksheet = await _call_blocking(get_worksheet, cfg)
+        loaded = await _call_blocking(load_user, worksheet, row_number)
+    else:
+        loaded = loaded_user
     context.user_data[USER_DATA_FORM_KEY] = loaded
     _set_telegram_identity(loaded, update)
     _record_action(loaded, action)
@@ -618,6 +1020,9 @@ async def _finalize_bind_attachment(
             telegram_first_name=user_form.telegram_first_name,
             telegram_last_name=user_form.telegram_last_name,
         )
+        _store_telegram_role(
+            cfg, user_form.telegram_id or "", role="student", row_number=row_number
+        )
         try:
             await _call_blocking(sync_registration_dashboard, cfg)
         except Exception as sync_exc:  # noqa: BLE001
@@ -639,12 +1044,18 @@ async def _finalize_bind_attachment(
                 logger.warning("Google Sheets rate limit после привязки (магистранты)")
                 magistrants_rate_note = "\n\n" + GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
     context.user_data[USER_DATA_BIND_ROW_KEY] = None
+    await _try_approve_pending_group_join(
+        update,
+        context,
+        telegram_id=user_form.telegram_id or "",
+    )
     reply = msg or update.message
     rate_notes = dashboard_rate_note + magistrants_rate_note
     if reply is not None:
         await reply.reply_text(
             f"Привязал ваш Telegram к строке {row_number}.{rate_notes}"
         )
+    await _send_group_invite_link_if_configured(update, context)
     return await _resume_registration_from_row(
         update,
         context,
@@ -702,8 +1113,14 @@ async def _finalize_claim_attachment(
             telegram_first_name=user_form.telegram_first_name,
             telegram_last_name=user_form.telegram_last_name,
         )
+        _store_telegram_role(cfg, user_form.telegram_id or "", role=target)
     context.user_data[USER_DATA_CLAIM_TARGET_KEY] = None
     context.user_data[USER_DATA_CLAIM_ROW_KEY] = None
+    await _try_approve_pending_group_join(
+        update,
+        context,
+        telegram_id=user_form.telegram_id or "",
+    )
     if target == "admin":
         assert msg is not None
         await msg.reply_text(
@@ -752,6 +1169,9 @@ async def _finalize_registration_confirm(
             )
         else:
             row_num = await _call_blocking(upsert_user, worksheet, user_form)
+        _store_telegram_role(
+            cfg, user_form.telegram_id or "", role="student", row_number=row_num
+        )
         try:
             await _call_blocking(sync_registration_dashboard, cfg)
         except Exception as sync_exc:  # noqa: BLE001
@@ -771,6 +1191,11 @@ async def _finalize_registration_confirm(
             if is_google_sheets_rate_limit(mag_exc):
                 magistrants_rate_note = "\n\n" + GOOGLE_SHEETS_RATE_LIMIT_USER_NOTE
 
+    await _try_approve_pending_group_join(
+        update,
+        context,
+        telegram_id=user_form.telegram_id or "",
+    )
     missing = get_missing_fields(user_form)
     rate_notes = dashboard_rate_note + magistrants_rate_note
     notes_block = ""
@@ -799,6 +1224,7 @@ async def _finalize_registration_confirm(
             + notes_block,
             reply_markup=build_recheck_keyboard(row_num),
         )
+    await _send_group_invite_link_if_configured(update, context)
 
     return ConversationHandler.END
 
@@ -947,7 +1373,8 @@ async def start_role_callback(
 
     if data == "start:mag:bind":
         await msg.reply_text(
-            "Здравствуйте.\n\n"
+            START_NOTICE_TEXT
+            + "\n\n"
             "Если вы уже отправляли промежуточный отчёт через форму или старосту, "
             "введите ФИО ровно так, как в форме — я найду вашу запись и привяжу к ней "
             "этот аккаунт.\n\n"
@@ -1109,47 +1536,134 @@ async def confirm_claim(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Команда /start: регистрация, роли админ/научрук или выбор сценария магистранта."""
 
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H2,H3,H4",
+        location="magister_checking/bot/handlers.py:start.entry",
+        message="start handler entered",
+        data={
+            "has_message": update.message is not None,
+            "chat_type": getattr(update.effective_chat, "type", ""),
+            "user_hash": _agent_debug_hash(getattr(update.effective_user, "id", "")),
+        },
+    )
+    # endregion
     if update.message is None:
         return ConversationHandler.END
 
     cfg = _bot_config(context)
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H3",
+        location="magister_checking/bot/handlers.py:start.before_get_worksheet",
+        message="start before get_worksheet",
+        data={"worksheet_name": cfg.worksheet_name},
+    )
+    # endregion
     worksheet = await _call_blocking(get_worksheet, cfg)
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H3",
+        location="magister_checking/bot/handlers.py:start.after_get_worksheet",
+        message="start after get_worksheet",
+        data={"worksheet_title": str(getattr(worksheet, "title", ""))},
+    )
+    # endregion
 
     user_form = _get_user_form(context)
     _set_telegram_identity(user_form, update)
 
-    existing_row = await _call_blocking(
-        find_row_by_telegram_id, worksheet, user_form.telegram_id
+    role, existing_row, loaded_user = await _call_blocking(
+        _resolve_telegram_role,
+        cfg,
+        worksheet,
+        user_form.telegram_id,
+        load_student=True,
     )
-    if existing_row:
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H3,H4",
+        location="magister_checking/bot/handlers.py:start.after_find_row",
+        message="start row lookup completed",
+        data={
+            "has_existing_row": existing_row is not None,
+            "existing_row": existing_row if existing_row is not None else "",
+            "user_hash": _agent_debug_hash(user_form.telegram_id),
+        },
+    )
+    # endregion
+    if role == "student" and existing_row:
+        # region agent log
+        _agent_debug_log(
+            run_id="pre-fix",
+            hypothesis_id="H4",
+            location="magister_checking/bot/handlers.py:start.reply_existing",
+            message="start sending existing-row reply",
+            data={"row": existing_row},
+        )
+        # endregion
         await update.message.reply_text("Вы уже есть в таблице.")
         return await _resume_registration_from_row(
             update,
             context,
             row_number=existing_row,
             action="start_returning",
+            worksheet=worksheet,
+            loaded_user=loaded_user,
         )
 
-    if await _call_blocking(
-        is_admin_telegram_id, cfg, user_form.telegram_id or ""
-    ):
+    if role == "admin":
+        # region agent log
+        _agent_debug_log(
+            run_id="pre-fix",
+            hypothesis_id="H4",
+            location="magister_checking/bot/handlers.py:start.reply_admin",
+            message="start sending admin reply",
+            data={"user_hash": _agent_debug_hash(user_form.telegram_id)},
+        )
+        # endregion
         await update.message.reply_text(
-            f"Здравствуйте. Вы в списке администраторов (лист «{ADMINS_WORKSHEET_NAME}»). "
-            "Справка: /help, панель: /admin."
+            START_NOTICE_TEXT
+            + "\n\n"
+            f"Вы в списке администраторов (лист «{ADMINS_WORKSHEET_NAME}»)."
         )
-        return ConversationHandler.END
+        return await _send_admin_role_menu(update)
 
-    if await _call_blocking(
-        is_supervisor_telegram_id, cfg, user_form.telegram_id or ""
-    ):
+    if role == "supervisor":
+        # region agent log
+        _agent_debug_log(
+            run_id="pre-fix",
+            hypothesis_id="H4",
+            location="magister_checking/bot/handlers.py:start.reply_supervisor",
+            message="start sending supervisor reply",
+            data={"user_hash": _agent_debug_hash(user_form.telegram_id)},
+        )
+        # endregion
         await update.message.reply_text(
-            f"Здравствуйте. Вы в списке научных руководителей (лист "
-            f"«{SUPERVISORS_WORKSHEET_NAME}»). Справка: /help."
+            START_NOTICE_TEXT
+            + "\n\n"
+            f"Вы в списке научных руководителей (лист "
+            f"«{SUPERVISORS_WORKSHEET_NAME}»)."
         )
-        return ConversationHandler.END
+        return await _send_supervisor_role_menu(update)
 
+    # region agent log
+    _agent_debug_log(
+        run_id="pre-fix",
+        hypothesis_id="H4",
+        location="magister_checking/bot/handlers.py:start.reply_role_picker",
+        message="start sending role picker reply",
+        data={"user_hash": _agent_debug_hash(user_form.telegram_id)},
+    )
+    # endregion
     await update.message.reply_text(
-        "Здравствуйте. Вы ещё не в таблице «Регистрация» и не привязаны к спискам "
+        START_NOTICE_TEXT
+        + "\n\n"
+        "Вы ещё не в таблице «Регистрация» и не привязаны к спискам "
         "администраторов / научруков.\n\n"
         "Кто вы? Выберите кнопку ниже.",
         reply_markup=_start_role_keyboard_main(),
@@ -1292,13 +1806,32 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
 
+    return await _send_admin_role_menu(update)
+
+
+async def _send_admin_role_menu(update: Update) -> int:
     await update.message.reply_text(
         "Панель администратора.\n\n"
-        "• Карточка — кнопка ниже или /project_card (PDF).\n"
-        "• Сообщение магистранту — вторая кнопка или /student_message (напоминание в личку).\n"
-        "• Групповое стандартное напоминание — третья кнопка или /student_message_bulk "
-        "(список номеров строк).",
+        "Выберите действие кнопкой ниже.",
         reply_markup=_admin_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def _send_supervisor_role_menu(update: Update) -> int:
+    await update.message.reply_text(
+        "Панель научного руководителя.\n\n"
+        "Выберите действие кнопкой ниже.",
+        reply_markup=_supervisor_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def _send_student_role_menu(update: Update) -> int:
+    await update.message.reply_text(
+        "Меню магистранта.\n\n"
+        "Выберите действие кнопкой ниже.",
+        reply_markup=_student_keyboard(),
     )
     return ConversationHandler.END
 
@@ -1849,6 +2382,7 @@ async def spravka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         update.message.text or "",
         default_only_if_changed=SPRAVKA_RETRY_ONLY_IF_CHANGED,
     )
+    only_if_changed = False
     if admin_target and not _is_admin(update, context):
         await update.message.reply_text(
             "Указать номер строки или ФИО в /справка могут только администраторы.\n\n"
@@ -2202,6 +2736,29 @@ async def receive_bind_fio(
     user_form.fio = fio
     matches = await _call_blocking(find_rows_by_fio, worksheet, fio)
     if not matches:
+        mag_title = (cfg.magistrants_worksheet_name or "").strip()
+        if mag_title:
+            spreadsheet = await _call_blocking(get_spreadsheet, cfg)
+            mag_ws = await _call_blocking(get_optional_worksheet, spreadsheet, mag_title)
+            if mag_ws is not None:
+                mag_matches = await _call_blocking(find_magistrants_rows_by_fio, mag_ws, fio)
+                if len(mag_matches) == 1:
+                    return await _start_registration_from_magistrants_row(
+                        update,
+                        context,
+                        worksheet=mag_ws,
+                        row_number=mag_matches[0],
+                        sheet_title=mag_title,
+                    )
+                if len(mag_matches) > 1:
+                    _record_action(user_form, "bind_magistrants_multiple_matches")
+                    await update.message.reply_text(
+                        "Нашёл несколько записей с таким ФИО в листе "
+                        f"«{mag_title}»: {', '.join(str(r) for r in mag_matches)}.\n\n"
+                        "Обратитесь к администратору, чтобы он подсказал строку. "
+                        "Пока запускаю обычную регистрацию."
+                    )
+                    return await _start_new_registration(update, context)
         await update.message.reply_text(
             "Не нашёл записи с таким ФИО. Пройдём регистрацию с нуля."
         )
@@ -2417,6 +2974,7 @@ async def ask_confirm(
     cfg = _bot_config(context)
     _refresh_status(user_form)
     _record_action(user_form, "confirmed_save")
+    await msg.reply_text(SPRAVKA_AFTER_CONFIRM_HINT_TEXT)
     extra_values: dict[str, str] = {}
     enrich_warnings: list[str] = []
     if user_form.report_url:
@@ -2459,6 +3017,11 @@ def _clear_admin_recheck_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED, None)
 
 
+def _clear_supervisor_status_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(USER_DATA_SUPERVISOR_STATUS_PENDING, None)
+    context.user_data.pop(USER_DATA_SUPERVISOR_STATUS_PENDING_AT, None)
+
+
 async def _prompt_admin_recheck_need_target(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2487,20 +3050,36 @@ async def _prompt_admin_recheck_need_target(
 async def admin_recheck_pending_receive(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Второй шаг админского /recheck: текст с номером строки или ФИО (не команда)."""
+    """Pending one-shot text inputs outside the main ConversationHandler."""
 
     if update.message is None or update.effective_user is None:
         return
     if not _is_private_chat(update):
         return
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    if context.user_data.get(USER_DATA_SUPERVISOR_STATUS_PENDING):
+        pending_at = float(
+            context.user_data.get(USER_DATA_SUPERVISOR_STATUS_PENDING_AT) or 0.0
+        )
+        _clear_supervisor_status_pending(context)
+        if time.time() - pending_at > 30 * 60:
+            await update.message.reply_text(
+                "Запрос устарел. Нажмите кнопку проверки магистранта ещё раз."
+            )
+            return
+        if not _is_supervisor(update, context):
+            await update.message.reply_text("Команда только для научных руководителей.")
+            return
+        await _supervisor_student_status_by_fio(update, context, text)
+        return
+
     if not context.user_data.get(USER_DATA_ADMIN_RECHECK_PENDING):
         return
     if not _is_admin(update, context):
         _clear_admin_recheck_pending(context)
-        return
-
-    text = (update.message.text or "").strip()
-    if not text:
         return
 
     cfg = _bot_config(context)
@@ -2631,16 +3210,23 @@ async def _do_recheck(
         return
 
     if not skip_status_message:
-        mode_hint = (
-            "быстрый режим (только если входы поменялись)"
-            if only_if_changed
-            else "полная проверка"
-        )
-        await _send_recheck_reply(
-            update,
-            f"Запускаю повторную проверку строки {row_number} ({mode_hint}).\n"
-            "Это может занять до минуты.",
-        )
+        if report_trigger == "spravka":
+            await _send_recheck_reply(
+                update,
+                f"Проверяю строку {row_number}.\n"
+                "Это может занять до минуты.",
+            )
+        else:
+            mode_hint = (
+                "быстрый режим (только если входы поменялись)"
+                if only_if_changed
+                else "полная проверка"
+            )
+            await _send_recheck_reply(
+                update,
+                f"Запускаю повторную проверку строки {row_number} ({mode_hint}).\n"
+                "Это может занять до минуты.",
+            )
 
     locator = RowLocator(row_number=row_number)
     try:
@@ -2828,28 +3414,108 @@ async def register_command(
     user_form = _get_user_form(context)
     _set_telegram_identity(user_form, update)
     worksheet = await _call_blocking(get_worksheet, cfg)
-    existing_row = await _call_blocking(
-        find_row_by_telegram_id, worksheet, user_form.telegram_id
+    role, existing_row, loaded_user = await _call_blocking(
+        _resolve_telegram_role,
+        cfg,
+        worksheet,
+        user_form.telegram_id,
+        load_student=True,
     )
-    if existing_row:
+    if role == "student" and existing_row:
         await update.message.reply_text("Вы уже есть в таблице. Продолжим анкету.")
         return await _resume_registration_from_row(
             update,
             context,
             row_number=existing_row,
             action="register_returning",
+            worksheet=worksheet,
+            loaded_user=loaded_user,
         )
-    if await _call_blocking(is_admin_telegram_id, cfg, user_form.telegram_id or ""):
+    if role == "admin":
         await update.message.reply_text(
             "Команда /register для магистрантов. Администраторам: /start, /help."
         )
         return ConversationHandler.END
-    if await _call_blocking(is_supervisor_telegram_id, cfg, user_form.telegram_id or ""):
+    if role == "supervisor":
         await update.message.reply_text(
             "Команда /register — для магистранта. Научруку: /help."
         )
         return ConversationHandler.END
     return await _start_new_registration(update, context)
+
+
+async def role_menu_spravka(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Reply-keyboard trigger: existing /справка flow."""
+
+    if update.message is None:
+        return ConversationHandler.END
+    if not _is_admin(update, context):
+        await _do_recheck(
+            update,
+            context,
+            only_if_changed=SPRAVKA_RETRY_ONLY_IF_CHANGED,
+            report_trigger="spravka",
+        )
+        return ConversationHandler.END
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                "Кратко (магистрант)",
+                callback_data=SPRAVKA_CALLBACK_TELEGRAM,
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "Полный текст (комиссия, чат)",
+                callback_data=SPRAVKA_CALLBACK_COMMISSION,
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "PDF для комиссии",
+                callback_data=SPRAVKA_CALLBACK_PDF,
+            )
+        ],
+    ]
+    await update.message.reply_text(
+        "Выберите формат справки по проекту.\n\n"
+        "Для полного текста и PDF бот следующим шагом спросит строку или ФИО.",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    return SPRAVKA_MENU
+
+
+async def role_menu_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply-keyboard trigger: existing /help flow."""
+
+    await help_command(update, context)
+
+
+async def role_menu_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Reply-keyboard trigger: existing registration flow."""
+
+    return await register_command(update, context)
+
+
+async def role_menu_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply-keyboard trigger: existing /status flow."""
+
+    await status_command(update, context)
+
+
+async def supervisor_menu_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Ask target, then reuse existing /status ФИО handler on the next message."""
+
+    if update.message is None:
+        return
+    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING] = True
+    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING_AT] = time.time()
+    await update.message.reply_text(
+        "Введите ФИО магистранта с листа «Магистранты» для проверки статуса."
+    )
 
 
 async def student_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3108,6 +3774,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data[USER_DATA_CLAIM_ROW_KEY] = None
     context.user_data[USER_DATA_BIND_ROW_KEY] = None
     _clear_admin_recheck_pending(context)
+    _clear_supervisor_status_pending(context)
     _clear_student_reminder(context)
     msg = update.message or (update.effective_message)
     if msg is not None:
@@ -3175,7 +3842,17 @@ __all__ = [
     "STUDENT_MSG_CONFIRM",
     "STUDENT_MSG_PICK_KIND",
     "ROLE_PICK",
+    "ROLE_MENU_HELP_BUTTON",
+    "ROLE_MENU_REGISTER_BUTTON",
+    "ROLE_MENU_SPRAVKA_BUTTON",
+    "ROLE_MENU_STATUS_BUTTON",
+    "SUPERVISOR_REGISTERED_BUTTON",
+    "SUPERVISOR_STATUS_BUTTON",
+    "SUPERVISOR_UNREGISTERED_BUTTON",
+    "ADMIN_STATS_BUTTON",
     "admin_recheck_pending_receive",
+    "agent_debug_update_probe",
+    "group_join_request",
     "admin_menu",
     "admin_stats",
     "admin_sync_dashboard",
@@ -3204,6 +3881,10 @@ __all__ = [
     "recheck",
     "recheck_button",
     "register_command",
+    "role_menu_help",
+    "role_menu_register",
+    "role_menu_spravka",
+    "role_menu_status",
     "skip_bind",
     "skip_field",
     "spravka_choose",
@@ -3212,6 +3893,7 @@ __all__ = [
     "start",
     "start_role_callback",
     "status_command",
+    "supervisor_menu_status",
     "student_message_bulk_start",
     "student_reminder_bulk_confirm_callback",
     "student_reminder_bulk_receive_rows",

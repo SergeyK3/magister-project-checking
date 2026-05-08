@@ -89,14 +89,38 @@ class RenderSpravkaTests(unittest.TestCase):
             report=r,
         )
         t = render_spravka_telegram(s, applied=False)
-        self.assertIn("не менялись", t)
+        self.assertIn("совпадают с последней проверкой", t)
         self.assertNotIn("dry-run", t)
         h = render_spravka_telegram_html(s, applied=False)
-        self.assertIn("<b>", h)
+        self.assertIn("совпадают с последней проверкой", h)
 
     def test_escape_tg_html(self) -> None:
         self.assertIn("&amp;", escape_tg_html("A & B"))
         self.assertIn("&lt;", escape_tg_html("a < b"))
+
+    def test_spravka_renders_sheet_dissertation_title_and_language(self) -> None:
+        r = RowCheckReport(fio="Иванов", row_number=3)
+        s = build_project_snapshot(
+            user=UserForm(fio="Иванов"),
+            report=r,
+            extra_values={
+                "pages_total": "80",
+                "sources_count": "35",
+                "compliance": "не соответствует. Найдено: нижнее 2, а должно быть 1 см.",
+                "dissertation_title": "Разработка модели",
+                "dissertation_language": "русский",
+            },
+        )
+
+        text = render_spravka_telegram(s, applied=True)
+        self.assertIn("Показатели по диссертации (лист)", text)
+        self.assertIn("название: Разработка модели", text)
+        self.assertIn("язык: русский", text)
+
+        html = render_spravka_telegram_html(s, applied=True)
+        self.assertIn("Показатели по диссертации (лист)", html)
+        self.assertIn("название: Разработка модели", html)
+        self.assertIn("язык: русский", html)
 
     def test_spravka_html_stage3_note_under_link_and_stage4_at_bottom(self) -> None:
         from magister_checking.bot.row_pipeline import (

@@ -5,12 +5,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from magister_checking.bot.models import UserForm
+from magister_checking.bot.models import SHEET_HEADER, UserForm
 from magister_checking.bot.validation import REPORT_URL_HTTP_INACCESSIBLE_MESSAGE
 from magister_checking.dissertation_metrics import DissertationMetrics
 from magister_checking.report_parser import ParsedReport
 from magister_checking.bot.row_pipeline import RowCheckReport
-from magister_checking.bot.sheets_repo import RecheckHistoryEntry
+from magister_checking.bot.sheets_repo import RegistrationRowContext, RecheckHistoryEntry
 from magister_checking.row_check_cli import (
     REPORT_DRIVE_ACL_DENIED_MESSAGE,
     REPORT_DRIVE_ANYONE_LINK_BUT_BOT_FAILED_MESSAGE,
@@ -122,18 +122,23 @@ def _install_io_mocks(
 
     creds_mock = MagicMock()
 
+    field_map = {name: idx for idx, name in enumerate(SHEET_HEADER)}
+    row_context = RegistrationRowContext(
+        header=list(SHEET_HEADER),
+        row=[str(getattr(user, name) or "") for name in SHEET_HEADER],
+        field_map=field_map,
+        user=user,
+        sheet_link_overrides={},
+    )
+
     patches = [
         patch(
             "magister_checking.row_check_cli.get_spreadsheet",
             return_value=spreadsheet,
         ),
         patch(
-            "magister_checking.row_check_cli.load_user",
-            return_value=user,
-        ),
-        patch(
-            "magister_checking.row_check_cli.read_sheet_link_overrides_for_row",
-            return_value={},
+            "magister_checking.row_check_cli.load_registration_row_context",
+            return_value=row_context,
         ),
         patch(
             "magister_checking.row_check_cli.find_rows_by_fio",
@@ -161,7 +166,7 @@ def _install_io_mocks(
         ),
     ]
 
-    _BUILD_PATCH_INDEX = 5
+    _BUILD_PATCH_INDEX = 4
 
     class _Manager:
         def __enter__(self) -> None:
@@ -1025,7 +1030,7 @@ class OnlyIfChangedTests(unittest.TestCase):
 class CliCheckRowFlagsTests(unittest.TestCase):
     """Парсинг argparse и проброс флагов в run_row_check."""
 
-    def _run_cmd(self, argv: list[str]) -> tuple[int, MagicMock]:
+    def _run_cmd(self, argv: list[str]) -> tuple[int, MagicMock, MagicMock]:
         from magister_checking import cli
 
         fake_report = RowCheckReport(fio="X Y", row_number=4)
@@ -1038,12 +1043,12 @@ class CliCheckRowFlagsTests(unittest.TestCase):
         ) as run, patch(
             "magister_checking.row_check_cli.load_user_enrichment_for_row",
             return_value=(UserForm(fio="X Y"), {}),
-        ):
+        ) as load_enrichment:
             code = cli.main(argv)
-        return code, run
+        return code, run, load_enrichment
 
     def test_only_if_changed_propagates_to_run_row_check(self) -> None:
-        code, run = self._run_cmd(
+        code, run, _load_enrichment = self._run_cmd(
             ["check-row", "--row", "4", "--only-if-changed"]
         )
         self.assertEqual(code, 0)
@@ -1053,17 +1058,19 @@ class CliCheckRowFlagsTests(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["apply"])
 
     def test_default_check_row_does_not_pass_only_if_changed(self) -> None:
-        code, run = self._run_cmd(["check-row", "--row", "4"])
+        code, run, load_enrichment = self._run_cmd(["check-row", "--row", "4"])
         self.assertEqual(code, 0)
         self.assertFalse(run.call_args.kwargs["only_if_changed"])
+        load_enrichment.assert_not_called()
 
     def test_apply_flag_combines_with_only_if_changed(self) -> None:
-        code, run = self._run_cmd(
+        code, run, load_enrichment = self._run_cmd(
             ["check-row", "--row", "4", "--apply", "--only-if-changed"]
         )
         self.assertEqual(code, 0)
         self.assertTrue(run.call_args.kwargs["apply"])
         self.assertTrue(run.call_args.kwargs["only_if_changed"])
+        load_enrichment.assert_called_once()
 
     def test_notify_student_without_apply_exits_2(self) -> None:
         from magister_checking import cli
@@ -1126,8 +1133,8 @@ class FormatReportUnchangedTests(unittest.TestCase):
         text = format_report(report, applied=False)
         self.assertIn("Иванов И.И.", text)
         self.assertIn("Строка: 5", text)
-        self.assertIn("--only-if-changed", text)
-        self.assertIn("не тронуты", text)
+        self.assertIn("Данные строки совпадают с последней проверкой", text)
+        self.assertNotIn("--only-if-changed", text)
         self.assertNotIn("Извлечённые ссылки", text)
         self.assertNotIn("dry-run", text)
 

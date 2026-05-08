@@ -139,6 +139,18 @@ class RecheckHistoryEntry:
             fingerprint=str(padded[10] or ""),
         )
 
+
+@dataclass(frozen=True)
+class RegistrationRowContext:
+    """Данные одной строки «Регистрация», прочитанные одним запросом к Values API."""
+
+    header: List[str]
+    row: List[str]
+    field_map: dict[str, int]
+    user: UserForm
+    sheet_link_overrides: dict[str, str]
+
+
 _HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "timestamp": ("timestamp", "отметка времени", "дата регистрации", "дата и время"),
     "telegram_id": ("telegram_id", "telegram id", "id telegram"),
@@ -214,10 +226,44 @@ def read_sheet_link_overrides_for_row(
     выполняется в ``row_check_cli``."""
     header = _header_row(worksheet)
     row = worksheet.row_values(row_number)
-    padded = list(row) + [""] * max(0, len(header) - len(row))
     field_map = _field_to_column_map_from_header(header)
+    return _values_for_keys(header, row, field_map, SHEET_LINK_OVERRIDE_KEYS)
+
+
+SHEET_ENRICHMENT_KEYS: tuple[str, ...] = (
+    "project_folder_url",
+    "lkb_url",
+    "dissertation_url",
+    "publication_url",
+    "pages_total",
+    "sources_count",
+    "compliance",
+    "dissertation_title",
+    "dissertation_language",
+)
+
+
+def load_sheet_enrichment_for_row(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+) -> dict[str, str]:
+    """Возвращает уже записанные значения проверки из строки листа «Регистрация»."""
+
+    header = _header_row(worksheet)
+    row = worksheet.row_values(row_number)
+    field_map = _field_to_column_map_from_header(header)
+    return _values_for_keys(header, row, field_map, SHEET_ENRICHMENT_KEYS)
+
+
+def _values_for_keys(
+    header: List[str],
+    row: List[str],
+    field_map: dict[str, int],
+    keys: tuple[str, ...],
+) -> dict[str, str]:
+    padded = list(row) + [""] * max(0, len(header) - len(row))
     out: dict[str, str] = {}
-    for key in SHEET_LINK_OVERRIDE_KEYS:
+    for key in keys:
         idx = field_map.get(key)
         if idx is None or idx >= len(padded):
             continue
@@ -253,6 +299,26 @@ def _normalize_header(value: str) -> str:
 
 def _header_row(worksheet: gspread.Worksheet) -> List[str]:
     return worksheet.row_values(1)
+
+
+def _header_and_row_values(
+    worksheet: gspread.Worksheet, row_number: int
+) -> tuple[List[str], List[str]]:
+    """Читает шапку и строку за один ``batch_get`` там, где он доступен."""
+
+    batch_get = getattr(worksheet, "batch_get", None)
+    if callable(batch_get):
+        try:
+            values = batch_get(["1:1", f"{row_number}:{row_number}"])
+        except TypeError:
+            values = None
+        if isinstance(values, list) and len(values) >= 2:
+            header_rows = values[0] if isinstance(values[0], list) else []
+            data_rows = values[1] if isinstance(values[1], list) else []
+            header = list(header_rows[0]) if header_rows else []
+            row = list(data_rows[0]) if data_rows else []
+            return header, row
+    return _header_row(worksheet), worksheet.row_values(row_number)
 
 
 def _field_to_column_map(worksheet: gspread.Worksheet) -> dict[str, int]:
@@ -430,11 +496,30 @@ def read_last_recheck_entry(
     worksheet = get_optional_worksheet(spreadsheet, RECHECK_HISTORY_WORKSHEET_NAME)
     if worksheet is None:
         return None
+    needle = str(row_number).strip()
+    findall = getattr(worksheet, "findall", None)
+    if callable(findall):
+        try:
+            cells = findall(needle, in_column=2)
+            last: RecheckHistoryEntry | None = None
+            data_rows = sorted(
+                {
+                    int(getattr(cell, "row"))
+                    for cell in cells
+                    if getattr(cell, "row", 1) > 1
+                }
+            )
+            for row_idx in data_rows:
+                raw = worksheet.row_values(row_idx)
+                if len(raw) >= 2 and str(raw[1]).strip() == needle:
+                    last = RecheckHistoryEntry.from_row(raw)
+            return last
+        except Exception:  # noqa: BLE001
+            pass
     try:
         rows = worksheet.get_all_values()
     except Exception:  # noqa: BLE001
         return None
-    needle = str(row_number).strip()
     last: RecheckHistoryEntry | None = None
     for raw in rows[1:]:
         if not raw:
@@ -606,18 +691,17 @@ def _find_first_free_data_row(worksheet: gspread.Worksheet) -> int:
     """
 
     columns = _present_data_columns(worksheet)
-    max_rows = max(len(worksheet.col_values(col_idx + 1)) for col_idx in columns)
-    if max_rows <= 1:
+    rows = worksheet.get_all_values()
+    if len(rows) <= 1:
         return 2
 
-    for idx in range(2, max_rows + 1):
-        row = worksheet.row_values(idx)
+    for idx, row in enumerate(rows[1:], start=2):
         if all(
             str(row[col_idx]).strip() == "" if col_idx < len(row) else True
             for col_idx in columns
         ):
             return idx
-    return max_rows + 1
+    return len(rows) + 1
 
 
 def _row_to_user(header: Iterable[str], row: Iterable[str]) -> UserForm:
@@ -658,6 +742,24 @@ def load_user(worksheet: gspread.Worksheet, row_number: int) -> UserForm:
     header = _header_row(worksheet)
     row = worksheet.row_values(row_number)
     return _row_to_user(header, row)
+
+
+def load_registration_row_context(
+    worksheet: gspread.Worksheet, row_number: int
+) -> RegistrationRowContext:
+    """Загружает шапку, строку, ``UserForm`` и ручные ссылки без повторных чтений."""
+
+    header, row = _header_and_row_values(worksheet, row_number)
+    field_map = _field_to_column_map_from_header(header)
+    return RegistrationRowContext(
+        header=header,
+        row=row,
+        field_map=field_map,
+        user=_row_to_user(header, row),
+        sheet_link_overrides=_values_for_keys(
+            header, row, field_map, SHEET_LINK_OVERRIDE_KEYS
+        ),
+    )
 
 
 def load_row_values(worksheet: gspread.Worksheet, row_number: int) -> List[str]:
@@ -836,6 +938,59 @@ def magistrants_sheet_column_indices(header: List[str]) -> Optional[dict[str, in
     if tg_i is not None:
         out["telegram_id"] = tg_i
     return out
+
+
+def find_magistrants_rows_by_fio(
+    worksheet: gspread.Worksheet,
+    fio: str,
+) -> List[int]:
+    """1-based строки листа «Магистранты», где ФИО совпадает после нормализации."""
+
+    needle = normalize_fio(fio)
+    if not needle:
+        return []
+    header = _header_row(worksheet)
+    colmap = magistrants_sheet_column_indices(header)
+    if colmap is None:
+        return []
+    fio_i = colmap["fio"]
+    rows = worksheet.get_all_values()
+    matches: List[int] = []
+    for row_number, row in enumerate(rows[1:], start=2):
+        if fio_i >= len(row):
+            continue
+        if normalize_fio(str(row[fio_i] or "")) == needle:
+            matches.append(row_number)
+    return matches
+
+
+def load_magistrants_user(
+    worksheet: gspread.Worksheet,
+    row_number: int,
+) -> UserForm:
+    """Читает базовые поля магистранта из master-листа для предзаполнения анкеты."""
+
+    header = _header_row(worksheet)
+    colmap = magistrants_sheet_column_indices(header)
+    row = worksheet.row_values(row_number)
+    if colmap is None:
+        return UserForm()
+    padded = list(row) + [""] * max(0, len(header) - len(row))
+    user = UserForm()
+    fio_i = colmap.get("fio")
+    phone_i = colmap.get("phone")
+    sup_i = colmap.get("supervisor")
+    tg_i = colmap.get("telegram_id")
+    if fio_i is not None and fio_i < len(padded):
+        user.fio = str(padded[fio_i] or "").strip()
+    if phone_i is not None and phone_i < len(padded):
+        raw_phone = str(padded[phone_i] or "").strip()
+        user.phone = normalize_phone_ru_kz(raw_phone) or raw_phone
+    if sup_i is not None and sup_i < len(padded):
+        user.supervisor = str(padded[sup_i] or "").strip()
+    if tg_i is not None and tg_i < len(padded):
+        user.telegram_id = str(padded[tg_i] or "").strip()
+    return user
 
 
 def registration_students_by_fio_phone(
@@ -1130,6 +1285,21 @@ def is_supervisor_telegram_id(config: BotConfig, telegram_id: str) -> bool:
     return _is_telegram_id_active_in_worksheet(ws, telegram_id)
 
 
+def is_magistrant_telegram_id(config: BotConfig, telegram_id: str) -> bool:
+    """Проверяет Telegram ID в master-листе «Магистранты», если он настроен."""
+
+    if not telegram_id or not str(telegram_id).strip():
+        return False
+    sheet_name = (config.magistrants_worksheet_name or "").strip()
+    if not sheet_name:
+        return False
+    spreadsheet = get_spreadsheet(config)
+    ws = get_optional_worksheet(spreadsheet, sheet_name)
+    if ws is None:
+        return False
+    return _is_telegram_id_active_in_worksheet(ws, telegram_id)
+
+
 def get_telegram_id_at_row(worksheet: gspread.Worksheet, row_number: int) -> str:
     """``telegram_id`` в строке (по маппингу заголовка) либо пустая строка."""
 
@@ -1306,6 +1476,7 @@ def apply_row_check_updates(
     stage3_cells: list[Stage3CellUpdate] | None = None,
     stage4_cells: list[Stage4CellUpdate] | None = None,
     fill_status: str | None = None,
+    field_map: dict[str, int] | None = None,
 ) -> None:
     """Записывает результаты прогона одной строки листа «Регистрация».
 
@@ -1341,7 +1512,7 @@ def apply_row_check_updates(
 
     stage3_cells = list(stage3_cells or [])
     stage4_cells = list(stage4_cells or [])
-    field_map = _field_to_column_map(worksheet)
+    field_map = dict(field_map) if field_map is not None else _field_to_column_map(worksheet)
 
     # Карта значений колонка → строка. Используем dict, чтобы последняя
     # запись по тому же ключу побеждала: сначала чистим (пустая строка),
@@ -1447,10 +1618,11 @@ def write_dissertation_meta_columns(
     *,
     title: str,
     language: str,
+    field_map: dict[str, int] | None = None,
 ) -> None:
     """Пишет название и язык диссертации (колонки вне clean-write Stage 2–4)."""
 
-    field_map = _field_to_column_map(worksheet)
+    field_map = dict(field_map) if field_map is not None else _field_to_column_map(worksheet)
     batch_values: list[dict] = []
     for key, val in (
         ("dissertation_title", title or ""),

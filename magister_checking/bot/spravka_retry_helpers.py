@@ -19,8 +19,8 @@ diff_detection режим «full by default»), но магистрант мож
 чтобы получить ответ «без изменений» без повторной нагрузки на Drive.
 """
 
-SPRAVKA_RETRY_ONLY_IF_CHANGED = True
-"""Канонический публичный ``/справка`` не дублирует снимки при неизменных входах."""
+SPRAVKA_RETRY_ONLY_IF_CHANGED = False
+"""Канонический публичный ``/справка`` всегда формирует актуальный отчёт по строке."""
 
 RECHECK_BUTTON_LABEL = "🔄 Перепроверить"
 RECHECK_CALLBACK_DATA = "recheck:full"
@@ -69,9 +69,9 @@ def _parse_recheck_command_parts(
     Возвращает ``(only_if_changed, target)``, где ``target`` — номер строки или ФИО
     (всё, что осталось после удаления токенов ``quick`` / ``only-if-changed`` и т.д.).
     Только администраторы могут передать непустой ``target`` (см. ``recheck`` /
-    ``spravka_start``). Для legacy ``/recheck`` default — full; для публичной
-    ``/справка`` default — only-if-changed, чтобы повтор без изменений не писал
-    лишний JSON snapshot.
+    ``spravka_start``). Для legacy ``/recheck`` default — full; публичная
+    ``/справка`` также запускает полный прогон, если пользователь явно не передал
+    quick-токен.
     """
 
     parts = (message_text or "").strip().split()

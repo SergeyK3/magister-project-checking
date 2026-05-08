@@ -166,9 +166,9 @@ class ComplianceReport:
     """Итог расширенной проверки оформления.
 
     ``compliance`` — итоговый бинарный вердикт (None, если данных мало).
-    ``text`` — подробное сообщение «Найдено / Нужно» для cell листа и
-    Telegram (handoff §formatting v2 — full_in_same_cell). Один и тот
-    же текст идёт и в колонку «Соответствие оформлению», и магистранту.
+    ``text`` — подробное сообщение только по фактическим отклонениям для
+    cell листа и Telegram. Параметры, которые соответствуют правилам, в
+    ячейке не дублируются.
     ``warnings`` — диагностика, которая НЕ блокирует compliance (например,
     coverage нумерации < 50% секций для DOCX). Пишется внутри ``text``.
     """
@@ -201,8 +201,7 @@ def evaluate_formatting_compliance(
     (например, .pdf без структуры — но мы такие до Stage 4 не доводим).
     """
 
-    found_lines: list[str] = []
-    needed_lines: list[str] = []
+    issue_lines: list[str] = []
     issues: list[str] = []
     warnings: list[str] = []
 
@@ -212,10 +211,12 @@ def evaluate_formatting_compliance(
     if metrics.times_new_roman_ratio is not None:
         has_any_metric = True
         actual_pct = round(metrics.times_new_roman_ratio * 100)
-        found_lines.append(f"шрифт «{rules.font_family}»: {actual_pct}% символов")
-        needed_lines.append(f"шрифт «{rules.font_family}»: 100% символов")
         if metrics.times_new_roman_ratio < rules.ratio_threshold:
             issues.append("font_family")
+            issue_lines.append(
+                f"шрифт «{rules.font_family}»: {actual_pct}% символов, "
+                f"а должно быть не менее {round(rules.ratio_threshold * 100)}%"
+            )
 
     # Кегль
     if metrics.font_size_14_ratio is not None:
@@ -226,32 +227,43 @@ def evaluate_formatting_compliance(
             if rules.font_size_pt.is_integer()
             else f"{rules.font_size_pt}"
         )
-        found_lines.append(f"кегль {size_label} pt: {actual_pct}% символов")
-        needed_lines.append(f"кегль {size_label} pt: 100% символов")
         if metrics.font_size_14_ratio < rules.ratio_threshold:
             issues.append("font_size")
+            issue_lines.append(
+                f"кегль {size_label} pt: {actual_pct}% символов, "
+                f"а должно быть не менее {round(rules.ratio_threshold * 100)}%"
+            )
 
     # Межстрочный интервал
     if metrics.single_spacing_ratio is not None:
         has_any_metric = True
         actual_pct = round(metrics.single_spacing_ratio * 100)
-        found_lines.append(f"межстрочный интервал — одинарный: {actual_pct}% абзацев")
-        needed_lines.append("межстрочный интервал — одинарный: 100% абзацев")
         if metrics.single_spacing_ratio < rules.ratio_threshold:
             issues.append("line_spacing")
+            issue_lines.append(
+                f"межстрочный интервал — одинарный: {actual_pct}% абзацев, "
+                f"а должно быть не менее {round(rules.ratio_threshold * 100)}%"
+            )
 
     # Поля
     if metrics.page_margins_cm:
         has_any_metric = True
-        actual_str = _format_margins_cm(metrics.page_margins_cm)
-        expected_str = _format_margins_cm(rules.margins_cm)
-        found_lines.append(f"поля страницы: {actual_str}")
-        needed_lines.append(f"поля страницы: {expected_str}")
+        margin_labels = {
+            "top": "верхнее",
+            "bottom": "нижнее",
+            "left": "левое",
+            "right": "правое",
+        }
         for key in ("top", "bottom", "left", "right"):
             actual = metrics.page_margins_cm.get(key)
             expected = rules.margins_cm[key]
             if actual is None or abs(actual - expected) > rules.margin_tolerance_cm:
                 issues.append(f"margin_{key}")
+                actual_text = "—" if actual is None else _format_cm(actual)
+                issue_lines.append(
+                    f"поля страницы: {margin_labels[key]} {actual_text}, "
+                    f"а должно быть {_format_cm(expected)} см"
+                )
         if metrics.page_margins_secondary_cm:
             n_other = len(metrics.page_margins_secondary_cm)
             warnings.append(
@@ -264,8 +276,11 @@ def evaluate_formatting_compliance(
     if metrics.page_numbering_present is not None:
         has_any_metric = True
         if metrics.page_numbering_present is False:
-            found_lines.append("нумерация страниц: отсутствует")
             issues.append("page_numbering_missing")
+            issue_lines.append(
+                "нумерация страниц: отсутствует, "
+                f"а должна быть {position_human_ru(rules.page_numbering_position)}"
+            )
         else:
             actual_position = metrics.page_numbering_position or "не определено"
             actual_human = (
@@ -289,24 +304,21 @@ def evaluate_formatting_compliance(
                 warnings.append(
                     f"нумерация задана только для {with_footer} из {total} секций"
                 )
-            found_lines.append(f"нумерация страниц: {actual_human}{coverage_note}")
             if (
                 metrics.page_numbering_position is not None
                 and metrics.page_numbering_position != rules.page_numbering_position
             ):
                 issues.append("page_numbering_position")
-        needed_lines.append(
-            f"нумерация страниц: {position_human_ru(rules.page_numbering_position)}"
-        )
-
+                issue_lines.append(
+                    f"нумерация страниц: {actual_human}{coverage_note}, "
+                    f"а должна быть {position_human_ru(rules.page_numbering_position)}"
+                )
     if getattr(metrics, "bibliography_heading_warning", None):
         has_any_metric = True
         issues.append("bibliography_heading")
-        found_lines.append(
-            "заголовок списка литературы: «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ»"
-        )
-        needed_lines.append(
-            "«СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ» (утверждённое название)"
+        issue_lines.append(
+            "заголовок списка литературы: «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ», "
+            "а должно быть «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ»"
         )
 
     if not has_any_metric:
@@ -319,11 +331,7 @@ def evaluate_formatting_compliance(
         # идёт дальше. Длинный «Найдено / Нужно» только при проблеме.
         text = "соответствует"
     else:
-        text = (
-            "не соответствует. "
-            "Найдено: " + "; ".join(found_lines) + ". "
-            "Нужно: " + "; ".join(needed_lines) + "."
-        )
+        text = "не соответствует. Найдено: " + "; ".join(issue_lines) + "."
 
     return ComplianceReport(
         compliance=compliance, text=text, warnings=tuple(warnings)

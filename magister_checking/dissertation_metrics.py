@@ -724,6 +724,49 @@ def _docx_bibliography_word_list_count(doc: Any) -> int | None:
     return best
 
 
+def _gdoc_bibliography_list_count(document: dict[str, Any]) -> int | None:
+    """Считает auto-numbered/bulleted пункты библиографии в Google Docs API.
+
+    В ``plain_text`` Google Docs не всегда выводит номера авто-нумерации. Тогда
+    текстовый fallback может принять числа из DOI/страниц/PMID за номера
+    источников. Структурное поле ``paragraph.bullet`` даёт сам факт пункта
+    списка, даже если видимый номер не включён в textRun.
+    """
+
+    paragraphs = list(iter_paragraphs(document))
+    best: int | None = None
+    for idx, paragraph in enumerate(paragraphs):
+        if not _is_bibliography_marker(_paragraph_text(paragraph)):
+            continue
+        count = 0
+        started = False
+        non_list_gap = 0
+        for candidate in paragraphs[idx + 1 :]:
+            text = _paragraph_text(candidate).strip()
+            if _is_appendix_marker(text):
+                break
+            bullet = candidate.get("bullet") or {}
+            if bullet.get("listId"):
+                try:
+                    nesting_level = int(bullet.get("nestingLevel") or 0)
+                except (TypeError, ValueError):
+                    nesting_level = 0
+                if nesting_level == 0:
+                    count += 1
+                    started = True
+                    non_list_gap = 0
+                continue
+            if not started:
+                continue
+            if text:
+                non_list_gap += 1
+                if non_list_gap > 3:
+                    break
+        if count >= 3 and (best is None or count > best):
+            best = count
+    return best
+
+
 def _docx_collect_section_margins(doc: Any) -> list[dict[str, float]]:
     """Список ``{'top','bottom','left','right'}`` в см по всем ``<w:sectPr>``.
 
@@ -1107,7 +1150,8 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
         "обсуждение" in h or "вывод" in h for h in low
     )
 
-    sources = _estimate_sources_count(plain)
+    gdoc_list_count = _gdoc_bibliography_list_count(document)
+    sources = gdoc_list_count or _estimate_sources_count(plain)
     review_pages, review_sources = _estimate_review_metrics(plain)
     pages = max(1, len(plain) // _CHARS_PER_PAGE_RU)
     formatting_compliance, font_size_ratio, font_family_ratio, line_spacing_ratio = (

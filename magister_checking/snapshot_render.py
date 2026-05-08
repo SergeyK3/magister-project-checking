@@ -129,6 +129,56 @@ def _commission_links_block_html(links: SnapshotLinks) -> list[str]:
     return lines
 
 
+def _student_sheet_link_lines(links: SnapshotLinks) -> list[str]:
+    items = (
+        ("project_folder_url", "Папка проекта", links.project_folder_url),
+        ("lkb_url", "ЛКБ", links.lkb_url),
+        ("dissertation_url", "Диссертация", links.dissertation_url),
+        ("publication_url", "Публикация", links.publication_url),
+    )
+    lines = ["Ссылки из листа «Регистрация» (L/M/N/O):"]
+    for key, label, raw in items:
+        norm = _normalize_cell_for_commission_pdf(raw)
+        if not norm:
+            continue
+        body = _strip_duplicate_field_prefix(label, norm)
+        lines.append(f"  {key}: {body or norm}")
+    return lines if len(lines) > 1 else []
+
+
+def _student_sheet_link_html_lines(links: SnapshotLinks) -> list[str]:
+    items = (
+        ("Папка проекта", links.project_folder_url),
+        ("ЛКБ", links.lkb_url),
+        ("Диссертация", links.dissertation_url),
+        ("Публикация", links.publication_url),
+    )
+    lines = ["\n<b>Ссылки из листа «Регистрация» (L/M/N/O)</b>"]
+    for label, raw in items:
+        if not _normalize_cell_for_commission_pdf(raw):
+            continue
+        lines.append(_html_commission_link_line(label, raw))
+    return lines if len(lines) > 1 else []
+
+
+def _student_dissertation_fact_lines(links: SnapshotLinks) -> list[str]:
+    if not (links.dissertation_title or links.dissertation_language):
+        return []
+    return [
+        f"  название: {links.dissertation_title or '—'}",
+        f"  язык: {links.dissertation_language or '—'}",
+    ]
+
+
+def _student_dissertation_fact_html_lines(links: SnapshotLinks) -> list[str]:
+    if not (links.dissertation_title or links.dissertation_language):
+        return []
+    return [
+        f"название: {escape_tg_html(links.dissertation_title) or '—'}",
+        f"язык: {escape_tg_html(links.dissertation_language) or '—'}",
+    ]
+
+
 def _html_commission_link_line(display_label: str, raw: str) -> str:
     norm = _normalize_cell_for_commission_pdf(raw)
     body = _strip_duplicate_field_prefix(display_label, norm)
@@ -149,8 +199,7 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         return (
             f"Магистрант: {fio}\n"
             f"Строка: {row}\n\n"
-            "С прошлой проверки входы не менялись (--only-if-changed).\n"
-            "Лист и история проверок не тронуты."
+            "Данные строки совпадают с последней проверкой; новый отчёт не формировался."
         )
 
     lines: list[str] = []
@@ -177,7 +226,14 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
             lines.append(f"- {issue}")
     if snapshot.stopped_at:
         lines.append(f"Проверка остановлена на этапе: {snapshot.stopped_at}")
-    if snapshot.stage3_extracted:
+    sheet_link_lines = _student_sheet_link_lines(snapshot.links)
+    if sheet_link_lines:
+        lines.append("")
+        lines.extend(sheet_link_lines)
+        for notes in column_notes.values():
+            for note in notes:
+                lines.append(f"    ↳ {note}")
+    elif snapshot.stage3_extracted:
         lines.append("")
         lines.append("Извлечённые ссылки (L/M/N/O):")
         for cell in snapshot.stage3_extracted:
@@ -197,9 +253,19 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
             f"  источников: {m.sources_count if m.sources_count is not None else '—'}"
         )
         lines.append(f"  оформление: {m.compliance_label}")
+        lines.extend(_student_dissertation_fact_lines(snapshot.links))
+    elif snapshot.sheet_enrichment_metrics is not None:
+        p, s, c = snapshot.sheet_enrichment_metrics
+        lines.append("")
+        lines.append("Показатели по диссертации (лист):")
+        lines.append(f"  страниц всего: {p or '—'}")
+        lines.append(f"  источников: {s or '—'}")
+        lines.append(f"  оформление: {c or '—'}")
+        lines.extend(_student_dissertation_fact_lines(snapshot.links))
     elif snapshot.stage4_skipped_reason:
         lines.append("")
         lines.append(f"Stage 4 пропущен: {snapshot.stage4_skipped_reason}")
+        lines.extend(_student_dissertation_fact_lines(snapshot.links))
     lines.append("")
     if applied:
         lines.append("(запись в лист выполнена: J/K/L/M/N/O + Stage 4)")
@@ -308,12 +374,9 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         fio = snapshot.identity.fio or "(без ФИО)"
         row = snapshot.row_number if snapshot.row_number is not None else "?"
         return (
-            f"<b>Без изменений</b>\n"
             f"Магистрант: {escape_tg_html(fio)}\n"
             f"Строка: {row}\n\n"
-            "С прошлой проверки входы не менялись "
-            f"(<i>--only-if-changed</i>).\n"
-            "Лист и история проверок не тронуты."
+            "Данные строки совпадают с последней проверкой; новый отчёт не формировался."
         )
 
     lines: list[str] = []
@@ -346,7 +409,13 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         lines.append(
             f"<b>Остановка</b>\nэтап: {escape_tg_html(snapshot.stopped_at)}"
         )
-    if snapshot.stage3_extracted:
+    sheet_link_lines_html = _student_sheet_link_html_lines(snapshot.links)
+    if sheet_link_lines_html:
+        lines.extend(sheet_link_lines_html)
+        for notes in column_notes.values():
+            for note in notes:
+                lines.append(f"   <i>{escape_tg_html(note)}</i>")
+    elif snapshot.stage3_extracted:
         lines.append("\n<b>Ссылки (L/M/N/O)</b>")
         for cell in snapshot.stage3_extracted:
             mark = " <i>(зачёркнута)</i>" if cell.strikethrough else ""
@@ -366,11 +435,20 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
             f"источников: {m.sources_count if m.sources_count is not None else '—'}"
         )
         lines.append(f"оформление: {escape_tg_html(m.compliance_label)}")
+        lines.extend(_student_dissertation_fact_html_lines(snapshot.links))
+    elif snapshot.sheet_enrichment_metrics is not None:
+        p, s, c = snapshot.sheet_enrichment_metrics
+        lines.append("\n<b>Показатели по диссертации (лист)</b>")
+        lines.append(f"страниц всего: {escape_tg_html(p) or '—'}")
+        lines.append(f"источников: {escape_tg_html(s) or '—'}")
+        lines.append(f"оформление: {escape_tg_html(c) or '—'}")
+        lines.extend(_student_dissertation_fact_html_lines(snapshot.links))
     elif snapshot.stage4_skipped_reason:
         lines.append("")
         lines.append(
             f"<b>Этап 4</b> пропущен: {escape_tg_html(snapshot.stage4_skipped_reason)}"
         )
+        lines.extend(_student_dissertation_fact_html_lines(snapshot.links))
     lines.append("")
     if applied:
         lines.append(

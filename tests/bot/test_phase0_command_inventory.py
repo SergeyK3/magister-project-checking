@@ -48,6 +48,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 ("start", "Запуск и регистрация"),
                 ("spravka", "Справка и проверка проекта"),
                 ("help", "Подсказки по работе с ботом"),
+                ("cancel", "Прервать текущий диалог"),
             ],
         )
 
@@ -131,6 +132,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
         self.assertEqual(
             _command_inventory(conv.entry_points),
             [
+                (("cancel",), "cancel"),
                 (("start",), "start"),
                 (("register",), "register_command"),
                 (("project_card",), "project_card_start"),
@@ -145,7 +147,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 for item in conv.entry_points
                 if isinstance(item, MessageHandler)
             ][:2],
-            ["start", "spravka_start"],
+            ["cancel", "start"],
         )
         self.assertEqual(
             sorted(conv.states.keys()),

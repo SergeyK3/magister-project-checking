@@ -97,7 +97,7 @@ class Phase4BPersistenceSurvivalTests(unittest.TestCase):
             self.assertEqual(len(after), 1)
             self.assertEqual(
                 _registration_conversation_identity(before[0]),
-                ("registration", True, True, True, True),
+                ("registration", True, True, True, False),
             )
             self.assertEqual(
                 _registration_conversation_identity(after[0]),

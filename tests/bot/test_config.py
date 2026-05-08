@@ -398,6 +398,28 @@ class LoadConfigTests(unittest.TestCase):
         finally:
             os.unlink(sa_path)
 
+    def test_join_group_invite_link_parsed(self) -> None:
+        with NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(json.dumps(_SAMPLE_JSON))
+            sa_path = fh.name
+        try:
+            with patch.dict(
+                os.environ,
+                _base_env(
+                    {
+                        "GOOGLE_SERVICE_ACCOUNT_JSON": sa_path,
+                        "BOT_JOIN_GROUP_CHAT_ID": "-100777",
+                        "BOT_JOIN_GROUP_INVITE_LINK": "https://t.me/+testInvite",
+                    }
+                ),
+                clear=True,
+            ):
+                cfg = load_config(dotenv_path=Path("__missing_test_env__.env"))
+            self.assertEqual(cfg.telegram_join_group_chat_id, -100777)
+            self.assertEqual(cfg.telegram_join_group_invite_link, "https://t.me/+testInvite")
+        finally:
+            os.unlink(sa_path)
+
 
 if __name__ == "__main__":
     unittest.main()

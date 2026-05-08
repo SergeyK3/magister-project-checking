@@ -273,6 +273,48 @@ class TestPlainTextLinkExtraction(unittest.TestCase):
         # Публикации в шаблоне Танановой нет — поле должно остаться None.
         self.assertIsNone(out.publication_url)
 
+    def test_results_article_accepts_drive_pdf_link(self) -> None:
+        """Строка «статья по результатам» может содержать PDF-файл на Drive."""
+        pub_url = "https://drive.google.com/file/d/PUBPDF/view?usp=sharing"
+        doc = {
+            "body": {
+                "content": [
+                    {
+                        "table": {
+                            "tableRows": [
+                                {
+                                    "tableCells": [
+                                        {"content": [_p("Статья по результатам")]},
+                                        {"content": [_p("Решение.pdf", pub_url)]},
+                                    ]
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+
+        out = parse_intermediate_report(doc)
+
+        self.assertEqual(out.results_article_url, pub_url)
+
+    def test_plain_text_results_article_accepts_drive_pdf_link(self) -> None:
+        pub_url = "https://drive.google.com/file/d/PUBPDF/view?usp=sharing"
+        doc = _doc_from_paragraphs(
+            [
+                (
+                    "Подготовлена статья по результатам (ссылка на гугл документ): "
+                    f"{pub_url}",
+                    pub_url,
+                )
+            ]
+        )
+
+        out = parse_intermediate_report(doc)
+
+        self.assertEqual(out.publication_url, pub_url)
+
 
 if __name__ == "__main__":
     unittest.main()

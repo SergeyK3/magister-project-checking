@@ -15,6 +15,7 @@ ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
 ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание по строкам"
 ROLE_MENU_SPRAVKA_BUTTON = "Справка / проверка"
 ROLE_MENU_HELP_BUTTON = "Помощь"
+ROLE_MENU_ABOUT_BUTTON = "О проекте"
 ROLE_MENU_STATUS_BUTTON = "Проверить статус"
 ROLE_MENU_REGISTER_BUTTON = "Продолжить регистрацию"
 SUPERVISOR_STATUS_BUTTON = "Проверить магистранта"
@@ -32,6 +33,7 @@ def _admin_keyboard() -> ReplyKeyboardMarkup:
             [ADMIN_STUDENT_MESSAGE_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
             [ADMIN_STATS_BUTTON],
+            [ROLE_MENU_ABOUT_BUTTON],
             [ROLE_MENU_HELP_BUTTON],
         ],
         resize_keyboard=True,
@@ -46,7 +48,7 @@ def _supervisor_keyboard() -> ReplyKeyboardMarkup:
             [SUPERVISOR_UNREGISTERED_BUTTON],
             [SUPERVISOR_REGISTERED_BUTTON],
             [ROLE_MENU_SPRAVKA_BUTTON],
-            [ROLE_MENU_HELP_BUTTON],
+            [ROLE_MENU_ABOUT_BUTTON],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
@@ -59,6 +61,7 @@ def _student_keyboard() -> ReplyKeyboardMarkup:
             [ROLE_MENU_SPRAVKA_BUTTON],
             [ROLE_MENU_REGISTER_BUTTON],
             [ROLE_MENU_STATUS_BUTTON],
+            [ROLE_MENU_ABOUT_BUTTON],
             [ROLE_MENU_HELP_BUTTON],
         ],
         resize_keyboard=True,

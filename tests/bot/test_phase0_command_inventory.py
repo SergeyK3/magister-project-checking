@@ -46,9 +46,10 @@ class Phase0CommandInventoryTests(unittest.TestCase):
             [(c.command, c.description) for c in h.default_bot_commands()],
             [
                 ("start", "Запуск и регистрация"),
-                ("spravka", "Справка и проверка проекта"),
-                ("help", "Подсказки по работе с ботом"),
-                ("cancel", "Прервать текущий диалог"),
+                ("status", "Проверить магистранта"),
+                ("unreg", "Кто не зарегистрировался"),
+                ("reg_list", "Кто зарегистрировался"),
+                ("about", "О проекте"),
             ],
         )
 
@@ -114,6 +115,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("sync_dashboard",), "admin_sync_dashboard"),
                 (("sync_magistrants",), "admin_sync_magistrants"),
                 (("status",), "status_command"),
+                (("about",), "about_command"),
                 (("unreg",), "supervisor_unregistered_list_command"),
                 (("reg_list",), "supervisor_registered_list_command"),
                 (("recheck",), "recheck"),
@@ -139,6 +141,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
                 (("spravka",), "spravka_start"),
+                (("about",), "about_command"),
+                (("status",), "status_command"),
             ],
         )
         self.assertEqual(
@@ -184,6 +188,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
                 (("spravka",), "spravka_start"),
+                (("about",), "about_command"),
+                (("status",), "status_command"),
             ],
         )
         self.assertEqual(

@@ -285,7 +285,14 @@ class StartHandlerTests(unittest.TestCase):
         ctx = _FakeContext(ws)
         update = _make_update(text=SUPERVISOR_STATUS_BUTTON)
 
-        _run(supervisor_menu_status(update, ctx))
+        def close_task(coro):
+            coro.close()
+
+        with patch(
+            "magister_checking.bot.handlers.asyncio.create_task",
+            side_effect=close_task,
+        ):
+            _run(supervisor_menu_status(update, ctx))
 
         self.assertTrue(ctx.user_data[handlers.USER_DATA_SUPERVISOR_STATUS_PENDING])
         update.message.reply_text.assert_awaited_once()
@@ -300,6 +307,51 @@ class StartHandlerTests(unittest.TestCase):
         self.assertNotIn(handlers.USER_DATA_SUPERVISOR_STATUS_PENDING, ctx.user_data)
         m_status.assert_awaited_once()
         self.assertEqual(m_status.await_args.args[2], "Иванов Иван")
+
+    def test_supervisor_status_command_without_args_waits_for_fio(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.args = []
+        update = _make_update(text="/status")
+
+        def close_task(coro):
+            coro.close()
+
+        with _patch_supervisor_check(True), patch(
+            "magister_checking.bot.handlers.asyncio.create_task",
+            side_effect=close_task,
+        ) as create_task:
+            _run(handlers.status_command(update, ctx))
+
+        self.assertTrue(ctx.user_data[handlers.USER_DATA_SUPERVISOR_STATUS_PENDING])
+        self.assertEqual(handlers.SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS, 30.0)
+        create_task.assert_called_once()
+        update.message.reply_text.assert_awaited_once_with(
+            handlers.SUPERVISOR_STATUS_PROMPT_TEXT
+        )
+
+    def test_supervisor_status_pending_expires_after_short_timeout(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_STATUS_PENDING] = True
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_STATUS_PENDING_AT] = (
+            handlers.time.time()
+            - handlers.SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS
+            - 1
+        )
+        update = _make_update(text="Иванов Иван")
+
+        with _patch_supervisor_check(True), patch(
+            "magister_checking.bot.handlers._supervisor_student_status_by_fio",
+            new_callable=AsyncMock,
+        ) as m_status:
+            _run(admin_recheck_pending_receive(update, ctx))
+
+        self.assertNotIn(handlers.USER_DATA_SUPERVISOR_STATUS_PENDING, ctx.user_data)
+        m_status.assert_not_awaited()
+        update.message.reply_text.assert_awaited_once_with(
+            handlers.SUPERVISOR_STATUS_TIMEOUT_TEXT
+        )
 
     def test_start_existing_user_with_missing_only_asks_missing(self) -> None:
         ws = FakeWorksheet(
@@ -1071,9 +1123,10 @@ class HelpAndCommandsTests(unittest.TestCase):
             slugs,
             [
                 "start",
-                "spravka",
-                "help",
-                "cancel",
+                "status",
+                "unreg",
+                "reg_list",
+                "about",
             ],
         )
 
@@ -1088,7 +1141,8 @@ class HelpAndCommandsTests(unittest.TestCase):
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("магистрант", text)
         self.assertIn("/start", text)
-        self.assertIn("/справка", text)
+        self.assertIn("/spravka", text)
+        self.assertIn("/about", text)
         self.assertIn("/cancel", text)
         self.assertNotIn("/recheck", text)
         self.assertNotIn("/stats", text)
@@ -1103,14 +1157,19 @@ class HelpAndCommandsTests(unittest.TestCase):
             _run(help_command(update, ctx))
         text = update.message.reply_text.await_args.args[0]
         self.assertIn("администратор", text)
-        self.assertIn("/справка", text)
+        self.assertIn("/spravka", text)
+        self.assertIn("/about", text)
         self.assertNotIn("/stats", text)
         self.assertNotIn("/admin", text)
 
     def test_help_reply_for_user_routing(self) -> None:
         self.assertIn("администратор", help_reply_for_user(is_admin=True))
         self.assertNotIn("/stats", help_reply_for_user(is_admin=False))
-        self.assertIn("научный руководитель", help_reply_for_user(is_admin=False, is_supervisor=True).lower())
+        supervisor_help = help_reply_for_user(is_admin=False, is_supervisor=True)
+        self.assertIn("научный руководитель", supervisor_help.lower())
+        self.assertIn("/unreg", supervisor_help)
+        self.assertIn("/reg_list", supervisor_help)
+        self.assertIn("/about", supervisor_help)
         self.assertIn("администратор", help_reply_for_user(is_admin=True, is_supervisor=True))
 
 

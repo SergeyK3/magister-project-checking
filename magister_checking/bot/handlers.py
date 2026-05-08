@@ -100,6 +100,7 @@ from magister_checking.bot.admin_message_helpers import (
     ADMSTU_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_TEMPLATE_PATTERN,
     BULK_STUDENT_REMINDER_MAX_ROWS,
+    ROLE_MENU_ABOUT_BUTTON,
     ROLE_MENU_HELP_BUTTON,
     ROLE_MENU_REGISTER_BUTTON,
     ROLE_MENU_SPRAVKA_BUTTON,
@@ -118,6 +119,7 @@ from magister_checking.bot.admin_message_helpers import (
     _supervisor_keyboard,
 )
 from magister_checking.bot.registration_helpers import (
+    ABOUT_PROJECT_TEXT,
     HELP_REPLY_TEXT,
     HELP_REPLY_TEXT_ADMIN,
     HELP_REPLY_TEXT_STUDENT,
@@ -483,6 +485,13 @@ USER_DATA_STUDENT_REMINDER_ROW = "student_reminder_row"
 USER_DATA_STUDENT_REMINDER_FIO = "student_reminder_fio"
 USER_DATA_STUDENT_REMINDER_DRAFT = "student_reminder_draft"
 USER_DATA_STUDENT_BULK_ENTRIES = "student_reminder_bulk_entries"
+SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS = 30.0
+SUPERVISOR_STATUS_PROMPT_TEXT = (
+    "Введите фамилию и имя магистранта"
+)
+SUPERVISOR_STATUS_TIMEOUT_TEXT = (
+    "Укажите ФИО магистранта с листа «Магистранты», например:\n/status Иванов Иван"
+)
 USER_DATA_PIN_CONTEXT_KEY = "pin_verify_context"
 USER_DATA_PIN_REGISTER_EXTRA_KEY = "pin_verify_register_extra"
 USER_DATA_ENRICHMENT_WARNINGS_KEY = "enrichment_student_warnings"
@@ -1219,7 +1228,7 @@ async def _finalize_registration_confirm(
             f"Статус: {user_form.fill_status}\n"
             "Спасибо. Регистрация завершена.\n\n"
             "Чтобы запустить проверку вашего отчёта прямо сейчас — "
-            "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /справка."
+            "нажмите кнопку «🔄 Перепроверить» ниже или отправьте /spravka."
             + rate_notes
             + notes_block,
             reply_markup=build_recheck_keyboard(row_num),
@@ -2385,8 +2394,8 @@ async def spravka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     only_if_changed = False
     if admin_target and not _is_admin(update, context):
         await update.message.reply_text(
-            "Указать номер строки или ФИО в /справка могут только администраторы.\n\n"
-            "Чтобы получить справку по своей строке, отправьте /справка без аргументов."
+            "Указать номер строки или ФИО в /spravka могут только администраторы.\n\n"
+            "Чтобы получить справку по своей строке, отправьте /spravka без аргументов."
         )
         return ConversationHandler.END
 
@@ -3022,6 +3031,41 @@ def _clear_supervisor_status_pending(context: ContextTypes.DEFAULT_TYPE) -> None
     context.user_data.pop(USER_DATA_SUPERVISOR_STATUS_PENDING_AT, None)
 
 
+async def _supervisor_status_timeout_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    pending_at: float,
+) -> None:
+    await asyncio.sleep(SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS)
+    current_pending_at = float(
+        context.user_data.get(USER_DATA_SUPERVISOR_STATUS_PENDING_AT) or 0.0
+    )
+    if not context.user_data.get(USER_DATA_SUPERVISOR_STATUS_PENDING):
+        return
+    if current_pending_at != pending_at:
+        return
+    _clear_supervisor_status_pending(context)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=SUPERVISOR_STATUS_TIMEOUT_TEXT,
+    )
+
+
+def _set_supervisor_status_pending(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    pending_at = time.time()
+    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING] = True
+    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING_AT] = pending_at
+    chat = update.effective_chat
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        return
+    asyncio.create_task(
+        _supervisor_status_timeout_task(context, int(chat_id), pending_at)
+    )
+
+
 async def _prompt_admin_recheck_need_target(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3034,7 +3078,7 @@ async def _prompt_admin_recheck_need_target(
     context.user_data[USER_DATA_ADMIN_RECHECK_ONLY_IF_CHANGED] = only_if_changed
     msg = (
         "Отправьте номер строки листа «Регистрация» или ФИО следующим сообщением "
-        "(или начните заново через /справка)."
+        "(или начните заново через /spravka)."
     )
     if only_if_changed:
         msg += (
@@ -3065,9 +3109,9 @@ async def admin_recheck_pending_receive(
             context.user_data.get(USER_DATA_SUPERVISOR_STATUS_PENDING_AT) or 0.0
         )
         _clear_supervisor_status_pending(context)
-        if time.time() - pending_at > 30 * 60:
+        if time.time() - pending_at > SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS:
             await update.message.reply_text(
-                "Запрос устарел. Нажмите кнопку проверки магистранта ещё раз."
+                SUPERVISOR_STATUS_TIMEOUT_TEXT
             )
             return
         if not _is_supervisor(update, context):
@@ -3303,7 +3347,7 @@ async def recheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if admin_target and not _is_admin(update, context):
         await update.message.reply_text(
             "Указать в команде номер строки или ФИО могут только администраторы.\n\n"
-            "Чтобы получить справку по своей строке, отправьте /справка."
+            "Чтобы получить справку по своей строке, отправьте /spravka."
         )
         return
 
@@ -3492,6 +3536,23 @@ async def role_menu_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await help_command(update, context)
 
 
+async def about_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Команда /about: общая ссылка на описание проекта."""
+
+    msg = update.effective_message
+    if msg is not None:
+        await msg.reply_text(ABOUT_PROJECT_TEXT)
+    return ConversationHandler.END
+
+
+async def role_menu_about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Reply-keyboard trigger: existing /about flow."""
+
+    return await about_command(update, context)
+
+
 async def role_menu_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Reply-keyboard trigger: existing registration flow."""
 
@@ -3511,11 +3572,8 @@ async def supervisor_menu_status(
 
     if update.message is None:
         return
-    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING] = True
-    context.user_data[USER_DATA_SUPERVISOR_STATUS_PENDING_AT] = time.time()
-    await update.message.reply_text(
-        "Введите ФИО магистранта с листа «Магистранты» для проверки статуса."
-    )
+    _set_supervisor_status_pending(update, context)
+    await update.message.reply_text(SUPERVISOR_STATUS_PROMPT_TEXT)
 
 
 async def student_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3655,9 +3713,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     args = context.args or []
     if await _call_blocking(is_supervisor_telegram_id, cfg, tg):
         if not args:
-            await update.message.reply_text(
-                "Укажите ФИО магистранта с листа «Магистранты», например:\n/status Иванов Иван"
-            )
+            _set_supervisor_status_pending(update, context)
+            await update.message.reply_text(SUPERVISOR_STATUS_PROMPT_TEXT)
             return
         await _supervisor_student_status_by_fio(
             update, context, " ".join(args)
@@ -3780,7 +3837,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if msg is not None:
         await msg.reply_text(
             "Диалог остановлен.\n\n"
-            "Снова начать: /start. Справка по проекту: /справка. Подсказки: /help."
+            "Снова начать: /start. Справка по проекту: /spravka. Подсказки: /help."
         )
     return ConversationHandler.END
 
@@ -3811,6 +3868,7 @@ __all__ = [
     "ADMIN_PROJECT_CARD_BUTTON",
     "ADMIN_STUDENT_MESSAGE_BUTTON",
     "ADMIN_STUDENT_MESSAGE_BULK_BUTTON",
+    "about_command",
     "ASK_FIELD",
     "ASK_CONFIRM",
     "BIND_ASK_FIO",
@@ -3843,6 +3901,7 @@ __all__ = [
     "STUDENT_MSG_PICK_KIND",
     "ROLE_PICK",
     "ROLE_MENU_HELP_BUTTON",
+    "ROLE_MENU_ABOUT_BUTTON",
     "ROLE_MENU_REGISTER_BUTTON",
     "ROLE_MENU_SPRAVKA_BUTTON",
     "ROLE_MENU_STATUS_BUTTON",
@@ -3882,6 +3941,7 @@ __all__ = [
     "recheck_button",
     "register_command",
     "role_menu_help",
+    "role_menu_about",
     "role_menu_register",
     "role_menu_spravka",
     "role_menu_status",

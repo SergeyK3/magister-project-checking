@@ -44,6 +44,7 @@ from magister_checking.bot.handlers import (
     PIN_VERIFY_INPUT,
     PROJECT_CARD_ASK_TARGET,
     RECHECK_CALLBACK_PATTERN,
+    ROLE_MENU_ABOUT_BUTTON,
     ROLE_MENU_HELP_BUTTON,
     ROLE_MENU_REGISTER_BUTTON,
     ROLE_MENU_SPRAVKA_BUTTON,
@@ -58,6 +59,7 @@ from magister_checking.bot.handlers import (
     STUDENT_MSG_BULK_CONFIRM,
     STUDENT_MSG_CONFIRM,
     STUDENT_MSG_PICK_KIND,
+    about_command,
     admin_menu,
     admin_recheck_pending_receive,
     admin_stats,
@@ -78,6 +80,7 @@ from magister_checking.bot.handlers import (
     receive_claim_fio,
     receive_field,
     receive_pin_input,
+    role_menu_about,
     role_menu_help,
     role_menu_register,
     role_menu_spravka,
@@ -381,6 +384,10 @@ def build_application(config: BotConfig) -> Application:
         filters.Regex("^" + re.escape(ROLE_MENU_HELP_BUTTON) + "$") & private,
         role_menu_help,
     )
+    role_menu_about_handler = MessageHandler(
+        filters.Regex("^" + re.escape(ROLE_MENU_ABOUT_BUTTON) + "$") & private,
+        role_menu_about,
+    )
     supervisor_status_handler = MessageHandler(
         filters.Regex("^" + re.escape(SUPERVISOR_STATUS_BUTTON) + "$") & private,
         supervisor_menu_status,
@@ -415,6 +422,8 @@ def build_application(config: BotConfig) -> Application:
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
+            CommandHandler("about", about_command, filters=private),
+            CommandHandler("status", status_command, filters=private),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
@@ -432,6 +441,7 @@ def build_application(config: BotConfig) -> Application:
             role_menu_register_handler,
             role_menu_status_handler,
             role_menu_help_handler,
+            role_menu_about_handler,
             supervisor_status_handler,
             supervisor_unregistered_handler,
             supervisor_registered_handler,
@@ -474,6 +484,8 @@ def build_application(config: BotConfig) -> Application:
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
+            CommandHandler("about", about_command, filters=private),
+            CommandHandler("status", status_command, filters=private),
             MessageHandler(
                 filters.Regex(f"^{ADMIN_PROJECT_CARD_BUTTON}$") & private,
                 project_card_start,
@@ -491,6 +503,7 @@ def build_application(config: BotConfig) -> Application:
             role_menu_register_handler,
             role_menu_status_handler,
             role_menu_help_handler,
+            role_menu_about_handler,
             supervisor_status_handler,
             supervisor_unregistered_handler,
             supervisor_registered_handler,
@@ -519,6 +532,7 @@ def build_application(config: BotConfig) -> Application:
         CommandHandler("sync_magistrants", admin_sync_magistrants, filters=private)
     )
     application.add_handler(CommandHandler("status", status_command, filters=private))
+    application.add_handler(CommandHandler("about", about_command, filters=private))
     application.add_handler(
         CommandHandler("unreg", supervisor_unregistered_list_command, filters=private)
     )

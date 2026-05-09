@@ -892,6 +892,16 @@ _MAGISTRANTS_HEADER_TELEGRAM_ID: tuple[str, ...] = (
     "телеграм id",
     "телеграм",
 )
+_MAGISTRANTS_HEADER_GROUP: tuple[str, ...] = (
+    "group_name",
+    "group name",
+    "группа",
+)
+_MAGISTRANTS_HEADER_WORKPLACE: tuple[str, ...] = (
+    "workplace",
+    "место работы",
+)
+_MAGISTRANTS_HEADER_POSITION: tuple[str, ...] = ("position", "должность")
 
 
 def _magistrants_resolve_column(
@@ -926,6 +936,9 @@ def magistrants_sheet_column_indices(header: List[str]) -> Optional[dict[str, in
     reg_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_REG)
     sup_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_SUPERVISOR)
     tg_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_TELEGRAM_ID)
+    group_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_GROUP)
+    workplace_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_WORKPLACE)
+    position_i = _magistrants_resolve_column(header, _MAGISTRANTS_HEADER_POSITION)
     if fio_i is None or phone_i is None or reg_i is None:
         return None
     out: dict[str, int] = {
@@ -937,6 +950,12 @@ def magistrants_sheet_column_indices(header: List[str]) -> Optional[dict[str, in
         out["supervisor"] = sup_i
     if tg_i is not None:
         out["telegram_id"] = tg_i
+    if group_i is not None:
+        out["group_name"] = group_i
+    if workplace_i is not None:
+        out["workplace"] = workplace_i
+    if position_i is not None:
+        out["position"] = position_i
     return out
 
 
@@ -1016,6 +1035,22 @@ def registration_students_by_fio_phone(
             logger.warning("Дубликат ключа ФИО+тел в листе Регистрация: %s", key)
         out[key] = u
     return out
+
+
+def registration_students_by_unique_fio(
+    registration_worksheet: gspread.Worksheet,
+) -> dict[str, UserForm]:
+    """Ключ normalize_fio → анкета, только если ФИО однозначно среди зарегистрированных."""
+
+    users_by_fio: dict[str, list[UserForm]] = {}
+    for u in _iter_users(registration_worksheet):
+        if not (u.telegram_id or "").strip():
+            continue
+        fk = normalize_fio(u.fio)
+        if not fk:
+            continue
+        users_by_fio.setdefault(fk, []).append(u)
+    return {fk: users[0] for fk, users in users_by_fio.items() if len(users) == 1}
 
 
 def _supervisor_name_rest_word_align(words_a: list[str], words_b: list[str]) -> bool:
@@ -1134,12 +1169,12 @@ def get_supervisor_fio_for_telegram_id(config: BotConfig, telegram_id: str) -> s
 
 
 def sync_magistrants_registration_status(config: BotConfig) -> None:
-    """Нормализует телефоны (+7…), колонку «Регистрация»: зарегистрирован / нет.
+    """Синхронизирует master-лист «Магистранты» с листом «Регистрация».
 
-    Если в первой строке листа есть колонка ``telegram_id`` (или синоним из
-    ``_MAGISTRANTS_HEADER_TELEGRAM_ID``), подставляет туда ``telegram_id`` из
-    листа «Регистрация» для совпавших пар (ФИО + телефон); для несовпавших
-    строк очищает ячейку.
+    Обновляет телефон, колонку «Регистрация», а при наличии колонок также
+    ``telegram_id``, группу, место работы и должность. Основной ключ — ФИО +
+    телефон; если телефон в master-листе расходится, допускается fallback по
+    однозначному зарегистрированному ФИО.
     """
 
     title = (config.magistrants_worksheet_name or "").strip()
@@ -1160,7 +1195,7 @@ def sync_magistrants_registration_status(config: BotConfig) -> None:
         )
         return
     reg_by_key = registration_students_by_fio_phone(reg_ws)
-    reg_keys = set(reg_by_key.keys())
+    reg_by_fio = registration_students_by_unique_fio(reg_ws)
     all_rows = mag_ws.get_all_values()
     if len(all_rows) < 2:
         return
@@ -1168,36 +1203,65 @@ def sync_magistrants_registration_status(config: BotConfig) -> None:
     phone_i = colmap["phone"]
     reg_i = colmap["registration"]
     tg_i = colmap.get("telegram_id")
+    group_i = colmap.get("group_name")
+    workplace_i = colmap.get("workplace")
+    position_i = colmap.get("position")
     values_phone: list[list[str]] = []
     values_reg: list[list[str]] = []
     values_tg: list[list[str]] = []
+    values_group: list[list[str]] = []
+    values_workplace: list[list[str]] = []
+    values_position: list[list[str]] = []
     for row in all_rows[1:]:
         if not row or not any(str(c).strip() for c in row):
             values_phone.append([""])
             values_reg.append([""])
             if tg_i is not None:
                 values_tg.append([""])
+            if group_i is not None:
+                values_group.append([""])
+            if workplace_i is not None:
+                values_workplace.append([""])
+            if position_i is not None:
+                values_position.append([""])
             continue
-        width = max(len(header), len(row), fio_i + 1, phone_i + 1, reg_i + 1)
-        if tg_i is not None:
-            width = max(width, tg_i + 1)
+        needed_indices = [fio_i, phone_i, reg_i]
+        for optional_i in (tg_i, group_i, workplace_i, position_i):
+            if optional_i is not None:
+                needed_indices.append(optional_i)
+        width = max(len(header), len(row), max(needed_indices) + 1)
         padded = list(row) + [""] * (width - len(row))
         raw_phone = str(padded[phone_i] or "").strip()
         pk = normalize_phone_ru_kz(raw_phone)
-        phone_display = pk if pk else raw_phone
         fk = normalize_fio(str(padded[fio_i] or ""))
-        reg_val = (
-            MAGISTRANTS_REGISTERED_LABEL
-            if fk and pk and (fk, pk) in reg_keys
-            else MAGISTRANTS_NOT_REGISTERED_LABEL
+        user = reg_by_key.get((fk, pk)) if fk and pk else None
+        if user is None and fk:
+            user = reg_by_fio.get(fk)
+        phone_display = (
+            (normalize_phone_ru_kz(user.phone) or user.phone)
+            if user
+            else (pk if pk else raw_phone)
         )
+        reg_val = MAGISTRANTS_REGISTERED_LABEL if user else MAGISTRANTS_NOT_REGISTERED_LABEL
         values_phone.append([phone_display])
         values_reg.append([reg_val])
         if tg_i is not None:
-            tg_val = ""
-            if fk and pk and (fk, pk) in reg_by_key:
-                tg_val = (reg_by_key[(fk, pk)].telegram_id or "").strip()
-            values_tg.append([tg_val])
+            values_tg.append([((user.telegram_id or "").strip() if user else "")])
+        if group_i is not None:
+            current = str(padded[group_i] or "").strip()
+            values_group.append(
+                [current or ((user.group_name or "").strip() if user else "")]
+            )
+        if workplace_i is not None:
+            current = str(padded[workplace_i] or "").strip()
+            values_workplace.append(
+                [current or ((user.workplace or "").strip() if user else "")]
+            )
+        if position_i is not None:
+            current = str(padded[position_i] or "").strip()
+            values_position.append(
+                [current or ((user.position or "").strip() if user else "")]
+            )
     start = 2
     end = start + len(values_phone) - 1
     letter_p = _column_letter(phone_i)
@@ -1210,6 +1274,21 @@ def sync_magistrants_registration_status(config: BotConfig) -> None:
         letter_t = _column_letter(tg_i)
         ranges_batch.append(
             {"range": f"{letter_t}{start}:{letter_t}{end}", "values": values_tg}
+        )
+    if group_i is not None and values_group:
+        letter_g = _column_letter(group_i)
+        ranges_batch.append(
+            {"range": f"{letter_g}{start}:{letter_g}{end}", "values": values_group}
+        )
+    if workplace_i is not None and values_workplace:
+        letter_w = _column_letter(workplace_i)
+        ranges_batch.append(
+            {"range": f"{letter_w}{start}:{letter_w}{end}", "values": values_workplace}
+        )
+    if position_i is not None and values_position:
+        letter_pos = _column_letter(position_i)
+        ranges_batch.append(
+            {"range": f"{letter_pos}{start}:{letter_pos}{end}", "values": values_position}
         )
     _safe_batch_update_values(mag_ws, ranges_batch)
 
@@ -1421,7 +1500,10 @@ def normalize_phones_to_ru_kz_standard(config: BotConfig) -> dict[str, dict[str,
         out[mag_title] = {
             "synced": True,
             "via": "sync_magistrants_registration_status",
-            "note": "телефоны +7, колонка «Регистрация», при наличии колонки — telegram_id",
+            "note": (
+                "телефон, колонка «Регистрация», при наличии колонок — "
+                "telegram_id, группа, место работы, должность"
+            ),
         }
     return out
 

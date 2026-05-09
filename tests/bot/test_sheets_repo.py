@@ -1533,6 +1533,64 @@ class SyncMagistrantsRegistrationStatusTests(unittest.TestCase):
         batch, _vio = mag_ws.batch_update_calls[0]
         self.assertEqual(len(batch), 2)
 
+    def test_sync_fills_registration_details_when_columns_present(self) -> None:
+        mag_header = [
+            "№",
+            "ФИО магистранта",
+            "Группа",
+            "Место работы",
+            "Должность",
+            "Телефон",
+            "telegram_id",
+            "Регистрация",
+        ]
+        mag_ws = FakeWorksheet(
+            [
+                mag_header,
+                [
+                    "1",
+                    "Жарлыкпаева Лаура Зинатоллакызы",
+                    "",
+                    "",
+                    "",
+                    "+77078054115",
+                    "",
+                    "нет",
+                ],
+            ]
+        )
+        reg_row = [""] * len(SHEET_HEADER)
+        hmap = {name: i for i, name in enumerate(SHEET_HEADER)}
+        reg_row[hmap["telegram_id"]] = "815191575"
+        reg_row[hmap["fio"]] = "Жарлыкпаева Лаура Зинатоллакызы"
+        reg_row[hmap["group_name"]] = "ОЗ-11"
+        reg_row[hmap["workplace"]] = "Школа"
+        reg_row[hmap["position"]] = "учитель"
+        reg_row[hmap["phone"]] = "+77022576571"
+        reg_ws = FakeWorksheet([list(SHEET_HEADER), reg_row])
+        ss = FakeSpreadsheet({"Регистрация": reg_ws, "Магистранты": mag_ws})
+        cfg = BotConfig(
+            telegram_bot_token="dummy",
+            spreadsheet_id="dummy",
+            worksheet_name="Регистрация",
+            project_card_output_folder_url="",
+            google_service_account_json=Path("credentials/unused.json"),
+            log_level=20,
+            persistence_file=Path("state/t.pickle"),
+            magistrants_worksheet_name="Магистранты",
+            project_snapshot_output_folder_urls=(),
+        )
+
+        with patch("magister_checking.bot.sheets_repo.get_spreadsheet", return_value=ss):
+            sync_magistrants_registration_status(cfg)
+
+        self.assertEqual(mag_ws.rows[1][2], "ОЗ-11")
+        self.assertEqual(mag_ws.rows[1][3], "Школа")
+        self.assertEqual(mag_ws.rows[1][4], "учитель")
+        self.assertEqual(mag_ws.rows[1][5], "+77022576571")
+        self.assertEqual(mag_ws.rows[1][6], "815191575")
+        self.assertEqual(mag_ws.rows[1][7], MAGISTRANTS_REGISTERED_LABEL)
+
     def test_noop_when_magistrants_worksheet_name_empty(self) -> None:
         mag_ws = FakeWorksheet([["ФИО магистранта", "Телефон", "Регистрация"], ["X", "1", "нет"]])
         reg_ws = FakeWorksheet([list(SHEET_HEADER)])

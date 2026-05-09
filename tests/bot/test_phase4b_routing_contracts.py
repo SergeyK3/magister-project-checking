@@ -143,6 +143,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "CommandHandler",
                     "CommandHandler",
                     "CommandHandler",
+                    "CommandHandler",
                     "MessageHandler",
                     "CallbackQueryHandler",
                 ],
@@ -157,6 +158,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("sync_dashboard",), "admin_sync_dashboard"),
                     (("sync_magistrants",), "admin_sync_magistrants"),
                     (("status",), "status_command"),
+                    (("about",), "about_command"),
                     (("unreg",), "supervisor_unregistered_list_command"),
                     (("reg_list",), "supervisor_registered_list_command"),
                     (("recheck",), "recheck"),
@@ -201,6 +203,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "role_menu_register",
                     "role_menu_status",
                     "role_menu_help",
+                    "role_menu_about",
                     "supervisor_menu_status",
                     "supervisor_unregistered_list_command",
                     "supervisor_registered_list_command",
@@ -217,6 +220,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
                     (("spravka",), "spravka_start"),
+                    (("about",), "about_command"),
+                    (("status",), "status_command"),
                 ],
             )
             self.assertEqual(
@@ -232,6 +237,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "role_menu_register",
                     "role_menu_status",
                     "role_menu_help",
+                    "role_menu_about",
                     "supervisor_menu_status",
                     "supervisor_unregistered_list_command",
                     "supervisor_registered_list_command",
@@ -248,6 +254,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
                     (("spravka",), "spravka_start"),
+                    (("about",), "about_command"),
+                    (("status",), "status_command"),
                 ],
             )
         finally:

@@ -12,7 +12,7 @@ ADMSTUB_CALLBACK_CONFIRM_PATTERN = r"^admstub:(send|cancel)$"
 
 ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
-ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание по строкам"
+ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание"
 ROLE_MENU_SPRAVKA_BUTTON = "Справка / проверка"
 ROLE_MENU_HELP_BUTTON = "Помощь"
 ROLE_MENU_ABOUT_BUTTON = "О проекте"
@@ -29,9 +29,9 @@ def _admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [ROLE_MENU_SPRAVKA_BUTTON],
-            [ADMIN_PROJECT_CARD_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
+            [ADMIN_PROJECT_CARD_BUTTON],
             [ADMIN_STATS_BUTTON],
             [ROLE_MENU_ABOUT_BUTTON],
             [ROLE_MENU_HELP_BUTTON],

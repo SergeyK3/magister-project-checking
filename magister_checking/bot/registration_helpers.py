@@ -105,6 +105,8 @@ def default_bot_commands() -> list[BotCommand]:
         BotCommand("status", "Проверить магистранта"),
         BotCommand("unreg", "Кто не зарегистрировался"),
         BotCommand("reg_list", "Кто зарегистрировался"),
+        BotCommand("student_message", "Сообщение магистранту"),
+        BotCommand("student_message_bulk", "Групповое напоминание"),
         BotCommand("about", "О проекте"),
     ]
 

@@ -17,6 +17,8 @@ from magister_checking.bot import handlers
 from magister_checking.bot.handlers import (
     ADMIN_PROJECT_CARD_BUTTON,
     ADMIN_STATS_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
+    ADMIN_STUDENT_MESSAGE_BUTTON,
     ASK_CONFIRM,
     ASK_FIELD,
     BIND_ASK_FIO,
@@ -185,7 +187,9 @@ class StartHandlerTests(unittest.TestCase):
         km = menu_call.kwargs.get("reply_markup")
         self.assertIsNotNone(km)
         buttons = [getattr(row[0], "text", row[0]) for row in km.keyboard]
-        self.assertIn(ROLE_MENU_SPRAVKA_BUTTON, buttons)
+        self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
+        self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
+        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -1126,6 +1130,8 @@ class HelpAndCommandsTests(unittest.TestCase):
                 "status",
                 "unreg",
                 "reg_list",
+                "student_message",
+                "student_message_bulk",
                 "about",
             ],
         )
@@ -1480,7 +1486,9 @@ class AdminProjectCardTests(unittest.TestCase):
         self.assertIn("Панель администратора", sent_text)
         reply_markup = update.message.reply_text.await_args.kwargs["reply_markup"]
         buttons = [getattr(row[0], "text", row[0]) for row in reply_markup.keyboard]
-        self.assertIn(ROLE_MENU_SPRAVKA_BUTTON, buttons)
+        self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
+        self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
+        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -1579,6 +1587,97 @@ class AdminProjectCardTests(unittest.TestCase):
         self.assertIn("Не удалось сформировать", last)
         self.assertIn("первая строка", last)
         self.assertNotIn("вторая строка", last)
+
+
+class AdminBulkStudentMessageTests(unittest.TestCase):
+    def test_bulk_message_registration_flow_asks_sheet_rows_and_text(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "222"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        ws = FakeWorksheet([list(SHEET_HEADER), row])
+        ctx = _FakeContext(ws)
+
+        with _patch_admin_check(True):
+            state = _run(
+                handlers.student_message_bulk_start(
+                    _make_update(text="/student_message_bulk"), ctx
+                )
+            )
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+
+        with _patch_admin_check(True), _patch_worksheet(ws):
+            state = _run(
+                handlers.student_reminder_bulk_receive_rows(
+                    _make_update(text="Регистрация"), ctx
+                )
+            )
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+
+        rows_update = _make_update(text="2")
+        with _patch_admin_check(True), _patch_worksheet(ws):
+            state = _run(handlers.student_reminder_bulk_receive_rows(rows_update, ctx))
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+        self.assertIn(
+            "Пришлите текст сообщения",
+            rows_update.message.reply_text.await_args.args[0],
+        )
+
+        text_update = _make_update(text="Здравствуйте, {fio}! Проверьте справку.")
+        with _patch_admin_check(True):
+            state = _run(handlers.student_reminder_bulk_receive_rows(text_update, ctx))
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_CONFIRM)
+        preview = text_update.message.reply_text.await_args.args[0]
+        self.assertIn("Будет отправлено 1 сообщений", preview)
+        self.assertIn("Здравствуйте, Иванов И.И.!", preview)
+
+    def test_bulk_message_magistrants_flow_uses_magistrants_sheet_rows(self) -> None:
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        mag_ws = FakeWorksheet(
+            [
+                ["fio", "telegram_id"],
+                ["Петров П.П.", "333"],
+            ]
+        )
+        ctx = _FakeContext(reg_ws)
+        ctx.bot_data[
+            handlers.CONFIG_BOT_DATA_KEY
+        ].magistrants_worksheet_name = "Магистранты"
+        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            state = _run(
+                handlers.student_reminder_bulk_receive_rows(
+                    _make_update(text="Магистранты"), ctx
+                )
+            )
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+
+        rows_update = _make_update(text="2")
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            state = _run(handlers.student_reminder_bulk_receive_rows(rows_update, ctx))
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+        self.assertIn(
+            "Лист: «Магистранты»",
+            rows_update.message.reply_text.await_args.args[0],
+        )
+
+        text_update = _make_update(text="Добрый день, {fio}.")
+        with _patch_admin_check(True):
+            state = _run(handlers.student_reminder_bulk_receive_rows(text_update, ctx))
+        self.assertEqual(state, handlers.STUDENT_MSG_BULK_CONFIRM)
+        self.assertFalse(
+            ctx.user_data[handlers.USER_DATA_STUDENT_BULK_ENTRIES][0]["attach_snapshot"]
+        )
+        self.assertIn(
+            "Добрый день, Петров П.П.",
+            text_update.message.reply_text.await_args.args[0],
+        )
 
 
 class RecheckHandlerTests(unittest.TestCase):

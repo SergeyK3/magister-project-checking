@@ -485,6 +485,9 @@ USER_DATA_STUDENT_REMINDER_ROW = "student_reminder_row"
 USER_DATA_STUDENT_REMINDER_FIO = "student_reminder_fio"
 USER_DATA_STUDENT_REMINDER_DRAFT = "student_reminder_draft"
 USER_DATA_STUDENT_BULK_ENTRIES = "student_reminder_bulk_entries"
+USER_DATA_STUDENT_BULK_SHEET_NAME = "student_reminder_bulk_sheet_name"
+USER_DATA_STUDENT_BULK_SHEET_KIND = "student_reminder_bulk_sheet_kind"
+USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT = "student_reminder_bulk_attach_snapshot"
 SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS = 30.0
 SUPERVISOR_STATUS_PROMPT_TEXT = (
     "Введите фамилию и имя магистранта"
@@ -638,6 +641,9 @@ def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         USER_DATA_STUDENT_REMINDER_FIO,
         USER_DATA_STUDENT_REMINDER_DRAFT,
         USER_DATA_STUDENT_BULK_ENTRIES,
+        USER_DATA_STUDENT_BULK_SHEET_NAME,
+        USER_DATA_STUDENT_BULK_SHEET_KIND,
+        USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT,
     ):
         context.user_data.pop(key, None)
 
@@ -705,6 +711,7 @@ async def _deliver_reminder_text_and_snapshot(
     row_no: int,
     chat_id_target: int,
     message_text: str,
+    attach_snapshot: bool = True,
 ) -> tuple[bool, str]:
     """Текст в личку и при возможности HTML по снимку на Drive.
 
@@ -722,6 +729,9 @@ async def _deliver_reminder_text_and_snapshot(
     if not result.sent:
         reason = result.failed[0][1] if result.failed else "неизвестная ошибка"
         return False, str(reason)
+
+    if not attach_snapshot:
+        return True, ""
 
     attach_note = ""
     pick = await _call_blocking(pick_latest_snapshot_for_row, cfg, row_no)
@@ -2148,10 +2158,62 @@ async def student_reminder_confirm_callback(
     return ConversationHandler.END
 
 
+def _sheet_choice_help_text(cfg: BotConfig) -> str:
+    mag_name = (cfg.magistrants_worksheet_name or "Магистранты").strip()
+    return (
+        "Введите имя листа для группового напоминания:\n"
+        f"• {cfg.worksheet_name}\n"
+        f"• {mag_name}\n\n"
+        "/cancel — отмена."
+    )
+
+
+def _bulk_message_text(template: str, *, fio: str) -> str:
+    text = str(template or "").strip()
+    if "{fio}" in text:
+        return text.replace("{fio}", fio or "")
+    return text
+
+
+async def _resolve_bulk_sheet(
+    cfg: BotConfig,
+    raw_sheet_name: str,
+):
+    requested = normalize_text(raw_sheet_name).strip()
+    requested_key = requested.casefold()
+    reg_name = (cfg.worksheet_name or "Регистрация").strip()
+    mag_name = (cfg.magistrants_worksheet_name or "Магистранты").strip()
+
+    if requested_key in {reg_name.casefold(), "регистрация"}:
+        ws = await _call_blocking(get_worksheet, cfg)
+        return ws, reg_name, "registration", True, None
+
+    if requested_key in {mag_name.casefold(), "магистранты"}:
+        spreadsheet = await _call_blocking(get_spreadsheet, cfg)
+        ws = await _call_blocking(get_optional_worksheet, spreadsheet, mag_name)
+        if ws is None:
+            return (
+                None,
+                mag_name,
+                "magistrants",
+                False,
+                f"Лист «{mag_name}» не найден в таблице.",
+            )
+        return ws, mag_name, "magistrants", False, None
+
+    return (
+        None,
+        "",
+        "",
+        False,
+        "Не понял имя листа.\n\n" + _sheet_choice_help_text(cfg),
+    )
+
+
 async def student_message_bulk_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Групповое стандартное напоминание по списку номеров строк «Регистрация»."""
+    """Групповое напоминание по списку номеров строк выбранного листа."""
 
     if not _is_admin(update, context):
         await update.message.reply_text(
@@ -2162,11 +2224,7 @@ async def student_message_bulk_start(
 
     _clear_student_reminder(context)
     await update.message.reply_text(
-        "Перечислите номера строк листа «Регистрация» (начиная со 2-й), по которым нужно "
-        "разослать стандартное напоминание — у каждого подставится ФИО из своей строки.\n\n"
-        "Можно через пробел, запятую или с новой строки. Пример:\n"
-        "5 7 9 10   или   12,15,18\n\n"
-        f"Не больше {BULK_STUDENT_REMINDER_MAX_ROWS} строк за раз.\n/cancel — отмена.",
+        _sheet_choice_help_text(_bot_config(context)),
         reply_markup=ReplyKeyboardRemove(),
     )
     return STUDENT_MSG_BULK_ASK_ROWS
@@ -2175,7 +2233,7 @@ async def student_message_bulk_start(
 async def student_reminder_bulk_receive_rows(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Парсит список строк, показывает предпросмотр и кнопки Отправить/Отмена."""
+    """Пошагово принимает лист, строки и текст для групповой отправки."""
 
     if not _is_admin(update, context):
         await update.message.reply_text(
@@ -2187,6 +2245,82 @@ async def student_reminder_bulk_receive_rows(
     msg = update.message
     if msg is None:
         return STUDENT_MSG_BULK_ASK_ROWS
+
+    cfg = _bot_config(context)
+
+    if not context.user_data.get(USER_DATA_STUDENT_BULK_SHEET_NAME):
+        ws, sheet_name, sheet_kind, attach_snapshot, err = await _resolve_bulk_sheet(
+            cfg, msg.text or ""
+        )
+        if err:
+            await msg.reply_text(err)
+            return STUDENT_MSG_BULK_ASK_ROWS
+        assert ws is not None
+        context.user_data[USER_DATA_STUDENT_BULK_SHEET_NAME] = sheet_name
+        context.user_data[USER_DATA_STUDENT_BULK_SHEET_KIND] = sheet_kind
+        context.user_data[USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT] = attach_snapshot
+        await msg.reply_text(
+            f"Выбран лист «{sheet_name}».\n\n"
+            "Перечислите номера строк этого листа (начиная со 2-й), "
+            "по которым нужно отправить напоминание.\n\n"
+            "Можно через пробел, запятую или с новой строки. Пример:\n"
+            "5 7 9 10   или   12,15,18\n\n"
+            f"Не больше {BULK_STUDENT_REMINDER_MAX_ROWS} строк за раз.\n/cancel — отмена."
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+
+    if context.user_data.get(USER_DATA_STUDENT_BULK_ENTRIES) and not context.user_data.get(
+        USER_DATA_STUDENT_REMINDER_DRAFT
+    ):
+        draft = (msg.text or "").strip()
+        if not draft:
+            await msg.reply_text("Текст пустой. Пришлите сообщение текстом или /cancel.")
+            return STUDENT_MSG_BULK_ASK_ROWS
+        context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
+
+        entries = context.user_data.get(USER_DATA_STUDENT_BULK_ENTRIES)
+        if not isinstance(entries, list) or not entries:
+            await msg.reply_text(
+                "Состояние сценария устарело. Начните снова: /student_message_bulk."
+            )
+            _clear_student_reminder(context)
+            return ConversationHandler.END
+
+        sample_fio = str(entries[0].get("fio") or "")
+        sample_draft = _bulk_message_text(draft, fio=sample_fio)
+        sheet_name = str(context.user_data.get(USER_DATA_STUDENT_BULK_SHEET_NAME) or "")
+        lines = [
+            f"Будет отправлено {len(entries)} сообщений.",
+            f"Лист: «{sheet_name}».",
+            "Если в тексте есть {fio}, для каждого получателя подставится своё ФИО.",
+            "",
+        ]
+        show = entries[:35]
+        for e in show:
+            fn = e["fio"] or "—"
+            lines.append(f"• стр. {e['row']} — {fn} → chat_id {e['chat_id']}")
+        if len(entries) > 35:
+            lines.append(f"… и ещё {len(entries) - 35}.")
+        lines.extend(
+            [
+                "",
+                "Пример текста для первой строки в списке:",
+                "════════════",
+                sample_draft[:3200] + ("…" if len(sample_draft) > 3200 else ""),
+                "════════════",
+                "",
+                "Отправить всем?",
+            ]
+        )
+        body = "\n".join(lines)
+        if len(body) > 4000:
+            body = body[:3990] + "…"
+
+        await msg.reply_text(
+            body,
+            reply_markup=_student_reminder_bulk_confirm_keyboard(),
+        )
+        return STUDENT_MSG_BULK_CONFIRM
 
     idx, err = _parse_bulk_student_row_numbers(msg.text or "")
     if err:
@@ -2208,8 +2342,24 @@ async def student_reminder_bulk_receive_rows(
         )
         return STUDENT_MSG_BULK_ASK_ROWS
 
-    cfg = _bot_config(context)
-    ws = get_worksheet(cfg)
+    sheet_name = str(context.user_data.get(USER_DATA_STUDENT_BULK_SHEET_NAME) or "").strip()
+    sheet_kind = str(context.user_data.get(USER_DATA_STUDENT_BULK_SHEET_KIND) or "").strip()
+    attach_snapshot = bool(context.user_data.get(USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT))
+    if not sheet_name or not sheet_kind:
+        await msg.reply_text(
+            "Сначала укажите имя листа.\n\n" + _sheet_choice_help_text(cfg)
+        )
+        return STUDENT_MSG_BULK_ASK_ROWS
+    if sheet_kind == "registration":
+        ws = await _call_blocking(get_worksheet, cfg)
+    else:
+        spreadsheet = await _call_blocking(get_spreadsheet, cfg)
+        ws = await _call_blocking(get_optional_worksheet, spreadsheet, sheet_name)
+        if ws is None:
+            await msg.reply_text(f"Лист «{sheet_name}» не найден в таблице.")
+            _clear_student_reminder(context)
+            return ConversationHandler.END
+
     entries: list[dict] = []
     empty_tg: list[int] = []
     empty_row: list[int] = []
@@ -2232,17 +2382,25 @@ async def student_reminder_bulk_receive_rows(
             empty_tg.append(row_no)
             continue
         fio = (fio_text_from_worksheet_row(ws, row_no) or "").strip()
-        entries.append({"row": row_no, "chat_id": chat_id, "fio": fio})
+        entries.append(
+            {
+                "row": row_no,
+                "chat_id": chat_id,
+                "fio": fio,
+                "sheet_name": sheet_name,
+                "attach_snapshot": attach_snapshot,
+            }
+        )
 
     if empty_row:
         await msg.reply_text(
-            "Пустые или отсутствующие строки в таблице: "
+            f"Пустые или отсутствующие строки на листе «{sheet_name}»: "
             + ", ".join(str(x) for x in empty_row)
         )
         return STUDENT_MSG_BULK_ASK_ROWS
     if empty_tg:
         await msg.reply_text(
-            "Нет заполненного telegram_id в строках: "
+            f"Нет заполненного telegram_id на листе «{sheet_name}» в строках: "
             + ", ".join(str(x) for x in empty_tg)
         )
         return STUDENT_MSG_BULK_ASK_ROWS
@@ -2274,10 +2432,12 @@ async def student_reminder_bulk_receive_rows(
 
     context.user_data[USER_DATA_STUDENT_BULK_ENTRIES] = entries
 
-    sample_fio = entries[0]["fio"]
-    sample_draft = build_standard_reminder(recipient_fio=sample_fio, extra_lines=None)
     lines = [
-        f"Будет отправлено {len(entries)} сообщений (стандартный текст, у каждого своё ФИО):",
+        f"Получателей найдено: {len(entries)}.",
+        f"Лист: «{sheet_name}».",
+        "",
+        "Пришлите текст сообщения одним сообщением.",
+        "Можно использовать {fio}, чтобы подставить ФИО получателя.",
         "",
     ]
     if dup_notes:
@@ -2289,32 +2449,18 @@ async def student_reminder_bulk_receive_rows(
         lines.append(f"• стр. {e['row']} — {fn} → chat_id {e['chat_id']}")
     if len(entries) > 35:
         lines.append(f"… и ещё {len(entries) - 35}.")
-    lines.extend(
-        [
-            "",
-            "Пример текста для первой строки в списке:",
-            "════════════",
-            sample_draft[:3200] + ("…" if len(sample_draft) > 3200 else ""),
-            "════════════",
-            "",
-            "Отправить всем?",
-        ]
-    )
     body = "\n".join(lines)
     if len(body) > 4000:
         body = body[:3990] + "…"
 
-    await msg.reply_text(
-        body,
-        reply_markup=_student_reminder_bulk_confirm_keyboard(),
-    )
-    return STUDENT_MSG_BULK_CONFIRM
+    await msg.reply_text(body)
+    return STUDENT_MSG_BULK_ASK_ROWS
 
 
 async def student_reminder_bulk_confirm_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Отправка или отмена группового стандартного напоминания."""
+    """Отправка или отмена группового напоминания."""
 
     query = update.callback_query
     if query is None or query.message is None:
@@ -2340,9 +2486,16 @@ async def student_reminder_bulk_confirm_callback(
         return ConversationHandler.END
 
     entries = context.user_data.get(USER_DATA_STUDENT_BULK_ENTRIES)
+    draft_template = str(context.user_data.get(USER_DATA_STUDENT_REMINDER_DRAFT) or "").strip()
     if not isinstance(entries, list) or not entries:
         await query.message.reply_text(
             "Состояние сценария устарело. Начните снова: /student_message_bulk."
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+    if not draft_template:
+        await query.message.reply_text(
+            "Текст рассылки не найден. Начните снова: /student_message_bulk."
         )
         _clear_student_reminder(context)
         return ConversationHandler.END
@@ -2350,6 +2503,7 @@ async def student_reminder_bulk_confirm_callback(
     await query.edit_message_reply_markup(reply_markup=None)
 
     cfg = _bot_config(context)
+    sheet_name = str(context.user_data.get(USER_DATA_STUDENT_BULK_SHEET_NAME) or "")
     summary_lines: list[str] = []
     delay = 0.06
 
@@ -2359,17 +2513,24 @@ async def student_reminder_bulk_confirm_callback(
         row_no = int(ent["row"])
         chat_id_target = int(ent["chat_id"])
         fio = str(ent.get("fio") or "")
-        draft = build_standard_reminder(recipient_fio=fio, extra_lines=None)
+        draft = _bulk_message_text(draft_template, fio=fio)
+        attach_snapshot = bool(ent.get("attach_snapshot"))
         ok, info = await _deliver_reminder_text_and_snapshot(
             context.bot,
             cfg,
             row_no=row_no,
             chat_id_target=chat_id_target,
             message_text=draft,
+            attach_snapshot=attach_snapshot,
         )
         summary_lines.append(_bulk_delivery_summary_line(row_no, ok, info))
 
-    report = "Групповая рассылка завершена.\n\n" + "\n".join(summary_lines)
+    report = (
+        "Групповая рассылка завершена."
+        + (f"\nЛист: «{sheet_name}»." if sheet_name else "")
+        + "\n\n"
+        + "\n".join(summary_lines)
+    )
     if len(report) > 4000:
         report = report[:3990] + "…"
 

@@ -49,6 +49,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 ("status", "Проверить магистранта"),
                 ("unreg", "Кто не зарегистрировался"),
                 ("reg_list", "Кто зарегистрировался"),
+                ("student_message", "Сообщение магистранту"),
+                ("student_message_bulk", "Групповое напоминание"),
                 ("about", "О проекте"),
             ],
         )

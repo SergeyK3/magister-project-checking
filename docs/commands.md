@@ -25,7 +25,7 @@
 | `/register` | — | регистрация (латинский вход в тот же FSM) |
 | `/help` | — | подсказка по роли (`help_command`) |
 
-В меню Telegram через API задаются пять коротких пунктов: `start`, `status`, `unreg`, `reg_list`, `about` — см. `default_bot_commands()`.
+В меню Telegram через API задаются короткие пункты: `start`, `status`, `unreg`, `reg_list`, `student_message`, `student_message_bulk`, `about` — см. `default_bot_commands()`.
 
 ---
 
@@ -79,6 +79,6 @@
 | `/spravka` | без аргументов — меню форматов; с аргументом — проверка указанной строки/ФИО |
 | `/project_card` | PDF-карточка по строке или ФИО |
 | `/student_message` | напоминание одному магистранту |
-| `/student_message_bulk` | групповое стандартное напоминание по номерам строк |
+| `/student_message_bulk` | групповое напоминание по номерам строк выбранного листа |
 
 Также администратор может отправить документ `.json` (snapshot) в личку — см. `on_project_snapshot_json_file`.

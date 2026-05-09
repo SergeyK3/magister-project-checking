@@ -214,6 +214,49 @@ class DetectTitleFromGdocTests(unittest.TestCase):
             "С РЕВМАТОЛОГИЧЕСКИМИ ЗАБОЛЕВАНИЯМИ",
         )
 
+    def test_govt_template_joins_wrapped_caps_title_above_split_degree_marker(self) -> None:
+        document = _document(
+            [
+                _paragraph("НАО «Медицинский университет Астана»\n"),
+                _paragraph("Ибраев Руслан Тургумбекович\n"),
+                _paragraph(
+                    "АНАЛИЗ УДОВЛЕТВОРЁННОСТИ ВЗРОСЛОГО СЕЛЬСКОГО НАСЕЛЕНИЯ "
+                    "ДОСТУПНОСТЬЮ ЛЕКАРСТВЕННЫХ СРЕДСТВ (НА ПРИМЕРЕ АКМОЛИНСКОЙ\n"
+                ),
+                _paragraph("ОБЛАСТИ)\n"),
+                _paragraph("7M10116 – «Общественное здравоохранение»\n"),
+                _paragraph("Проект на соискание академической\n"),
+                _paragraph("степени магистра здравоохранения\n"),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_gdoc(document),
+            "АНАЛИЗ УДОВЛЕТВОРЁННОСТИ ВЗРОСЛОГО СЕЛЬСКОГО НАСЕЛЕНИЯ "
+            "ДОСТУПНОСТЬЮ ЛЕКАРСТВЕННЫХ СРЕДСТВ (НА ПРИМЕРЕ АКМОЛИНСКОЙ ОБЛАСТИ)",
+        )
+
+    def test_govt_template_accepts_quoted_mixed_case_title_above_degree_marker(self) -> None:
+        document = _document(
+            [
+                _paragraph("НАО «Медицинский университет Астана»\n"),
+                _paragraph("Антикеева Алия Алмасовна\n"),
+                _paragraph(
+                    "«Научное обоснование комплекса мероприятий по развитию "
+                    "посмертного донорства в Республике Казахстан»\n"
+                ),
+                _paragraph("7М10105 – «Менеджмент в здравоохранении»\n"),
+                _paragraph(
+                    "Диссертация на соискание академической степени магистра "
+                    "медицинских наук\n"
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_gdoc(document),
+            "Научное обоснование комплекса мероприятий по развитию "
+            "посмертного донорства в Республике Казахстан",
+        )
+
     def test_govt_template_caps_title_above_degree_marker_kk(self) -> None:
         # Структура реальной диссертации Камзебаевой.
         document = _document(
@@ -293,6 +336,25 @@ class DetectTitleFromGdocTests(unittest.TestCase):
                 _paragraph("ВВЕДЕНИЕ\n", heading_level=1),
                 _paragraph("1. ОБЗОР ЛИТЕРАТУРЫ\n", heading_level=1),
                 _paragraph("1.1. Теоретические основы\n", heading_level=1),
+            ]
+        )
+        self.assertEqual(detect_dissertation_title_from_gdoc(document), "")
+
+    def test_heading_fallback_skips_service_headings_from_doc_without_title_page(self) -> None:
+        # Реальный класс ошибок: документ начинается не с титульного листа, а со
+        # служебных разделов. Их нельзя принимать за название диссертации.
+        document = _document(
+            [
+                _paragraph("НОРМАТИВНЫЕ ССЫЛКИ\n", heading_level=1),
+                _paragraph("ОПРЕДЕЛЕНИЯ\n", heading_level=1),
+                _paragraph("ПЕРЕЧЕНЬ СОКРАЩЕНИЙ И ОБОЗНАЧЕНИЙ\n", heading_level=1),
+                _paragraph("СПИСОК ТАБЛИЦ И РИСУНКОВ\n", heading_level=1),
+                _paragraph("ВВЕДЕНИЕ\n", heading_level=1),
+                _paragraph("Актуальность\n", heading_level=1),
+                _paragraph("Цель исследования\n", heading_level=1),
+                _paragraph("Объект и предмет исследования\n", heading_level=1),
+                _paragraph("Практическая значимость\n", heading_level=1),
+                _paragraph("Структура работы\n", heading_level=1),
             ]
         )
         self.assertEqual(detect_dissertation_title_from_gdoc(document), "")

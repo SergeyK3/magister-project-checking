@@ -102,6 +102,8 @@ class DissertationMetrics:
     """Всего ``<w:sectPr>`` в документе (DOCX). Для Google Doc — None."""
     bibliography_heading_warning: str | None = None
     """Несовпадение с утверждённым названием раздела списка литературы (только текст предупреждения)."""
+    dissertation_title: str = ""
+    """Название диссертации, извлечённое с титульного листа для проверок оформления."""
 
 
 def iter_heading_texts(document: dict[str, Any]) -> Iterator[str]:
@@ -1170,6 +1172,9 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
     bib_heading_warn = bibliography_heading_issue_note(plain)
     if bib_heading_warn:
         notes.append(bib_heading_warn)
+    from magister_checking.dissertation_meta import detect_dissertation_title_from_gdoc
+
+    dissertation_title = detect_dissertation_title_from_gdoc(document)
 
     margins_list = _gdoc_collect_section_margins(document)
     page_margins, page_margins_secondary = _dominant_margins(margins_list)
@@ -1197,6 +1202,7 @@ def analyze_dissertation(document: dict[str, Any]) -> DissertationMetrics:
         page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
         page_numbering_sections_total=numbering_info.get("sections_total"),
         bibliography_heading_warning=bib_heading_warn,
+        dissertation_title=dissertation_title,
     )
 
 
@@ -1589,6 +1595,9 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
     bib_heading_warn = bibliography_heading_issue_note(plain)
     if bib_heading_warn:
         notes.append(bib_heading_warn)
+    from magister_checking.dissertation_meta import detect_dissertation_title_from_docx_bytes
+
+    dissertation_title = detect_dissertation_title_from_docx_bytes(docx_bytes)
 
     margins_list = _docx_collect_section_margins(doc)
     page_margins, page_margins_secondary = _dominant_margins(margins_list)
@@ -1616,6 +1625,7 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
         page_numbering_sections_with_footer=numbering_info.get("sections_with_footer"),
         page_numbering_sections_total=numbering_info.get("sections_total"),
         bibliography_heading_warning=bib_heading_warn,
+        dissertation_title=dissertation_title,
     )
 
 

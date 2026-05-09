@@ -32,6 +32,7 @@ _NUMBERING_POSITIONS: tuple[str, ...] = (
     "top-center",
     "top-left",
 )
+_TITLE_CASE_MODES: tuple[str, ...] = ("upper", "off")
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class FormattingRules:
     page_numbering_position: str = "bottom-right"
     ratio_threshold: float = 0.95
     margin_tolerance_cm: float = 0.2
+    dissertation_title_case: str = "upper"
 
     @property
     def margins_cm(self) -> dict[str, float]:
@@ -95,6 +97,11 @@ def _read_position(name: str, default: str) -> str:
     return raw if raw in _NUMBERING_POSITIONS else default
 
 
+def _read_title_case(name: str, default: str) -> str:
+    raw = _read(name, default).lower().replace("_", "-")
+    return raw if raw in _TITLE_CASE_MODES else default
+
+
 def load_formatting_rules() -> FormattingRules:
     """Собирает ``FormattingRules`` из env, подставляя дефолты на отсутствующие.
 
@@ -117,6 +124,9 @@ def load_formatting_rules() -> FormattingRules:
         ),
         ratio_threshold=_read_float("FORMATTING_RATIO_THRESHOLD", 0.95),
         margin_tolerance_cm=_read_float("FORMATTING_MARGIN_TOLERANCE_CM", 0.2),
+        dissertation_title_case=_read_title_case(
+            "FORMATTING_DISSERTATION_TITLE_CASE", "upper"
+        ),
     )
 
 
@@ -159,6 +169,22 @@ def _format_pct(ratio: float | None) -> str:
     if ratio is None:
         return "—"
     return f"{round(ratio * 100)}%"
+
+
+def _is_upper_title(text: str) -> bool:
+    letters = [ch for ch in text if ch.isalpha() and ch.lower() != ch.upper()]
+    if not letters:
+        return True
+    return all(ch == ch.upper() for ch in letters)
+
+
+def _title_uppercase_issue(title: str) -> str:
+    expected = title.upper()
+    return (
+        "название диссертации на титульном листе: должно быть набрано "
+        f"прописными буквами (CAPS). Сейчас: «{title}». "
+        f"Нужно: «{expected}»"
+    )
 
 
 @dataclass(frozen=True)
@@ -320,6 +346,12 @@ def evaluate_formatting_compliance(
             "заголовок списка литературы: «СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ», "
             "а должно быть «СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ»"
         )
+    dissertation_title = (getattr(metrics, "dissertation_title", "") or "").strip()
+    if rules.dissertation_title_case == "upper" and dissertation_title:
+        has_any_metric = True
+        if not _is_upper_title(dissertation_title):
+            issues.append("dissertation_title_case")
+            issue_lines.append(_title_uppercase_issue(dissertation_title))
 
     if not has_any_metric:
         return ComplianceReport(compliance=None, text="—", warnings=())

@@ -34,6 +34,7 @@ def _metrics(
     sections_with_footer: int | None = None,
     sections_total: int | None = None,
     bibliography_heading_warning: str | None = None,
+    dissertation_title: str = "",
 ) -> DissertationMetrics:
     return DissertationMetrics(
         approx_pages=60,
@@ -55,6 +56,7 @@ def _metrics(
         page_numbering_sections_with_footer=sections_with_footer,
         page_numbering_sections_total=sections_total,
         bibliography_heading_warning=bibliography_heading_warning,
+        dissertation_title=dissertation_title,
     )
 
 
@@ -69,6 +71,7 @@ class LoadFormattingRulesTests(unittest.TestCase):
         self.assertEqual(rules.page_numbering_position, "bottom-right")
         self.assertEqual(rules.ratio_threshold, 0.95)
         self.assertEqual(rules.margin_tolerance_cm, 0.2)
+        self.assertEqual(rules.dissertation_title_case, "upper")
 
     def test_env_overrides_with_comma_decimal(self) -> None:
         env = {
@@ -77,6 +80,7 @@ class LoadFormattingRulesTests(unittest.TestCase):
             "FORMATTING_MARGIN_TOP_CM": "2,5",
             "FORMATTING_MARGIN_TOLERANCE_CM": "0,1",
             "FORMATTING_PAGE_NUMBERING_POSITION": "bottom-center",
+            "FORMATTING_DISSERTATION_TITLE_CASE": "off",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             rules = load_formatting_rules()
@@ -85,6 +89,7 @@ class LoadFormattingRulesTests(unittest.TestCase):
         self.assertEqual(rules.margin_top_cm, 2.5)
         self.assertEqual(rules.margin_tolerance_cm, 0.1)
         self.assertEqual(rules.page_numbering_position, "bottom-center")
+        self.assertEqual(rules.dissertation_title_case, "off")
 
     def test_invalid_position_falls_back_to_default(self) -> None:
         with mock.patch.dict(
@@ -222,6 +227,32 @@ class EvaluateFormattingComplianceTests(unittest.TestCase):
         self.assertIn("СПИСОК ИСПОЛЬЗОВАННОЙ ЛИТЕРАТУРЫ", report.text)
         self.assertIn("СПИСОК ИСПОЛЬЗОВАННЫХ ИСТОЧНИКОВ", report.text)
         self.assertIn("не соответствует", report.text)
+
+    def test_title_case_lowercase_blocks_compliance_when_rule_enabled(self) -> None:
+        m = _metrics(
+            dissertation_title=(
+                "Научное обоснование комплекса мероприятий по развитию "
+                "посмертного донорства в Республике Казахстан"
+            )
+        )
+        report = evaluate_formatting_compliance(m, self.rules)
+        self.assertFalse(report.compliance)
+        self.assertIn("название диссертации на титульном листе", report.text)
+        self.assertIn("ПРОПИСНЫМИ", report.text.upper())
+        self.assertIn("НАУЧНОЕ ОБОСНОВАНИЕ", report.text)
+
+    def test_title_case_can_be_disabled(self) -> None:
+        m = _metrics(
+            dissertation_title=(
+                "Научное обоснование комплекса мероприятий по развитию "
+                "посмертного донорства в Республике Казахстан"
+            )
+        )
+        report = evaluate_formatting_compliance(
+            m, FormattingRules(dissertation_title_case="off")
+        )
+        self.assertTrue(report.compliance)
+        self.assertEqual(report.text, "соответствует")
 
     def test_position_human_ru(self) -> None:
         self.assertEqual(position_human_ru("bottom-right"), "внизу справа")

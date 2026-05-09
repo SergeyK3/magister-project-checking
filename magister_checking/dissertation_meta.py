@@ -98,6 +98,7 @@ _STOP_PHRASES_EXACT: frozenset[str] = frozenset(
         "список сокращений",
         "список рисунков",
         "список таблиц",
+        "таблицы",
         "кестелер мен тізімдер",
         "обзор литературы",
         "литературный обзор",
@@ -117,6 +118,23 @@ _STOP_PHRASES_EXACT: frozenset[str] = frozenset(
         "список использованной литературы",
         "пайдаланылған әдебиеттер тізімі",
         "references",
+        "перечень сокращений и обозначений",
+        "перечень обозначений и сокращений",
+        "список таблиц и рисунков",
+        "актуальность",
+        "цель исследования",
+        "цели и задачи исследования",
+        "задачи исследования",
+        "объект исследования",
+        "предмет исследования",
+        "объект и предмет исследования",
+        "научная новизна",
+        "новизна исследования",
+        "практическая значимость",
+        "теоретическая значимость",
+        "база проведения исследований",
+        "основные положения, выносимые на защиту",
+        "структура работы",
     }
 )
 
@@ -275,7 +293,8 @@ def _detect_title_from_govt_template(paragraphs: list[str]) -> str:
 
     head_window = paragraphs[:30]
     for idx, paragraph in enumerate(head_window):
-        if not _DEGREE_MARKER_RE.search(paragraph):
+        marker_probe = " ".join(head_window[idx : idx + 2])
+        if not _DEGREE_MARKER_RE.search(marker_probe):
             continue
         for k in range(idx - 1, max(idx - 7, -1), -1):
             candidate = paragraphs[k].strip()
@@ -285,14 +304,45 @@ def _detect_title_from_govt_template(paragraphs: list[str]) -> str:
                 continue
             if _is_stop_phrase(candidate):
                 continue
-            if not _is_caps_paragraph(candidate):
+            if not (_is_caps_paragraph(candidate) or _is_quoted_title_candidate(candidate)):
                 continue
-            cleaned = _clean_title(candidate)
+            cleaned = _clean_title(_join_wrapped_caps_title_lines(paragraphs, k))
             if _looks_like_title(cleaned):
                 return cleaned
         # Якорь нашли, но темы над ним нет — дальше ловить нечего, выходим
         break
     return ""
+
+
+def _join_wrapped_caps_title_lines(paragraphs: list[str], start_idx: int) -> str:
+    """Склеивает CAPS-тему, перенесённую на 2-3 соседних строки титула."""
+
+    parts = [paragraphs[start_idx].strip()]
+    for idx in range(start_idx + 1, min(start_idx + 4, len(paragraphs))):
+        candidate = paragraphs[idx].strip()
+        if not candidate:
+            break
+        if _DEGREE_MARKER_RE.search(candidate):
+            break
+        if _is_stop_phrase(candidate):
+            break
+        if not _is_caps_paragraph(candidate):
+            break
+        parts.append(candidate)
+    return " ".join(parts)
+
+
+def _is_quoted_title_candidate(text: str) -> bool:
+    """Тема на титуле иногда набрана обычным регистром, но целиком в кавычках."""
+
+    stripped = (text or "").strip()
+    if len(stripped) < _MIN_TITLE_LEN:
+        return False
+    return (
+        (stripped.startswith("«") and stripped.endswith("»"))
+        or (stripped.startswith('"') and stripped.endswith('"'))
+        or (stripped.startswith("“") and stripped.endswith("”"))
+    )
 
 
 def _looks_like_title(text: str) -> bool:
@@ -400,10 +450,18 @@ def detect_dissertation_title_from_docx_bytes(blob: bytes) -> str:
         logger.warning("dissertation_meta: не удалось открыть .docx: %s", exc)
         return ""
 
+    paragraphs, headings = _docx_xml_paragraphs_and_headings(doc)
+    if not paragraphs:
+        paragraphs, headings = _docx_api_paragraphs_and_headings(doc)
+
+    return _detect_title_from_paragraphs(paragraphs, headings)
+
+
+def _docx_api_paragraphs_and_headings(doc: Document) -> tuple[list[str], list[str]]:
     paragraphs: list[str] = []
     headings: list[str] = []
     for para in doc.paragraphs:
-        text = (para.text or "").strip()
+        text = re.sub(r"\s+", " ", (para.text or "").strip())
         if not text:
             continue
         paragraphs.append(text)
@@ -415,8 +473,43 @@ def detect_dissertation_title_from_docx_bytes(blob: bytes) -> str:
             headings.append(text)
         if len(paragraphs) >= 80:
             break
+    return paragraphs, headings
 
-    return _detect_title_from_paragraphs(paragraphs, headings)
+
+def _docx_xml_paragraphs_and_headings(doc: Document) -> tuple[list[str], list[str]]:
+    """Читает параграфы напрямую из OOXML.
+
+    В некоторых .docx первые блоки титульной страницы не попадают в
+    ``Document.paragraphs``, хотя находятся в ``word/document.xml``. Для темы
+    диссертации важен именно порядок XML-параграфов в начале документа.
+    """
+
+    paragraphs: list[str] = []
+    headings: list[str] = []
+    for para in doc.element.xpath(".//w:p"):
+        text = re.sub(
+            r"\s+",
+            " ",
+            "".join((node.text or "") for node in para.xpath(".//w:t")).strip(),
+        )
+        if not text:
+            continue
+        paragraphs.append(text)
+        p_style = para.xpath("./w:pPr/w:pStyle")
+        style_name = ""
+        if p_style:
+            style_name = str(
+                p_style[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val"
+                )
+                or ""
+            )
+        style_low = style_name.lower()
+        if "heading" in style_low or "заголов" in style_low:
+            headings.append(text)
+        if len(paragraphs) >= 80:
+            break
+    return paragraphs, headings
 
 
 # ---------------------------------------------------------------------------

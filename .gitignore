@@ -29,6 +29,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Локальные диагностические логи агента/бота
+debug-*.log
+
 # IDE
 .idea/
 .vscode/

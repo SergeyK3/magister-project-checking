@@ -115,7 +115,6 @@ from magister_checking.bot.admin_message_helpers import (
     _parse_bulk_student_row_numbers,
     _student_keyboard,
     _student_reminder_bulk_confirm_keyboard,
-    _student_reminder_confirm_keyboard,
     _student_reminder_preview_text,
     _student_reminder_template_keyboard,
     _supervisor_message_confirm_keyboard,
@@ -498,6 +497,7 @@ USER_DATA_SUPERVISOR_MESSAGE_FIO = "supervisor_message_fio"
 USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID = "supervisor_message_chat_id"
 USER_DATA_SUPERVISOR_MESSAGE_CHUNKS = "supervisor_message_chunks"
 SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS = 30.0
+ADMIN_STATUS_AUTO_RETRY_SECONDS = 60.0
 SUPERVISOR_STATUS_PROMPT_TEXT = (
     "Введите фамилию и имя магистранта"
 )
@@ -887,6 +887,20 @@ def _resolve_project_card_target_row(
             f"Уточните номер строки: {', '.join(str(row) for row in matches)}"
         )
     return matches[0], None
+
+
+def _registered_user_by_fio_if_unique(worksheet, fio: str) -> UserForm | None:
+    """Fallback for master-list phone drift: one registered row with this FIO."""
+
+    rows = find_rows_by_fio(worksheet, fio)
+    candidates: list[UserForm] = []
+    for row_number in rows:
+        user = load_user(worksheet, row_number)
+        if (user.telegram_id or "").strip():
+            candidates.append(user)
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
 
 
 async def _prompt_next(
@@ -2020,28 +2034,33 @@ async def student_reminder_pick_template(
     if tag == "std":
         draft = build_standard_reminder(recipient_fio=fio_label, extra_lines=None)
         context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
-        await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(_student_reminder_preview_text(draft))
-        await query.message.reply_text(
-            "Отправить это сообщение в личку магистранту?",
-            reply_markup=_student_reminder_confirm_keyboard(),
-        )
-        return STUDENT_MSG_CONFIRM
-
-    await query.edit_message_reply_markup(reply_markup=None)
+        state = await _send_student_reminder_now(query.message, context)
+        await _remove_student_reminder_template_prompt(query)
+        return state
 
     if tag == "stdex":
         await query.message.reply_text(
             "Пришлите до трёх строк замечаний (каждая — с новой строки).\n"
             "Пустая отправка или «-» только — без блока замечаний."
         )
+        await _remove_student_reminder_template_prompt(query)
         return STUDENT_MSG_ASK_EXTRA
 
     if tag == "cust":
         await query.message.reply_text("Пришлите полный текст сообщения одним сообщением:")
+        await _remove_student_reminder_template_prompt(query)
         return STUDENT_MSG_ASK_CUSTOM
 
     return STUDENT_MSG_PICK_KIND
+
+
+async def _remove_student_reminder_template_prompt(query) -> None:
+    """Убирает служебное сообщение с кнопками выбора шаблона."""
+
+    try:
+        await query.message.delete()
+    except BadRequest:
+        await query.edit_message_reply_markup(reply_markup=None)
 
 
 async def student_reminder_receive_extra(
@@ -2066,12 +2085,7 @@ async def student_reminder_receive_extra(
     draft = build_standard_reminder(recipient_fio=fio_label, extra_lines=lines)
     context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
 
-    await msg.reply_text(_student_reminder_preview_text(draft))
-    await msg.reply_text(
-        "Отправить это сообщение в личку магистранту?",
-        reply_markup=_student_reminder_confirm_keyboard(),
-    )
-    return STUDENT_MSG_CONFIRM
+    return await _send_student_reminder_now(msg, context)
 
 
 async def student_reminder_receive_custom(
@@ -2090,12 +2104,63 @@ async def student_reminder_receive_custom(
 
     context.user_data[USER_DATA_STUDENT_REMINDER_DRAFT] = draft
 
-    await msg.reply_text(_student_reminder_preview_text(draft))
-    await msg.reply_text(
-        "Отправить это сообщение в личку магистранту?",
-        reply_markup=_student_reminder_confirm_keyboard(),
+    return await _send_student_reminder_now(msg, context)
+
+
+async def _send_student_reminder_now(
+    reply_to,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Отправляет подготовленное одиночное сообщение без дополнительного подтверждения."""
+
+    row_no = context.user_data.get(USER_DATA_STUDENT_REMINDER_ROW)
+    draft_t = context.user_data.get(USER_DATA_STUDENT_REMINDER_DRAFT)
+
+    if row_no is None or not isinstance(row_no, int) or draft_t is None or not str(draft_t).strip():
+        await reply_to.reply_text(
+            "Внутреннее состояние сценария сброшено. Начните снова: /student_message."
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+
+    cfg = _bot_config(context)
+    ws = get_worksheet(cfg)
+    tg_raw = get_telegram_id_at_row(ws, row_no).strip()
+
+    try:
+        chat_id_target = int(tg_raw) if tg_raw else 0
+    except ValueError:
+        chat_id_target = 0
+
+    if not chat_id_target:
+        await reply_to.reply_text(
+            f"В строке {row_no} пустой или некорректный telegram_id — не к кому отправить.",
+            reply_markup=_admin_keyboard(),
+        )
+        _clear_student_reminder(context)
+        return ConversationHandler.END
+
+    ok, info = await _deliver_reminder_text_and_snapshot(
+        context.bot,
+        cfg,
+        row_no=row_no,
+        chat_id_target=chat_id_target,
+        message_text=str(draft_t),
     )
-    return STUDENT_MSG_CONFIRM
+
+    if ok:
+        await reply_to.reply_text(
+            f"Сообщение отправлено (chat_id={chat_id_target}, строка {row_no}).{info}",
+            reply_markup=_admin_keyboard(),
+        )
+    else:
+        await reply_to.reply_text(
+            f"Не удалось доставить: {info}",
+            reply_markup=_admin_keyboard(),
+        )
+
+    _clear_student_reminder(context)
+    return ConversationHandler.END
 
 
 async def student_reminder_confirm_callback(
@@ -2126,55 +2191,8 @@ async def student_reminder_confirm_callback(
         )
         return ConversationHandler.END
 
-    row_no = context.user_data.get(USER_DATA_STUDENT_REMINDER_ROW)
-    draft_t = context.user_data.get(USER_DATA_STUDENT_REMINDER_DRAFT)
     await query.edit_message_reply_markup(reply_markup=None)
-
-    if row_no is None or not isinstance(row_no, int) or draft_t is None or not str(draft_t).strip():
-        await query.message.reply_text(
-            "Внутреннее состояние сценария сброшено. Начните снова: /student_message."
-        )
-        _clear_student_reminder(context)
-        return ConversationHandler.END
-
-    cfg = _bot_config(context)
-    ws = get_worksheet(cfg)
-    tg_raw = get_telegram_id_at_row(ws, row_no).strip()
-
-    try:
-        chat_id_target = int(tg_raw) if tg_raw else 0
-    except ValueError:
-        chat_id_target = 0
-
-    if not chat_id_target:
-        await query.message.reply_text(
-            f"В строке {row_no} пустой или некорректный telegram_id — не к кому отправить.",
-            reply_markup=_admin_keyboard(),
-        )
-        _clear_student_reminder(context)
-        return ConversationHandler.END
-
-    ok, info = await _deliver_reminder_text_and_snapshot(
-        context.bot,
-        cfg,
-        row_no=row_no,
-        chat_id_target=chat_id_target,
-        message_text=str(draft_t),
-    )
-
-    if ok:
-        await query.message.reply_text(
-            f"Сообщение отправлено (chat_id={chat_id_target}, строка {row_no}).{info}",
-            reply_markup=_admin_keyboard(),
-        )
-    else:
-        await query.message.reply_text(
-            f"Не удалось доставить: {info}",
-            reply_markup=_admin_keyboard(),
-        )
-
-    _clear_student_reminder(context)
-    return ConversationHandler.END
+    return await _send_student_reminder_now(query.message, context)
 
 
 def _sheet_choice_help_text(cfg: BotConfig) -> str:
@@ -3231,6 +3249,28 @@ async def _supervisor_status_timeout_task(
     )
 
 
+async def _status_auto_retry_task(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    fio_query_raw: str,
+) -> None:
+    await asyncio.sleep(ADMIN_STATUS_AUTO_RETRY_SECONDS)
+    await _supervisor_student_status_by_fio(
+        update,
+        context,
+        fio_query_raw,
+        schedule_admin_retry=False,
+    )
+
+
+def _schedule_status_auto_retry(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    fio_query_raw: str,
+) -> None:
+    asyncio.create_task(_status_auto_retry_task(update, context, fio_query_raw))
+
+
 def _set_supervisor_status_pending(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -3294,7 +3334,7 @@ async def admin_recheck_pending_receive(
                 SUPERVISOR_STATUS_TIMEOUT_TEXT
             )
             return
-        if not _is_supervisor(update, context):
+        if not (_is_supervisor(update, context) or _is_admin(update, context)):
             await update.message.reply_text("Команда только для научных руководителей.")
             return
         await _supervisor_student_status_by_fio(update, context, text)
@@ -3784,25 +3824,32 @@ async def student_status_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def _supervisor_student_status_by_fio(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, fio_query_raw: str
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    fio_query_raw: str,
+    *,
+    schedule_admin_retry: bool = True,
 ) -> None:
-    """Научрук: /status ФИО — полная проверка строки подопечного (как админ /recheck ФИО)."""
+    """Научрук/админ: /status ФИО — полная проверка строки из master-листа."""
 
     assert update.message is not None
     cfg = _bot_config(context)
     tg = str(update.effective_user.id)
+    is_admin = _is_admin(update, context)
     title = (cfg.magistrants_worksheet_name or "").strip()
     if not title:
         await update.message.reply_text(
             "Мастер-лист магистрантов не настроен (MAGISTRANTS_WORKSHEET_NAME)."
         )
         return
-    sup_fio = await _call_blocking(get_supervisor_fio_for_telegram_id, cfg, tg)
-    if not sup_fio.strip():
-        await update.message.reply_text(
-            f"Не удалось найти ваше ФИО в листе «{SUPERVISORS_WORKSHEET_NAME}»."
-        )
-        return
+    sup_fio = ""
+    if not is_admin:
+        sup_fio = await _call_blocking(get_supervisor_fio_for_telegram_id, cfg, tg)
+        if not sup_fio.strip():
+            await update.message.reply_text(
+                f"Не удалось найти ваше ФИО в листе «{SUPERVISORS_WORKSHEET_NAME}»."
+            )
+            return
     spreadsheet = await _call_blocking(get_spreadsheet, cfg)
     mag_ws = await _call_blocking(get_optional_worksheet, spreadsheet, title)
     if mag_ws is None:
@@ -3810,7 +3857,12 @@ async def _supervisor_student_status_by_fio(
         return
     header = await _call_blocking(mag_ws.row_values, 1)
     colmap = magistrants_sheet_column_indices(header)
-    if colmap is None or "supervisor" not in colmap:
+    if colmap is None:
+        await update.message.reply_text(
+            "В листе магистрантов нет обязательных колонок ФИО / телефон / регистрация."
+        )
+        return
+    if not is_admin and "supervisor" not in colmap:
         await update.message.reply_text(
             "В листе магистрантов нет колонки научного руководителя."
         )
@@ -3824,26 +3876,55 @@ async def _supervisor_student_status_by_fio(
         return
     fio_i = colmap["fio"]
     phone_i = colmap["phone"]
-    sup_i = colmap["supervisor"]
+    sup_i = colmap.get("supervisor")
     matches: list[tuple[str, str, UserForm | None]] = []
+    fio_seen_outside_scope = False
     for row in all_rows[1:]:
         if not row or not any(str(c).strip() for c in row):
             continue
-        w = max(len(header), len(row), fio_i + 1, phone_i + 1, sup_i + 1)
+        w = max(len(header), len(row), fio_i + 1, phone_i + 1)
+        if sup_i is not None:
+            w = max(w, sup_i + 1)
         padded = list(row) + [""] * (w - len(row))
-        cell_sup = str(padded[sup_i] or "")
-        if not supervisor_name_matches(sup_fio, cell_sup):
-            continue
         st_fio = str(padded[fio_i] or "").strip()
         fk = normalize_fio(st_fio)
         if not fk or not _fio_query_matches_row_fio(needle, fk):
             continue
+        if not is_admin:
+            assert sup_i is not None
+            cell_sup = str(padded[sup_i] or "")
+            if not supervisor_name_matches(sup_fio, cell_sup):
+                fio_seen_outside_scope = True
+                continue
         pk = normalize_phone_ru_kz(str(padded[phone_i] or ""))
         key = (fk, pk) if pk else None
         usr: UserForm | None = reg_map.get(key) if key else None
+        if usr is None:
+            usr = await _call_blocking(
+                _registered_user_by_fio_if_unique,
+                reg_ws,
+                st_fio,
+            )
         matches.append((st_fio, str(padded[phone_i] or "").strip(), usr))
 
     if not matches:
+        if is_admin:
+            await update.message.reply_text(
+                "В листе «Магистранты» не найден магистрант с таким ФИО."
+            )
+            return
+        if fio_seen_outside_scope:
+            await update.message.reply_text(
+                "Магистрант с таким ФИО есть в листе «Магистранты», но не под вашим руководством.\n\n"
+                "Если вы администратор, бот не распознал ваш Telegram ID как активного "
+                "администратора в листе «Администраторы» (колонки telegram_id и active)."
+            )
+            if schedule_admin_retry:
+                _schedule_status_auto_retry(update, context, fio_query_raw)
+                await update.message.reply_text(
+                    "Повторю эту же команду автоматически через 60 секунд."
+                )
+            return
         await update.message.reply_text(
             "Под вашим руководством не найден магистрант с таким ФИО (лист «Магистранты»)."
         )
@@ -3878,8 +3959,8 @@ async def _supervisor_student_status_by_fio(
         context,
         only_if_changed=False,
         row_number_override=row_student,
-        attach_recheck_keyboard=False,
-        history_source="supervisor_status",
+        attach_recheck_keyboard=is_admin,
+        history_source="admin_status" if is_admin else "supervisor_status",
     )
 
 
@@ -3891,6 +3972,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cfg = _bot_config(context)
     tg = str(update.effective_user.id)
     args = context.args or []
+    if args and _is_admin(update, context):
+        await _supervisor_student_status_by_fio(
+            update, context, " ".join(args)
+        )
+        return
     if await _call_blocking(is_supervisor_telegram_id, cfg, tg):
         if not args:
             _set_supervisor_status_pending(update, context)

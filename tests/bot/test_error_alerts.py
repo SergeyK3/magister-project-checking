@@ -149,7 +149,10 @@ class OnHandlerErrorTests(unittest.TestCase):
             upd = Update(update_id=1, message=msg)
             ctx.error = RuntimeError("APIError: [429]: Quota exceeded")
 
-            with patch.object(Message, "reply_text", reply_mock):
+            with patch.object(Message, "reply_text", reply_mock), patch(
+                "magister_checking.bot.error_alerts.is_admin_telegram_id",
+                return_value=False,
+            ):
                 await on_handler_error(upd, ctx)
 
             send_mock.assert_not_awaited()
@@ -158,6 +161,50 @@ class OnHandlerErrorTests(unittest.TestCase):
             self.assertIn("/start", text)
             self.assertIn("30", text)
             self.assertIn("60", text)
+
+        asyncio.run(_run())
+
+    def test_google_sheets_429_schedules_one_admin_retry(self) -> None:
+        """Админская команда в личке при 429 автоматически повторяется один раз через 60 секунд."""
+
+        async def _run() -> None:
+            cfg = _minimal_config(alert=(111,))
+            app = MagicMock()
+            app.bot_data = {CONFIG_BOT_DATA_KEY: cfg}
+
+            def close_task(coro, **_kwargs):
+                coro.close()
+
+            app.create_task = MagicMock(side_effect=close_task)
+            ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+            ctx.application = app
+            ctx.bot = MagicMock()
+            ctx.bot.send_message = AsyncMock()
+            ctx.error = RuntimeError("APIError: [429]: Quota exceeded")
+
+            chat = Chat(id=555, type=ChatType.PRIVATE)
+            user = User(id=42, first_name="a", is_bot=False)
+            msg = Message(
+                message_id=1,
+                date=datetime.now(tz=timezone.utc),
+                chat=chat,
+                from_user=user,
+                text="/stats",
+            )
+            reply_mock = AsyncMock()
+            upd = Update(update_id=123, message=msg)
+
+            with patch.object(Message, "reply_text", reply_mock), patch(
+                "magister_checking.bot.error_alerts.is_admin_telegram_id",
+                return_value=True,
+            ):
+                await on_handler_error(upd, ctx)
+                await on_handler_error(upd, ctx)
+
+            self.assertEqual(app.create_task.call_count, 1)
+            reply_text = reply_mock.await_args_list[0].args[0]
+            self.assertIn("автоматически повторит", reply_text)
+            self.assertIn("60 секунд", reply_text)
 
         asyncio.run(_run())
 

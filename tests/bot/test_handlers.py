@@ -341,6 +341,186 @@ class StartHandlerTests(unittest.TestCase):
             handlers.SUPERVISOR_STATUS_PROMPT_TEXT
         )
 
+    def test_status_admin_with_fio_bypasses_supervisor_filter(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "222"
+        row[SHEET_HEADER.index("fio")] = "Уразаев Дамир Серикбаевич"
+        row[SHEET_HEADER.index("phone")] = "+77001234567"
+        reg_ws = FakeWorksheet([list(SHEET_HEADER), row])
+        mag_ws = FakeWorksheet(
+            [
+                [
+                    "№",
+                    "ФИО магистранта",
+                    "Спец",
+                    "Телефон",
+                    "Научный руководитель (ссылка)",
+                    "Регистрация",
+                ],
+                [
+                    "1",
+                    "Уразаев Дамир Серикбаевич",
+                    "",
+                    "8 700 123 45 67",
+                    "Другой Научрук",
+                    "зарегистрирован",
+                ],
+            ]
+        )
+        ctx = _FakeContext(reg_ws)
+        ctx.args = ["Уразаев", "Дамир", "Серикбаевич"]
+        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = (
+            "Магистранты"
+        )
+        update = _make_update(user_id=999, text="/status Уразаев Дамир Серикбаевич")
+        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+
+        with _patch_admin_check(True), _patch_supervisor_check(False), _patch_worksheet(
+            reg_ws
+        ), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            _run(handlers.status_command(update, ctx))
+
+        m_do.assert_awaited_once()
+        self.assertEqual(m_do.await_args.kwargs["row_number_override"], 2)
+        self.assertTrue(m_do.await_args.kwargs["attach_recheck_keyboard"])
+        self.assertEqual(m_do.await_args.kwargs["history_source"], "admin_status")
+
+    def test_status_falls_back_to_unique_registration_fio_when_phone_differs(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "815191575"
+        row[SHEET_HEADER.index("fio")] = "Жарлыкпаева Лаура Зинатоллакызы"
+        row[SHEET_HEADER.index("phone")] = "+77022576571"
+        reg_ws = FakeWorksheet([list(SHEET_HEADER), row])
+        mag_ws = FakeWorksheet(
+            [
+                [
+                    "№",
+                    "ФИО магистранта",
+                    "Спец",
+                    "Телефон",
+                    "Научный руководитель (ссылка)",
+                    "Регистрация",
+                ],
+                [
+                    "1",
+                    "Жарлыкпаева Лаура Зинатоллакызы",
+                    "",
+                    "+77078054115",
+                    "Другой Научрук",
+                    "зарегистрирован",
+                ],
+            ]
+        )
+        ctx = _FakeContext(reg_ws)
+        ctx.args = ["Жарлыкпаева", "Лаура", "Зинатоллакызы"]
+        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = (
+            "Магистранты"
+        )
+        update = _make_update(
+            user_id=999, text="/status Жарлыкпаева Лаура Зинатоллакызы"
+        )
+        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+
+        with _patch_admin_check(True), _patch_supervisor_check(False), _patch_worksheet(
+            reg_ws
+        ), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do:
+            _run(handlers.status_command(update, ctx))
+
+        m_do.assert_awaited_once()
+        self.assertEqual(m_do.await_args.kwargs["row_number_override"], 2)
+        self.assertEqual(m_do.await_args.kwargs["history_source"], "admin_status")
+
+    def test_status_supervisor_existing_fio_outside_scope_mentions_admin_sheet(
+        self,
+    ) -> None:
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        mag_ws = FakeWorksheet(
+            [
+                [
+                    "№",
+                    "ФИО магистранта",
+                    "Спец",
+                    "Телефон",
+                    "Научный руководитель (ссылка)",
+                    "Регистрация",
+                ],
+                [
+                    "1",
+                    "Уразаев Дамир Серикбаевич",
+                    "",
+                    "8 700 123 45 67",
+                    "Другой Научрук",
+                    "зарегистрирован",
+                ],
+            ]
+        )
+        ctx = _FakeContext(reg_ws)
+        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = (
+            "Магистранты"
+        )
+        update = _make_update(text="/status Уразаев Дамир Серикбаевич")
+        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+
+        def close_task(coro):
+            coro.close()
+
+        with _patch_admin_check(False), _patch_worksheet(reg_ws), patch(
+            "magister_checking.bot.handlers.get_supervisor_fio_for_telegram_id",
+            return_value="Петров П.П.",
+        ), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ), patch(
+            "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
+        ) as m_do, patch(
+            "magister_checking.bot.handlers.asyncio.create_task",
+            side_effect=close_task,
+        ) as create_task:
+            _run(
+                handlers._supervisor_student_status_by_fio(
+                    update, ctx, "Уразаев Дамир Серикбаевич"
+                )
+            )
+
+        m_do.assert_not_awaited()
+        create_task.assert_called_once()
+        reply = update.message.reply_text.await_args_list[0].args[0]
+        self.assertIn("есть в листе «Магистранты»", reply)
+        self.assertIn("Администраторы", reply)
+        self.assertIn("через 60 секунд", update.message.reply_text.await_args.args[0])
+
+    def test_status_auto_retry_repeats_once_without_rescheduling(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/status Уразаев Дамир Серикбаевич")
+
+        with patch(
+            "magister_checking.bot.handlers.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep, patch(
+            "magister_checking.bot.handlers._supervisor_student_status_by_fio",
+            new_callable=AsyncMock,
+        ) as m_status:
+            _run(
+                handlers._status_auto_retry_task(
+                    update, ctx, "Уразаев Дамир Серикбаевич"
+                )
+            )
+
+        sleep.assert_awaited_once_with(handlers.ADMIN_STATUS_AUTO_RETRY_SECONDS)
+        m_status.assert_awaited_once()
+        self.assertEqual(m_status.await_args.args[2], "Уразаев Дамир Серикбаевич")
+        self.assertFalse(m_status.await_args.kwargs["schedule_admin_retry"])
+
     def test_supervisor_status_pending_expires_after_short_timeout(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
         ctx = _FakeContext(ws)
@@ -1599,6 +1779,35 @@ class AdminProjectCardTests(unittest.TestCase):
 
 
 class AdminBulkStudentMessageTests(unittest.TestCase):
+    def test_single_message_standard_template_sends_without_confirm_question(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "222"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        ws = FakeWorksheet([list(SHEET_HEADER), row])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_STUDENT_REMINDER_ROW] = 2
+        ctx.user_data[handlers.USER_DATA_STUDENT_REMINDER_FIO] = "Иванов И.И."
+        update = _make_callback_update(callback_data="admstu:std")
+
+        with _patch_admin_check(True), _patch_worksheet(ws), patch(
+            "magister_checking.bot.handlers._deliver_reminder_text_and_snapshot",
+            new_callable=AsyncMock,
+            return_value=(True, ""),
+        ) as deliver:
+            state = _run(handlers.student_reminder_pick_template(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        deliver.assert_awaited_once()
+        sent_texts = [
+            call.args[0]
+            for call in update.callback_query.message.reply_text.await_args_list
+        ]
+        self.assertTrue(any("Сообщение отправлено" in text for text in sent_texts))
+        self.assertFalse(any("Предпросмотр" in text for text in sent_texts))
+        self.assertFalse(
+            any("Отправить это сообщение" in text for text in sent_texts)
+        )
+
     def test_bulk_message_registration_flow_asks_sheet_rows_and_text(self) -> None:
         row = [""] * len(SHEET_HEADER)
         row[SHEET_HEADER.index("telegram_id")] = "222"
@@ -1839,7 +2048,7 @@ class RecheckHandlerTests(unittest.TestCase):
 
         run.assert_not_called()
         msg = update.message.reply_text.await_args_list[-1].args[0]
-        self.assertIn("/справка", msg)
+        self.assertIn("/spravka", msg)
         self.assertNotIn("/recheck", msg)
         self.assertIn("следующим сообщением", msg)
         self.assertNotIn("не привязан", msg)
@@ -2003,6 +2212,7 @@ def _make_callback_update(
     query.answer = AsyncMock()
     query.edit_message_reply_markup = AsyncMock()
     query.edit_message_text = AsyncMock()
+    query.message.delete = AsyncMock()
     query.message.reply_text = AsyncMock()
     update.callback_query = query
     chat = MagicMock()

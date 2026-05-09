@@ -9,10 +9,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMa
 ADMSTU_CALLBACK_TEMPLATE_PATTERN = r"^admstu:(std|stdex|cust)$"
 ADMSTU_CALLBACK_CONFIRM_PATTERN = r"^admstu:(send|cancel)$"
 ADMSTUB_CALLBACK_CONFIRM_PATTERN = r"^admstub:(send|cancel)$"
+ADMSUPMSG_CALLBACK_CONFIRM_PATTERN = r"^admsupmsg:(send|cancel)$"
 
 ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
 ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание"
+ADMIN_SUPERVISOR_MESSAGE_BUTTON = "Сообщение научруку"
 ROLE_MENU_SPRAVKA_BUTTON = "Справка / проверка"
 ROLE_MENU_HELP_BUTTON = "Помощь"
 ROLE_MENU_ABOUT_BUTTON = "О проекте"
@@ -31,6 +33,7 @@ def _admin_keyboard() -> ReplyKeyboardMarkup:
             [ROLE_MENU_SPRAVKA_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
+            [ADMIN_SUPERVISOR_MESSAGE_BUTTON],
             [ADMIN_PROJECT_CARD_BUTTON],
             [ADMIN_STATS_BUTTON],
             [ROLE_MENU_ABOUT_BUTTON],
@@ -110,6 +113,17 @@ def _student_reminder_bulk_confirm_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("Отправить всем", callback_data="admstub:send"),
                 InlineKeyboardButton("Отмена", callback_data="admstub:cancel"),
+            ]
+        ]
+    )
+
+
+def _supervisor_message_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Отправить научруку", callback_data="admsupmsg:send"),
+                InlineKeyboardButton("Отмена", callback_data="admsupmsg:cancel"),
             ]
         ]
     )

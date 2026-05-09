@@ -51,6 +51,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 ("reg_list", "Кто зарегистрировался"),
                 ("student_message", "Сообщение магистранту"),
                 ("student_message_bulk", "Групповое напоминание"),
+                ("supervisor_message", "Сообщение научруку"),
                 ("about", "О проекте"),
             ],
         )
@@ -76,6 +77,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 "STUDENT_MSG_BULK_ASK_ROWS": h.STUDENT_MSG_BULK_ASK_ROWS,
                 "STUDENT_MSG_BULK_CONFIRM": h.STUDENT_MSG_BULK_CONFIRM,
                 "PIN_VERIFY_INPUT": h.PIN_VERIFY_INPUT,
+                "SUPERVISOR_MSG_ASK_TARGET": h.SUPERVISOR_MSG_ASK_TARGET,
+                "SUPERVISOR_MSG_CONFIRM": h.SUPERVISOR_MSG_CONFIRM,
             },
             {
                 "ASK_FIELD": 0,
@@ -96,6 +99,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 "STUDENT_MSG_BULK_ASK_ROWS": 15,
                 "STUDENT_MSG_BULK_CONFIRM": 16,
                 "PIN_VERIFY_INPUT": 17,
+                "SUPERVISOR_MSG_ASK_TARGET": 18,
+                "SUPERVISOR_MSG_CONFIRM": 19,
             },
         )
 
@@ -142,6 +147,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("project_card",), "project_card_start"),
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
+                (("supervisor_message",), "supervisor_message_start"),
                 (("spravka",), "spravka_start"),
                 (("about",), "about_command"),
                 (("status",), "status_command"),
@@ -177,6 +183,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 h.STUDENT_MSG_BULK_CONFIRM,
                 h.STUDENT_MSG_CONFIRM,
                 h.STUDENT_MSG_PICK_KIND,
+                h.SUPERVISOR_MSG_ASK_TARGET,
+                h.SUPERVISOR_MSG_CONFIRM,
                 ]
             ),
         )
@@ -189,6 +197,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("project_card",), "project_card_start"),
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
+                (("supervisor_message",), "supervisor_message_start"),
                 (("spravka",), "spravka_start"),
                 (("about",), "about_command"),
                 (("status",), "status_command"),

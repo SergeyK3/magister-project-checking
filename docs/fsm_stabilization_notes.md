@@ -79,6 +79,8 @@ Numeric state ids являются частью persistence contract.
 | STUDENT_MSG_BULK_ASK_ROWS | 15         |
 | STUDENT_MSG_BULK_CONFIRM  | 16         |
 | PIN_VERIFY_INPUT          | 17         |
+| SUPERVISOR_MSG_ASK_TARGET | 18         |
+| SUPERVISOR_MSG_CONFIRM    | 19         |
 
 ---
 

@@ -19,6 +19,7 @@ from magister_checking.bot.handlers import (
     ADMIN_STATS_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
     ADMIN_STUDENT_MESSAGE_BUTTON,
+    ADMIN_SUPERVISOR_MESSAGE_BUTTON,
     ASK_CONFIRM,
     ASK_FIELD,
     BIND_ASK_FIO,
@@ -30,6 +31,8 @@ from magister_checking.bot.handlers import (
     ROLE_PICK,
     ROLE_MENU_SPRAVKA_BUTTON,
     SUPERVISOR_STATUS_BUTTON,
+    SUPERVISOR_MSG_ASK_TARGET,
+    SUPERVISOR_MSG_CONFIRM,
     help_reply_for_user,
     admin_menu,
     admin_recheck_pending_receive,
@@ -54,6 +57,9 @@ from magister_checking.bot.handlers import (
     start,
     start_role_callback,
     supervisor_menu_status,
+)
+from magister_checking.bot.supervisor_lists import (
+    supervisor_unregistered_from_magistrants_registration_report,
 )
 from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.models import SHEET_HEADER, UserForm
@@ -190,6 +196,7 @@ class StartHandlerTests(unittest.TestCase):
         self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
         self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
         self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
+        self.assertEqual(buttons[3], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -1132,6 +1139,7 @@ class HelpAndCommandsTests(unittest.TestCase):
                 "reg_list",
                 "student_message",
                 "student_message_bulk",
+                "supervisor_message",
                 "about",
             ],
         )
@@ -1489,6 +1497,7 @@ class AdminProjectCardTests(unittest.TestCase):
         self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
         self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
         self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
+        self.assertEqual(buttons[3], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -1677,6 +1686,114 @@ class AdminBulkStudentMessageTests(unittest.TestCase):
         self.assertIn(
             "Добрый день, Петров П.П.",
             text_update.message.reply_text.await_args.args[0],
+        )
+
+
+class AdminSupervisorMessageTests(unittest.TestCase):
+    def test_report_filters_magistrants_by_supervisor_and_registration_no(self) -> None:
+        mag_header = [
+            "ФИО магистранта",
+            "Группа",
+            "Место работы",
+            "Должность",
+            "Телефон",
+            "Научный руков",
+            "Регистрация",
+        ]
+        mag_ws = FakeWorksheet(
+            [
+                mag_header,
+                ["Иванов Иван", "ОЗ-1", "", "", "8 999 000-00-00", "Петров П.П.", "нет"],
+                ["Сидоров Сидор", "ОЗ-1", "", "", "8 999 000-00-01", "Петров П.П.", "да"],
+                ["Алиев Али", "ОЗ-2", "", "", "8 999 000-00-02", "Смирнов С.С.", "нет"],
+            ]
+        )
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(reg_ws)
+        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = "Магистранты"
+        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+
+        with patch(
+            "magister_checking.bot.supervisor_lists.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            chunks, err = supervisor_unregistered_from_magistrants_registration_report(
+                ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY],
+                supervisor_fio="Петров Петр Петрович",
+            )
+
+        self.assertIsNone(err)
+        text = "\n".join(chunks)
+        self.assertIn("Иванов Иван", text)
+        self.assertIn("+79990000000", text)
+        self.assertNotIn("Сидоров Сидор", text)
+        self.assertNotIn("Алиев Али", text)
+
+    def test_start_prompts_for_supervisor_target(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+
+        with _patch_admin_check(True):
+            state = _run(
+                handlers.supervisor_message_start(
+                    _make_update(text="/supervisor_message"), ctx
+                )
+            )
+
+        self.assertEqual(state, SUPERVISOR_MSG_ASK_TARGET)
+
+    def test_receive_target_previews_message_for_supervisor_row(self) -> None:
+        sup_ws = FakeWorksheet(
+            [
+                ["fio", "telegram_id"],
+                ["Петров Петр Петрович", "444"],
+            ]
+        )
+        mag_ws = FakeWorksheet(
+            [
+                ["ФИО магистранта", "Телефон", "Научный руков", "Регистрация"],
+                ["Иванов Иван", "8 999 000-00-00", "Петров П.П.", "нет"],
+            ]
+        )
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(reg_ws)
+        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = "Магистранты"
+        spreadsheet = FakeSpreadsheet({"научрук": sup_ws, "Магистранты": mag_ws})
+        update = _make_update(text="2")
+
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ), patch(
+            "magister_checking.bot.supervisor_lists.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            state = _run(handlers.supervisor_message_receive_target(update, ctx))
+
+        self.assertEqual(state, SUPERVISOR_MSG_CONFIRM)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID], 444)
+        preview = update.message.reply_text.await_args.args[0]
+        self.assertIn("Петров Петр Петрович", preview)
+        self.assertIn("Иванов Иван", preview)
+        self.assertIn("Отправить?", preview)
+
+    def test_confirm_sends_chunks_to_supervisor(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_ROW] = 2
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_FIO] = "Петров Петр"
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID] = 444
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHUNKS] = ["Текст"]
+        update = _make_callback_update(callback_data="admsupmsg:send")
+
+        with _patch_admin_check(True):
+            state = _run(handlers.supervisor_message_confirm_callback(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        ctx.bot.send_message.assert_awaited_once()
+        self.assertIn(
+            "Сообщение научруку отправлено",
+            update.callback_query.message.reply_text.await_args.args[0],
         )
 
 

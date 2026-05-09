@@ -92,10 +92,12 @@ from magister_checking.bot.validation import (
     normalize_text,
 )
 from magister_checking.bot.admin_message_helpers import (
+    ADMSUPMSG_CALLBACK_CONFIRM_PATTERN,
     ADMIN_STATS_BUTTON,
     ADMIN_PROJECT_CARD_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
     ADMIN_STUDENT_MESSAGE_BUTTON,
+    ADMIN_SUPERVISOR_MESSAGE_BUTTON,
     ADMSTUB_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_TEMPLATE_PATTERN,
@@ -116,6 +118,7 @@ from magister_checking.bot.admin_message_helpers import (
     _student_reminder_confirm_keyboard,
     _student_reminder_preview_text,
     _student_reminder_template_keyboard,
+    _supervisor_message_confirm_keyboard,
     _supervisor_keyboard,
 )
 from magister_checking.bot.registration_helpers import (
@@ -173,6 +176,7 @@ from magister_checking.bot.row_pipeline import RowCheckReport
 from magister_checking.bot.student_notify_text import build_standard_reminder
 from magister_checking.bot.supervisor_lists import (
     supervisor_registered_report,
+    supervisor_unregistered_from_magistrants_registration_report,
     supervisor_unregistered_report,
 )
 from magister_checking.row_check_cli import (
@@ -468,6 +472,7 @@ ROLE_PICK, CLAIM_ASK_FIO, CLAIM_CONFIRM = 7, 8, 9
     STUDENT_MSG_BULK_CONFIRM,
 ) = (10, 11, 12, 13, 14, 15, 16)
 PIN_VERIFY_INPUT = 17
+SUPERVISOR_MSG_ASK_TARGET, SUPERVISOR_MSG_CONFIRM = 18, 19
 
 USER_DATA_FORM_KEY = "form_data"
 USER_DATA_PENDING_KEY = "pending_fields"
@@ -488,6 +493,10 @@ USER_DATA_STUDENT_BULK_ENTRIES = "student_reminder_bulk_entries"
 USER_DATA_STUDENT_BULK_SHEET_NAME = "student_reminder_bulk_sheet_name"
 USER_DATA_STUDENT_BULK_SHEET_KIND = "student_reminder_bulk_sheet_kind"
 USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT = "student_reminder_bulk_attach_snapshot"
+USER_DATA_SUPERVISOR_MESSAGE_ROW = "supervisor_message_row"
+USER_DATA_SUPERVISOR_MESSAGE_FIO = "supervisor_message_fio"
+USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID = "supervisor_message_chat_id"
+USER_DATA_SUPERVISOR_MESSAGE_CHUNKS = "supervisor_message_chunks"
 SUPERVISOR_STATUS_INPUT_TIMEOUT_SECONDS = 30.0
 SUPERVISOR_STATUS_PROMPT_TEXT = (
     "Введите фамилию и имя магистранта"
@@ -644,6 +653,16 @@ def _clear_student_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         USER_DATA_STUDENT_BULK_SHEET_NAME,
         USER_DATA_STUDENT_BULK_SHEET_KIND,
         USER_DATA_STUDENT_BULK_ATTACH_SNAPSHOT,
+    ):
+        context.user_data.pop(key, None)
+
+
+def _clear_supervisor_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        USER_DATA_SUPERVISOR_MESSAGE_ROW,
+        USER_DATA_SUPERVISOR_MESSAGE_FIO,
+        USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID,
+        USER_DATA_SUPERVISOR_MESSAGE_CHUNKS,
     ):
         context.user_data.pop(key, None)
 
@@ -3884,6 +3903,216 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await student_status_command(update, context)
 
 
+def _resolve_supervisor_message_target(
+    cfg: BotConfig,
+    raw_target: str,
+) -> tuple[int | None, str | None, int | None, str | None]:
+    """Админская цель рассылки научруку: строка листа «научрук» или точное ФИО."""
+
+    target = (raw_target or "").strip()
+    if not target:
+        return None, None, None, "Укажите ФИО научрука или номер строки листа «научрук»."
+
+    spreadsheet = get_spreadsheet(cfg)
+    ws = get_optional_worksheet(spreadsheet, SUPERVISORS_WORKSHEET_NAME)
+    if ws is None:
+        return None, None, None, f"Лист «{SUPERVISORS_WORKSHEET_NAME}» не найден."
+
+    if target.isdigit():
+        row_no = int(target)
+        if row_no < 2:
+            return None, None, None, "Номер строки должен быть не меньше 2."
+        row_vals = load_row_values(ws, row_no)
+        if not any(str(v).strip() for v in row_vals):
+            return None, None, None, f"Строка {row_no} листа «{SUPERVISORS_WORKSHEET_NAME}» пустая."
+    else:
+        rows = find_rows_by_fio(ws, target)
+        if not rows:
+            return None, None, None, (
+                f"Не нашёл научрука «{target}» в листе «{SUPERVISORS_WORKSHEET_NAME}». "
+                "Укажите точное ФИО или номер строки."
+            )
+        if len(rows) > 1:
+            details: list[str] = []
+            for row_no in rows[:10]:
+                fio = (fio_text_from_worksheet_row(ws, row_no) or "").strip() or "—"
+                details.append(f"• стр. {row_no} — {fio}")
+            suffix = "\n".join(details)
+            if len(rows) > 10:
+                suffix += f"\n… и ещё {len(rows) - 10}."
+            return None, None, None, (
+                "Нашёл несколько строк с таким ФИО. Укажите номер строки листа "
+                f"«{SUPERVISORS_WORKSHEET_NAME}»:\n{suffix}"
+            )
+        row_no = rows[0]
+
+    fio = (fio_text_from_worksheet_row(ws, row_no) or "").strip()
+    if not fio:
+        return None, None, None, f"В строке {row_no} листа «{SUPERVISORS_WORKSHEET_NAME}» не заполнено ФИО."
+    tg_raw = (get_telegram_id_at_row(ws, row_no) or "").strip()
+    try:
+        chat_id = int(tg_raw) if tg_raw else 0
+    except ValueError:
+        chat_id = 0
+    if not chat_id:
+        return None, None, None, (
+            f"В строке {row_no} листа «{SUPERVISORS_WORKSHEET_NAME}» "
+            "пустой или некорректный telegram_id."
+        )
+    return row_no, fio, chat_id, None
+
+
+async def supervisor_message_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Админ: подготовить стандартное сообщение научруку."""
+
+    if update.message is None:
+        return ConversationHandler.END
+    if not _is_admin(update, context):
+        await update.message.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    _clear_student_reminder(context)
+    _clear_supervisor_message(context)
+    await update.message.reply_text(
+        "Введите ФИО научрука или номер строки листа «научрук».\n\n"
+        "Бот подготовит стандартное сообщение со списком магистрантов, "
+        "у которых в листе «Магистранты» колонка «Регистрация» = «нет».\n\n"
+        "/cancel — отмена.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return SUPERVISOR_MSG_ASK_TARGET
+
+
+async def supervisor_message_receive_target(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Админ вводит научрука, бот показывает предпросмотр сообщения."""
+
+    msg = update.message
+    if msg is None:
+        return SUPERVISOR_MSG_ASK_TARGET
+    if not _is_admin(update, context):
+        await msg.reply_text(
+            f"Команда доступна только администраторам из листа `{ADMINS_WORKSHEET_NAME}`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ConversationHandler.END
+
+    cfg = _bot_config(context)
+    row_no, fio, chat_id, err = await _call_blocking(
+        _resolve_supervisor_message_target, cfg, msg.text or ""
+    )
+    if err:
+        await msg.reply_text(err)
+        return SUPERVISOR_MSG_ASK_TARGET
+    assert row_no is not None and fio is not None and chat_id is not None
+
+    chunks, err = await _call_blocking(
+        supervisor_unregistered_from_magistrants_registration_report,
+        cfg,
+        supervisor_fio=fio,
+    )
+    if err:
+        await msg.reply_text(err, reply_markup=_admin_keyboard())
+        _clear_supervisor_message(context)
+        return ConversationHandler.END
+    if not chunks:
+        await msg.reply_text(
+            "Сообщение не сформировано: список частей пуст.",
+            reply_markup=_admin_keyboard(),
+        )
+        _clear_supervisor_message(context)
+        return ConversationHandler.END
+
+    context.user_data[USER_DATA_SUPERVISOR_MESSAGE_ROW] = row_no
+    context.user_data[USER_DATA_SUPERVISOR_MESSAGE_FIO] = fio
+    context.user_data[USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID] = chat_id
+    context.user_data[USER_DATA_SUPERVISOR_MESSAGE_CHUNKS] = chunks
+
+    first_chunk = chunks[0]
+    preview = first_chunk[:3000] + ("…" if len(first_chunk) > 3000 else "")
+    part_note = f"\n\nЧастей сообщения: {len(chunks)}." if len(chunks) > 1 else ""
+    await msg.reply_text(
+        "Предпросмотр сообщения научруку:\n"
+        f"Получатель: {fio} (стр. {row_no}, chat_id={chat_id}).{part_note}\n\n"
+        "════════════\n"
+        f"{preview}\n"
+        "════════════\n\n"
+        "Отправить?",
+        reply_markup=_supervisor_message_confirm_keyboard(),
+    )
+    return SUPERVISOR_MSG_CONFIRM
+
+
+async def supervisor_message_confirm_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Админ подтверждает или отменяет отправку сообщения научруку."""
+
+    query = update.callback_query
+    if query is None or query.message is None:
+        return SUPERVISOR_MSG_CONFIRM
+    await query.answer()
+
+    if not _is_admin(update, context):
+        return ConversationHandler.END
+
+    raw = query.data or ""
+    m = re.match(ADMSUPMSG_CALLBACK_CONFIRM_PATTERN, raw)
+    if not m:
+        return SUPERVISOR_MSG_CONFIRM
+    decision = m.group(1)
+
+    if decision == "cancel":
+        _clear_supervisor_message(context)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "Отправка научруку отменена.\n\nСнова — /supervisor_message или панель /admin.",
+            reply_markup=_admin_keyboard(),
+        )
+        return ConversationHandler.END
+
+    chat_id = context.user_data.get(USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID)
+    fio = str(context.user_data.get(USER_DATA_SUPERVISOR_MESSAGE_FIO) or "")
+    row_no = context.user_data.get(USER_DATA_SUPERVISOR_MESSAGE_ROW)
+    chunks = context.user_data.get(USER_DATA_SUPERVISOR_MESSAGE_CHUNKS)
+    if not isinstance(chat_id, int) or not isinstance(chunks, list) or not chunks:
+        await query.message.reply_text(
+            "Внутреннее состояние сценария сброшено. Начните снова: /supervisor_message.",
+            reply_markup=_admin_keyboard(),
+        )
+        _clear_supervisor_message(context)
+        return ConversationHandler.END
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    failed: list[str] = []
+    for chunk in chunks:
+        result = await send_broadcast(context.bot, [str(chat_id)], str(chunk))
+        if result.failed or result.skipped_invalid:
+            failed.extend(detail for _cid, detail in result.failed)
+            failed.extend(f"некорректный chat_id: {cid}" for cid in result.skipped_invalid)
+            break
+
+    if failed:
+        await query.message.reply_text(
+            "Не удалось доставить сообщение научруку: " + "; ".join(failed[:3]),
+            reply_markup=_admin_keyboard(),
+        )
+    else:
+        await query.message.reply_text(
+            f"Сообщение научруку отправлено: {fio} (стр. {row_no}, chat_id={chat_id}).",
+            reply_markup=_admin_keyboard(),
+        )
+
+    _clear_supervisor_message(context)
+    return ConversationHandler.END
+
+
 async def supervisor_unregistered_list_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -3994,6 +4223,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _clear_admin_recheck_pending(context)
     _clear_supervisor_status_pending(context)
     _clear_student_reminder(context)
+    _clear_supervisor_message(context)
     msg = update.message or (update.effective_message)
     if msg is not None:
         await msg.reply_text(
@@ -4023,12 +4253,14 @@ async def help_command(
 
 
 __all__ = [
+    "ADMSUPMSG_CALLBACK_CONFIRM_PATTERN",
     "ADMSTUB_CALLBACK_CONFIRM_PATTERN",
     "ADMSTU_CALLBACK_CONFIRM_PATTERN",
     "ADMSTU_CALLBACK_TEMPLATE_PATTERN",
     "ADMIN_PROJECT_CARD_BUTTON",
     "ADMIN_STUDENT_MESSAGE_BUTTON",
     "ADMIN_STUDENT_MESSAGE_BULK_BUTTON",
+    "ADMIN_SUPERVISOR_MESSAGE_BUTTON",
     "about_command",
     "ASK_FIELD",
     "ASK_CONFIRM",
@@ -4067,6 +4299,8 @@ __all__ = [
     "ROLE_MENU_SPRAVKA_BUTTON",
     "ROLE_MENU_STATUS_BUTTON",
     "SUPERVISOR_REGISTERED_BUTTON",
+    "SUPERVISOR_MSG_ASK_TARGET",
+    "SUPERVISOR_MSG_CONFIRM",
     "SUPERVISOR_STATUS_BUTTON",
     "SUPERVISOR_UNREGISTERED_BUTTON",
     "ADMIN_STATS_BUTTON",
@@ -4115,6 +4349,9 @@ __all__ = [
     "start_role_callback",
     "status_command",
     "supervisor_menu_status",
+    "supervisor_message_confirm_callback",
+    "supervisor_message_receive_target",
+    "supervisor_message_start",
     "student_message_bulk_start",
     "student_reminder_bulk_confirm_callback",
     "student_reminder_bulk_receive_rows",

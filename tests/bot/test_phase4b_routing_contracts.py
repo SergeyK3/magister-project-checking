@@ -113,6 +113,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                         h.STUDENT_MSG_BULK_CONFIRM,
                         h.STUDENT_MSG_CONFIRM,
                         h.STUDENT_MSG_PICK_KIND,
+                        h.SUPERVISOR_MSG_ASK_TARGET,
+                        h.SUPERVISOR_MSG_CONFIRM,
                     ]
                 ),
             )
@@ -199,6 +201,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
+                    "supervisor_message_start",
                     "role_menu_spravka",
                     "role_menu_register",
                     "role_menu_status",
@@ -219,6 +222,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("project_card",), "project_card_start"),
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
+                    (("supervisor_message",), "supervisor_message_start"),
                     (("spravka",), "spravka_start"),
                     (("about",), "about_command"),
                     (("status",), "status_command"),
@@ -233,6 +237,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
+                    "supervisor_message_start",
                     "role_menu_spravka",
                     "role_menu_register",
                     "role_menu_status",
@@ -253,6 +258,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("project_card",), "project_card_start"),
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
+                    (("supervisor_message",), "supervisor_message_start"),
                     (("spravka",), "spravka_start"),
                     (("about",), "about_command"),
                     (("status",), "status_command"),
@@ -335,6 +341,14 @@ class Phase4BRoutingContractTests(unittest.TestCase):
             self.assertEqual(
                 _callback_routes(conv.states[h.STUDENT_MSG_BULK_CONFIRM]),
                 [(h.ADMSTUB_CALLBACK_CONFIRM_PATTERN, "student_reminder_bulk_confirm_callback")],
+            )
+            self.assertEqual(
+                _message_routes(conv.states[h.SUPERVISOR_MSG_ASK_TARGET]),
+                ["supervisor_message_receive_target"],
+            )
+            self.assertEqual(
+                _callback_routes(conv.states[h.SUPERVISOR_MSG_CONFIRM]),
+                [(h.ADMSUPMSG_CALLBACK_CONFIRM_PATTERN, "supervisor_message_confirm_callback")],
             )
             self.assertEqual(
                 _callback_routes(conv.states[h.SPRAVKA_MENU]),

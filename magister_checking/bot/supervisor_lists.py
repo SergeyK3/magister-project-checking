@@ -31,6 +31,11 @@ _UNREG_SUPERVISOR_ACTION_HINT = (
     "(Telegram) и вступить в телеграм группу \"Магистр аттестаия КОЗМ\""
 )
 
+_ADMIN_SUPERVISOR_UNREG_ACTION_HINT = (
+    "\n\nПожалуйста, свяжитесь с этими магистрантами и попросите их "
+    "зарегистрироваться в боте @magistrcheck."
+)
+
 
 def split_supervisor_message_chunks(
     text: str, limit: int = _TELEGRAM_TEXT_SOFT_LIMIT
@@ -131,6 +136,70 @@ def supervisor_unregistered_report(
         "Не зарегистрированы в боте:\n\n"
         + "\n".join(lines_body)
         + _UNREG_SUPERVISOR_ACTION_HINT
+    )
+    return split_supervisor_message_chunks(text), None
+
+
+def supervisor_unregistered_from_magistrants_registration_report(
+    config: BotConfig,
+    *,
+    supervisor_fio: str,
+) -> tuple[List[str], str | None]:
+    """Стандартное админское сообщение научруку: ``Магистранты.Регистрация = нет``."""
+
+    title = (config.magistrants_worksheet_name or "").strip()
+    if not title:
+        return [], "Мастер-лист магистрантов не настроен (MAGISTRANTS_WORKSHEET_NAME)."
+    sup_fio = (supervisor_fio or "").strip()
+    if not sup_fio:
+        return [], "Не указано ФИО научрука."
+
+    spreadsheet = get_spreadsheet(config)
+    mag_ws = get_optional_worksheet(spreadsheet, title)
+    if mag_ws is None:
+        return [], f"Лист «{title}» не найден."
+
+    header = mag_ws.row_values(1)
+    colmap = magistrants_sheet_column_indices(header)
+    if colmap is None or "supervisor" not in colmap:
+        return [], (
+            "В листе магистрантов нет обязательных колонок ФИО / телефон / "
+            "регистрация / научный руководитель."
+        )
+
+    all_rows = mag_ws.get_all_values()
+    fio_i = colmap["fio"]
+    phone_i = colmap["phone"]
+    reg_i = colmap["registration"]
+    sup_i = colmap["supervisor"]
+    lines_body: List[str] = []
+    for row in all_rows[1:]:
+        if not row or not any(str(c).strip() for c in row):
+            continue
+        w = max(len(header), len(row), fio_i + 1, phone_i + 1, reg_i + 1, sup_i + 1)
+        padded = list(row) + [""] * (w - len(row))
+        if not supervisor_name_matches(sup_fio, str(padded[sup_i] or "")):
+            continue
+        registration_value = str(padded[reg_i] or "").strip().casefold()
+        if registration_value != "нет":
+            continue
+        st_fio = str(padded[fio_i] or "").strip()
+        raw_phone = str(padded[phone_i] or "").strip()
+        phone_disp = normalize_phone_ru_kz(raw_phone) or raw_phone or "—"
+        lines_body.append(f"• {st_fio or '—'} — {phone_disp}")
+
+    if not lines_body:
+        return [
+            "По данным листа «Магистранты» у ваших магистрантов нет строк "
+            "со значением «нет» в колонке «Регистрация»."
+        ], None
+
+    text = (
+        "Здравствуйте!\n\n"
+        "По данным листа «Магистранты» у следующих ваших магистрантов "
+        "в колонке «Регистрация» указано «нет»:\n\n"
+        + "\n".join(lines_body)
+        + _ADMIN_SUPERVISOR_UNREG_ACTION_HINT
     )
     return split_supervisor_message_chunks(text), None
 

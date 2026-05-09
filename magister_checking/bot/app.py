@@ -31,6 +31,8 @@ from magister_checking.bot.handlers import (
     ADMIN_STATS_BUTTON,
     ADMIN_STUDENT_MESSAGE_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
+    ADMIN_SUPERVISOR_MESSAGE_BUTTON,
+    ADMSUPMSG_CALLBACK_CONFIRM_PATTERN,
     ADMSTUB_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_CONFIRM_PATTERN,
     ADMSTU_CALLBACK_TEMPLATE_PATTERN,
@@ -59,6 +61,8 @@ from magister_checking.bot.handlers import (
     STUDENT_MSG_BULK_CONFIRM,
     STUDENT_MSG_CONFIRM,
     STUDENT_MSG_PICK_KIND,
+    SUPERVISOR_MSG_ASK_TARGET,
+    SUPERVISOR_MSG_CONFIRM,
     about_command,
     admin_menu,
     admin_recheck_pending_receive,
@@ -102,6 +106,9 @@ from magister_checking.bot.handlers import (
     SUPERVISOR_REGISTERED_BUTTON,
     SUPERVISOR_STATUS_BUTTON,
     SUPERVISOR_UNREGISTERED_BUTTON,
+    supervisor_message_confirm_callback,
+    supervisor_message_receive_target,
+    supervisor_message_start,
     student_message_bulk_start,
     student_reminder_bulk_confirm_callback,
     student_reminder_bulk_receive_rows,
@@ -339,6 +346,14 @@ def build_application(config: BotConfig) -> Application:
         student_reminder_bulk_confirm_callback,
         pattern=ADMSTUB_CALLBACK_CONFIRM_PATTERN,
     )
+    supervisor_message_target_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND & private,
+        supervisor_message_receive_target,
+    )
+    supervisor_message_confirm_cb_handler = CallbackQueryHandler(
+        supervisor_message_confirm_callback,
+        pattern=ADMSUPMSG_CALLBACK_CONFIRM_PATTERN,
+    )
 
     spravka_callback = CallbackQueryHandler(
         spravka_choose,
@@ -421,6 +436,7 @@ def build_application(config: BotConfig) -> Application:
             CommandHandler("project_card", project_card_start, filters=private),
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
+            CommandHandler("supervisor_message", supervisor_message_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
             CommandHandler("about", about_command, filters=private),
             CommandHandler("status", status_command, filters=private),
@@ -436,6 +452,11 @@ def build_application(config: BotConfig) -> Application:
                 filters.Regex("^" + re.escape(ADMIN_STUDENT_MESSAGE_BULK_BUTTON) + "$")
                 & private,
                 student_message_bulk_start,
+            ),
+            MessageHandler(
+                filters.Regex("^" + re.escape(ADMIN_SUPERVISOR_MESSAGE_BUTTON) + "$")
+                & private,
+                supervisor_message_start,
             ),
             role_menu_spravka_handler,
             role_menu_register_handler,
@@ -470,6 +491,8 @@ def build_application(config: BotConfig) -> Application:
             STUDENT_MSG_CONFIRM: [student_reminder_confirm_cb_handler],
             STUDENT_MSG_BULK_ASK_ROWS: [student_bulk_rows_handler],
             STUDENT_MSG_BULK_CONFIRM: [student_bulk_confirm_cb_handler],
+            SUPERVISOR_MSG_ASK_TARGET: [supervisor_message_target_handler],
+            SUPERVISOR_MSG_CONFIRM: [supervisor_message_confirm_cb_handler],
             SPRAVKA_MENU: [spravka_callback],
             SPRAVKA_ASK_TARGET: [spravka_target_handler],
         },
@@ -483,6 +506,7 @@ def build_application(config: BotConfig) -> Application:
             CommandHandler("project_card", project_card_start, filters=private),
             CommandHandler("student_message", student_reminder_start, filters=private),
             CommandHandler("student_message_bulk", student_message_bulk_start, filters=private),
+            CommandHandler("supervisor_message", supervisor_message_start, filters=private),
             CommandHandler("spravka", spravka_start, filters=private),
             CommandHandler("about", about_command, filters=private),
             CommandHandler("status", status_command, filters=private),
@@ -498,6 +522,11 @@ def build_application(config: BotConfig) -> Application:
                 filters.Regex("^" + re.escape(ADMIN_STUDENT_MESSAGE_BULK_BUTTON) + "$")
                 & private,
                 student_message_bulk_start,
+            ),
+            MessageHandler(
+                filters.Regex("^" + re.escape(ADMIN_SUPERVISOR_MESSAGE_BUTTON) + "$")
+                & private,
+                supervisor_message_start,
             ),
             role_menu_spravka_handler,
             role_menu_register_handler,

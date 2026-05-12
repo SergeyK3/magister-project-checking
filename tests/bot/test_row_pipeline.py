@@ -558,6 +558,16 @@ class RunRowPipelineTests(unittest.TestCase):
         self.assertIn(REPORT_URL_HTTP_INACCESSIBLE_MESSAGE, report.stage2.issues)
         self.assertFalse(report.stage3.executed)
 
+    def test_stops_at_stage2_when_report_url_missing(self) -> None:
+        form = UserForm(fio=VALID_FIO, phone=VALID_PHONE, report_url="")
+        report = run_row_pipeline(form, row_number=47)
+        self.assertEqual(report.stopped_at, "stage2")
+        self.assertTrue(report.stage2.executed)
+        self.assertEqual(
+            report.stage2.issues, ["Ссылка на промежуточный отчёт отсутствует"]
+        )
+        self.assertFalse(report.stage3.executed)
+
     def test_full_pass_with_all_links(self) -> None:
         form = UserForm(fio=VALID_FIO, phone=VALID_PHONE, report_url=REPORT_URL)
         good_doc = _doc_with_text("Промежуточный отчёт")

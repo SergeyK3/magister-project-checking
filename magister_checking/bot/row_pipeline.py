@@ -681,6 +681,9 @@ def run_row_pipeline(
         return report
 
     if url_probe is None:
+        if not (user_form.report_url or "").strip():
+            report.stage2 = run_stage2(report_url="", url_probe=("", ""))
+            report.stopped_at = "stage2"
         return report
 
     report.stage2 = run_stage2(report_url=user_form.report_url or "", url_probe=url_probe)

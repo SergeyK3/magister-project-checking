@@ -231,6 +231,22 @@ class RunRowCheckTests(unittest.TestCase):
         self.assertEqual(report.stopped_at, "stage2")
         self.assertIn(REPORT_URL_HTTP_INACCESSIBLE_MESSAGE, report.stage2.issues)
 
+    def test_row_stops_at_stage2_when_report_url_missing(self) -> None:
+        user = UserForm(
+            fio="Кулеметова Гулнора Ережепбайевна",
+            phone="+77077777777",
+            report_url="",
+        )
+        config = MagicMock()
+        with _install_io_mocks(user=user, document=None, parsed=None):
+            report = run_row_check(config, RowLocator(row_number=47))
+        self.assertEqual(report.row_number, 47)
+        self.assertEqual(report.stopped_at, "stage2")
+        self.assertEqual(
+            report.stage2.issues, ["Ссылка на промежуточный отчёт отсутствует"]
+        )
+        self.assertFalse(report.stage3.executed)
+
     def test_full_stage3_with_mixed_accessibility(self) -> None:
         report_url = "https://docs.google.com/document/d/report/edit"
         diss_url = "https://docs.google.com/document/d/diss/edit"

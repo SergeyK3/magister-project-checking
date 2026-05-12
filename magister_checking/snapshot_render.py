@@ -216,7 +216,10 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
     )
     p4w = list(by_id[PHASE_STAGE4].warnings)
 
-    results_issues = p1w + p2w + leftover_s3
+    # Stage 4 warnings must also appear in the main deviation list; otherwise
+    # the header may say "Нарушений не найдено" while formatting issues are
+    # shown only below in the detailed block.
+    results_issues = p1w + p2w + leftover_s3 + p4w
 
     if not results_issues:
         lines.append("Нарушений не найдено.")
@@ -224,6 +227,7 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         lines.append("Найдены отклонения:")
         for issue in results_issues:
             lines.append(f"- {issue}")
+    detail_p4w = [w for w in p4w if w not in results_issues]
     if snapshot.stopped_at:
         lines.append(f"Проверка остановлена на этапе: {snapshot.stopped_at}")
     sheet_link_lines = _student_sheet_link_lines(snapshot.links)
@@ -273,10 +277,10 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         lines.append(
             "(dry-run: лист не изменён — добавьте --apply для записи)"
         )
-    if p4w:
+    if detail_p4w:
         lines.append("")
         lines.append("Оформление (подробно):")
-        for w in p4w:
+        for w in detail_p4w:
             lines.append(w)
     return "\n".join(lines)
 
@@ -396,7 +400,9 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
     )
     p4w = list(by_id[PHASE_STAGE4].warnings)
 
-    results_issues = p1w + p2w + leftover_s3
+    # Keep HTML and plaintext renderers aligned: Stage 4 formatting warnings
+    # belong to the main "Результаты" list as well.
+    results_issues = p1w + p2w + leftover_s3 + p4w
 
     lines.append("<b>Результаты</b>")
     if not results_issues:
@@ -405,6 +411,7 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         lines.append("Найдены отклонения:")
         for issue in results_issues:
             lines.append(f"• {escape_tg_html(issue)}")
+    detail_p4w = [w for w in p4w if w not in results_issues]
     if snapshot.stopped_at:
         lines.append(
             f"<b>Остановка</b>\nэтап: {escape_tg_html(snapshot.stopped_at)}"
@@ -458,10 +465,10 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         lines.append(
             "<i>Dry-run: лист не изменён — в CLI укажите --apply</i>"
         )
-    if p4w:
+    if detail_p4w:
         lines.append("")
         lines.append("<b>Оформление (подробно)</b>")
-        for w in p4w:
+        for w in detail_p4w:
             lines.append(escape_tg_html(w))
     return "\n".join(lines)
 

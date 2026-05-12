@@ -122,7 +122,7 @@ class RenderSpravkaTests(unittest.TestCase):
         self.assertIn("название: Разработка модели", html)
         self.assertIn("язык: русский", html)
 
-    def test_spravka_html_stage3_note_under_link_and_stage4_at_bottom(self) -> None:
+    def test_spravka_html_stage4_issue_is_not_duplicated_after_results(self) -> None:
         from magister_checking.bot.row_pipeline import (
             Stage3CellUpdate,
             Stage4Result,
@@ -163,12 +163,16 @@ class RenderSpravkaTests(unittest.TestCase):
         pos_links = h.index("Ссылки")
         pos_lkb_line = h.index("lkb_url")
         pos_note = h.index(link_issue)
+        pos_results = h.index("Найдены отклонения:")
         pos_fmt = h.index(fmt_issue)
         pos_recorded = h.index("Запись в лист")
+        self.assertLess(pos_results, pos_fmt)
         self.assertLess(pos_links, pos_lkb_line)
         self.assertLess(pos_lkb_line, pos_note)
         self.assertLess(pos_note, pos_recorded)
-        self.assertLess(pos_recorded, pos_fmt)
+        self.assertLess(pos_fmt, pos_recorded)
+        self.assertEqual(h.count(fmt_issue), 1)
+        self.assertNotIn("Оформление (подробно)", h)
 
     def test_commission_plaintext_four_cells_same_reason_still_four_lines(self) -> None:
         """Один текст во всех четырёх колонках — всё равно четыре строки без «слили в один блок»."""

@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.ext import ConversationHandler
 
-from telegram import InlineKeyboardMarkup
+from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.constants import ChatType
 from telegram.error import BadRequest
 
 from magister_checking.bot import handlers
 from magister_checking.bot.handlers import (
+    ADMIN_MSG_ASK_TEXT,
+    ADMIN_MSG_CONFIRM,
     ADMIN_PROJECT_CARD_BUTTON,
     ADMIN_STATS_BUTTON,
     ADMIN_STUDENT_MESSAGE_BULK_BUTTON,
@@ -29,12 +31,18 @@ from magister_checking.bot.handlers import (
     RECHECK_BUTTON_LABEL,
     RECHECK_CALLBACK_DATA,
     ROLE_PICK,
+    STUDENT_ADMIN_MESSAGE_BUTTON,
     ROLE_MENU_SPRAVKA_BUTTON,
+    ROLE_MENU_STATUS_BUTTON,
+    SUPERVISOR_MSG_ASK_CUSTOM,
     SUPERVISOR_STATUS_BUTTON,
     SUPERVISOR_MSG_ASK_TARGET,
     SUPERVISOR_MSG_CONFIRM,
+    SUPERVISOR_MSG_PICK_KIND,
     help_reply_for_user,
     admin_menu,
+    admin_message_confirm_callback,
+    admin_message_start,
     admin_recheck_pending_receive,
     admin_stats,
     admin_sync_dashboard,
@@ -194,9 +202,10 @@ class StartHandlerTests(unittest.TestCase):
         self.assertIsNotNone(km)
         buttons = [getattr(row[0], "text", row[0]) for row in km.keyboard]
         self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
-        self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
-        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
-        self.assertEqual(buttons[3], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
+        self.assertEqual(buttons[1], ROLE_MENU_STATUS_BUTTON)
+        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BUTTON)
+        self.assertEqual(buttons[3], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
+        self.assertEqual(buttons[4], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -328,7 +337,7 @@ class StartHandlerTests(unittest.TestCase):
         def close_task(coro):
             coro.close()
 
-        with _patch_supervisor_check(True), patch(
+        with _patch_admin_check(False), _patch_supervisor_check(True), patch(
             "magister_checking.bot.handlers.asyncio.create_task",
             side_effect=close_task,
         ) as create_task:
@@ -341,45 +350,31 @@ class StartHandlerTests(unittest.TestCase):
             handlers.SUPERVISOR_STATUS_PROMPT_TEXT
         )
 
-    def test_status_admin_with_fio_bypasses_supervisor_filter(self) -> None:
+    def test_status_admin_without_args_waits_for_registration_target(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.args = []
+        update = _make_update(user_id=999, text="/status")
+
+        with _patch_admin_check(True), _patch_supervisor_check(False):
+            _run(handlers.status_command(update, ctx))
+
+        self.assertTrue(ctx.user_data[handlers.USER_DATA_ADMIN_STATUS_PENDING])
+        update.message.reply_text.assert_awaited_once()
+        self.assertIn("листа «Регистрация»", update.message.reply_text.await_args.args[0])
+
+    def test_status_admin_with_fio_uses_registration_sheet(self) -> None:
         row = [""] * len(SHEET_HEADER)
         row[SHEET_HEADER.index("telegram_id")] = "222"
         row[SHEET_HEADER.index("fio")] = "Уразаев Дамир Серикбаевич"
         row[SHEET_HEADER.index("phone")] = "+77001234567"
         reg_ws = FakeWorksheet([list(SHEET_HEADER), row])
-        mag_ws = FakeWorksheet(
-            [
-                [
-                    "№",
-                    "ФИО магистранта",
-                    "Спец",
-                    "Телефон",
-                    "Научный руководитель (ссылка)",
-                    "Регистрация",
-                ],
-                [
-                    "1",
-                    "Уразаев Дамир Серикбаевич",
-                    "",
-                    "8 700 123 45 67",
-                    "Другой Научрук",
-                    "зарегистрирован",
-                ],
-            ]
-        )
         ctx = _FakeContext(reg_ws)
         ctx.args = ["Уразаев", "Дамир", "Серикбаевич"]
-        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = (
-            "Магистранты"
-        )
         update = _make_update(user_id=999, text="/status Уразаев Дамир Серикбаевич")
-        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
 
         with _patch_admin_check(True), _patch_supervisor_check(False), _patch_worksheet(
             reg_ws
-        ), patch(
-            "magister_checking.bot.handlers.get_spreadsheet",
-            return_value=spreadsheet,
         ), patch(
             "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
         ) as m_do:
@@ -390,55 +385,27 @@ class StartHandlerTests(unittest.TestCase):
         self.assertTrue(m_do.await_args.kwargs["attach_recheck_keyboard"])
         self.assertEqual(m_do.await_args.kwargs["history_source"], "admin_status")
 
-    def test_status_falls_back_to_unique_registration_fio_when_phone_differs(self) -> None:
+    def test_admin_status_pending_uses_registration_target(self) -> None:
         row = [""] * len(SHEET_HEADER)
         row[SHEET_HEADER.index("telegram_id")] = "815191575"
         row[SHEET_HEADER.index("fio")] = "Жарлыкпаева Лаура Зинатоллакызы"
         row[SHEET_HEADER.index("phone")] = "+77022576571"
         reg_ws = FakeWorksheet([list(SHEET_HEADER), row])
-        mag_ws = FakeWorksheet(
-            [
-                [
-                    "№",
-                    "ФИО магистранта",
-                    "Спец",
-                    "Телефон",
-                    "Научный руководитель (ссылка)",
-                    "Регистрация",
-                ],
-                [
-                    "1",
-                    "Жарлыкпаева Лаура Зинатоллакызы",
-                    "",
-                    "+77078054115",
-                    "Другой Научрук",
-                    "зарегистрирован",
-                ],
-            ]
-        )
         ctx = _FakeContext(reg_ws)
-        ctx.args = ["Жарлыкпаева", "Лаура", "Зинатоллакызы"]
-        ctx.bot_data[handlers.CONFIG_BOT_DATA_KEY].magistrants_worksheet_name = (
-            "Магистранты"
-        )
-        update = _make_update(
-            user_id=999, text="/status Жарлыкпаева Лаура Зинатоллакызы"
-        )
-        spreadsheet = FakeSpreadsheet({"Магистранты": mag_ws})
+        ctx.user_data[handlers.USER_DATA_ADMIN_STATUS_PENDING] = True
+        update = _make_update(user_id=999, text="2")
 
         with _patch_admin_check(True), _patch_supervisor_check(False), _patch_worksheet(
             reg_ws
         ), patch(
-            "magister_checking.bot.handlers.get_spreadsheet",
-            return_value=spreadsheet,
-        ), patch(
             "magister_checking.bot.handlers._do_recheck", new_callable=AsyncMock
         ) as m_do:
-            _run(handlers.status_command(update, ctx))
+            _run(admin_recheck_pending_receive(update, ctx))
 
         m_do.assert_awaited_once()
         self.assertEqual(m_do.await_args.kwargs["row_number_override"], 2)
         self.assertEqual(m_do.await_args.kwargs["history_source"], "admin_status")
+        self.assertNotIn(handlers.USER_DATA_ADMIN_STATUS_PENDING, ctx.user_data)
 
     def test_status_supervisor_existing_fio_outside_scope_mentions_admin_sheet(
         self,
@@ -598,6 +565,11 @@ class StartHandlerTests(unittest.TestCase):
             state = _run(start_role_callback(update, ctx))
         self.assertEqual(state, ASK_FIELD)
         self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+        sent_texts = [
+            call.args[0] for call in update.callback_query.message.reply_text.await_args_list
+        ]
+        self.assertTrue(any("При первой регистрации пропускать поля нельзя" in text for text in sent_texts))
+        self.assertFalse(any("/skip" in text for text in sent_texts))
 
     def test_start_role_mag_bind_sends_bind_flow(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -617,6 +589,7 @@ class ReceiveFieldTests(unittest.TestCase):
         ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(telegram_id="111")
         ctx.user_data[handlers.USER_DATA_PENDING_KEY] = ["group_name", "workplace"]
         ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "fio"
+        ctx.user_data[handlers.USER_DATA_ALLOW_SKIP_KEY] = True
 
         update_fio = _make_update(text="Иванов И.И.")
         with _patch_worksheet(ws):
@@ -634,6 +607,25 @@ class ReceiveFieldTests(unittest.TestCase):
         self.assertEqual(state, ASK_FIELD)
         self.assertEqual(form.group_name, "")
         self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "workplace")
+
+    def test_skip_token_is_rejected_during_first_registration(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(telegram_id="111")
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = ["group_name", "workplace"]
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "fio"
+        ctx.user_data[handlers.USER_DATA_ALLOW_SKIP_KEY] = False
+
+        update_skip = _make_update(text="-")
+        with _patch_worksheet(ws):
+            state = _run(receive_field(update_skip, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+        self.assertIn(
+            "При первой регистрации пропускать поля нельзя",
+            update_skip.message.reply_text.await_args.args[0],
+        )
 
     def test_report_url_triggers_check(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -941,6 +933,25 @@ class SkipFieldTests(unittest.TestCase):
         self.assertEqual(form.fio, "Old")
         self.assertEqual(form.last_action, "ask_group_name")
         self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "group_name")
+
+    def test_skip_command_is_rejected_during_first_registration(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_FORM_KEY] = UserForm(telegram_id="111", fio="")
+        ctx.user_data[handlers.USER_DATA_PENDING_KEY] = ["group_name"]
+        ctx.user_data[handlers.USER_DATA_CURRENT_KEY] = "fio"
+        ctx.user_data[handlers.USER_DATA_ALLOW_SKIP_KEY] = False
+
+        update = _make_update(text="/skip")
+        with _patch_worksheet(ws):
+            state = _run(skip_field(update, ctx))
+
+        self.assertEqual(state, ASK_FIELD)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_CURRENT_KEY], "fio")
+        self.assertIn(
+            "При первой регистрации пропускать поля нельзя",
+            update.message.reply_text.await_args.args[0],
+        )
 
     def test_skip_without_active_field_ends(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -1315,6 +1326,7 @@ class HelpAndCommandsTests(unittest.TestCase):
             [
                 "start",
                 "status",
+                "admin_message",
                 "unreg",
                 "reg_list",
                 "student_message",
@@ -1336,11 +1348,12 @@ class HelpAndCommandsTests(unittest.TestCase):
         self.assertIn("магистрант", text)
         self.assertIn("/start", text)
         self.assertIn("/spravka", text)
+        self.assertIn("/admin_message", text)
         self.assertIn("/about", text)
         self.assertIn("/cancel", text)
         self.assertNotIn("/recheck", text)
         self.assertNotIn("/stats", text)
-        self.assertNotIn("/admin", text)
+        self.assertNotIn("/admin ", text)
 
     def test_help_command_admin_includes_privileged_slugs(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -1365,6 +1378,61 @@ class HelpAndCommandsTests(unittest.TestCase):
         self.assertIn("/reg_list", supervisor_help)
         self.assertIn("/about", supervisor_help)
         self.assertIn("администратор", help_reply_for_user(is_admin=True, is_supervisor=True))
+
+
+class AdminMessageFlowTests(unittest.TestCase):
+    def test_admin_message_start_accepts_registered_student(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "111"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        row[SHEET_HEADER.index("group_name")] = "МЭП-1"
+        ws = FakeWorksheet([list(SHEET_HEADER), row])
+        ctx = _FakeContext(ws)
+        update = _make_update(text="/admin_message")
+
+        with _patch_worksheet(ws), _patch_admin_check(False), _patch_supervisor_check(False):
+            state = _run(admin_message_start(update, ctx))
+
+        self.assertEqual(state, ADMIN_MSG_ASK_TEXT)
+        text = update.message.reply_text.await_args.args[0]
+        self.assertIn("Пришлите сообщение администратору", text)
+        self.assertIsInstance(
+            update.message.reply_text.await_args.kwargs.get("reply_markup"),
+            ReplyKeyboardRemove,
+        )
+
+    def test_admin_message_confirm_sends_to_all_active_admins(self) -> None:
+        row = [""] * len(SHEET_HEADER)
+        row[SHEET_HEADER.index("telegram_id")] = "111"
+        row[SHEET_HEADER.index("fio")] = "Иванов И.И."
+        row[SHEET_HEADER.index("group_name")] = "МЭП-1"
+        ws = FakeWorksheet([list(SHEET_HEADER), row])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_ADMIN_MESSAGE_DRAFT] = "Нужна помощь по справке."
+        update = _make_callback_update(callback_data="admmsg:send")
+
+        with _patch_worksheet(ws), _patch_admin_check(False), _patch_supervisor_check(False), patch(
+            "magister_checking.bot.handlers.get_active_admin_telegram_ids",
+            return_value=[9001, 9002],
+        ):
+            state = _run(admin_message_confirm_callback(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        update.callback_query.answer.assert_awaited_once()
+        update.callback_query.edit_message_reply_markup.assert_awaited_once_with(
+            reply_markup=None
+        )
+        self.assertEqual(ctx.bot.send_message.await_count, 2)
+        self.assertEqual(
+            [call.kwargs["chat_id"] for call in ctx.bot.send_message.await_args_list],
+            [9001, 9002],
+        )
+        sent_text = update.callback_query.message.reply_text.await_args.args[0]
+        self.assertIn("2 из 2", sent_text)
+        markup = update.callback_query.message.reply_text.await_args.kwargs.get("reply_markup")
+        self.assertIsInstance(markup, ReplyKeyboardMarkup)
+        buttons = [getattr(row[0], "text", row[0]) for row in markup.keyboard]
+        self.assertIn(STUDENT_ADMIN_MESSAGE_BUTTON, buttons)
 
 
 class GroupJoinRequestTests(unittest.TestCase):
@@ -1675,9 +1743,10 @@ class AdminProjectCardTests(unittest.TestCase):
         reply_markup = update.message.reply_text.await_args.kwargs["reply_markup"]
         buttons = [getattr(row[0], "text", row[0]) for row in reply_markup.keyboard]
         self.assertEqual(buttons[0], ROLE_MENU_SPRAVKA_BUTTON)
-        self.assertEqual(buttons[1], ADMIN_STUDENT_MESSAGE_BUTTON)
-        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
-        self.assertEqual(buttons[3], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
+        self.assertEqual(buttons[1], ROLE_MENU_STATUS_BUTTON)
+        self.assertEqual(buttons[2], ADMIN_STUDENT_MESSAGE_BUTTON)
+        self.assertEqual(buttons[3], ADMIN_STUDENT_MESSAGE_BULK_BUTTON)
+        self.assertEqual(buttons[4], ADMIN_SUPERVISOR_MESSAGE_BUTTON)
         self.assertIn(ADMIN_PROJECT_CARD_BUTTON, buttons)
         self.assertIn(ADMIN_STATS_BUTTON, buttons)
 
@@ -1808,32 +1877,40 @@ class AdminBulkStudentMessageTests(unittest.TestCase):
             any("Отправить это сообщение" in text for text in sent_texts)
         )
 
-    def test_bulk_message_registration_flow_asks_sheet_rows_and_text(self) -> None:
+    def test_bulk_message_registration_flow_defaults_to_registration_rows_and_text(self) -> None:
         row = [""] * len(SHEET_HEADER)
         row[SHEET_HEADER.index("telegram_id")] = "222"
         row[SHEET_HEADER.index("fio")] = "Иванов И.И."
         ws = FakeWorksheet([list(SHEET_HEADER), row])
         ctx = _FakeContext(ws)
 
+        start_update = _make_update(text="/student_message_bulk")
         with _patch_admin_check(True):
             state = _run(
                 handlers.student_message_bulk_start(
-                    _make_update(text="/student_message_bulk"), ctx
+                    start_update, ctx
                 )
             )
         self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
-
-        with _patch_admin_check(True), _patch_worksheet(ws):
-            state = _run(
-                handlers.student_reminder_bulk_receive_rows(
-                    _make_update(text="Регистрация"), ctx
-                )
-            )
-        self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
+        self.assertIsInstance(
+            start_update.message.reply_text.await_args.kwargs.get("reply_markup"),
+            ReplyKeyboardRemove,
+        )
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_STUDENT_BULK_SHEET_NAME], "Регистрация"
+        )
+        self.assertIn(
+            "Лист для группового напоминания: «Регистрация»",
+            start_update.message.reply_text.await_args.args[0],
+        )
 
         rows_update = _make_update(text="2")
         with _patch_admin_check(True), _patch_worksheet(ws):
-            state = _run(handlers.student_reminder_bulk_receive_rows(rows_update, ctx))
+            state = _run(
+                handlers.student_reminder_bulk_receive_rows(
+                    rows_update, ctx
+                )
+            )
         self.assertEqual(state, handlers.STUDENT_MSG_BULK_ASK_ROWS)
         self.assertIn(
             "Пришлите текст сообщения",
@@ -1847,6 +1924,8 @@ class AdminBulkStudentMessageTests(unittest.TestCase):
         preview = text_update.message.reply_text.await_args.args[0]
         self.assertIn("Будет отправлено 1 сообщений", preview)
         self.assertIn("Здравствуйте, Иванов И.И.!", preview)
+        self.assertNotIn("Отправить всем?", preview)
+        self.assertFalse(preview.rstrip().endswith("════════════"))
 
     def test_bulk_message_magistrants_flow_uses_magistrants_sheet_rows(self) -> None:
         reg_ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -1933,6 +2012,8 @@ class AdminSupervisorMessageTests(unittest.TestCase):
 
         self.assertIsNone(err)
         text = "\n".join(chunks)
+        self.assertIn("Уважаемый (ая) Петр Петрович!", text)
+        self.assertIn("Переправьте это сообщение указанным магистрантам по вацапу.", text)
         self.assertIn("Иванов Иван", text)
         self.assertIn("+79990000000", text)
         self.assertNotIn("Сидоров Сидор", text)
@@ -1951,7 +2032,7 @@ class AdminSupervisorMessageTests(unittest.TestCase):
 
         self.assertEqual(state, SUPERVISOR_MSG_ASK_TARGET)
 
-    def test_receive_target_previews_message_for_supervisor_row(self) -> None:
+    def test_receive_target_prompts_message_kind_for_supervisor_row(self) -> None:
         sup_ws = FakeWorksheet(
             [
                 ["fio", "telegram_id"],
@@ -1979,12 +2060,77 @@ class AdminSupervisorMessageTests(unittest.TestCase):
         ):
             state = _run(handlers.supervisor_message_receive_target(update, ctx))
 
-        self.assertEqual(state, SUPERVISOR_MSG_CONFIRM)
+        self.assertEqual(state, SUPERVISOR_MSG_PICK_KIND)
         self.assertEqual(ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID], 444)
         preview = update.message.reply_text.await_args.args[0]
         self.assertIn("Петров Петр Петрович", preview)
+        self.assertIn("Выберите тип сообщения", preview)
+        markup = update.message.reply_text.await_args.kwargs.get("reply_markup")
+        self.assertIsInstance(markup, InlineKeyboardMarkup)
+        self.assertEqual(markup.inline_keyboard[0][0].text, "нет регистрации")
+        self.assertEqual(markup.inline_keyboard[1][0].text, "свободное сообщение")
+
+        pick_update = _make_callback_update(callback_data="admsupmsg:unreg")
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.supervisor_lists.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            state = _run(handlers.supervisor_message_pick_template(pick_update, ctx))
+
+        self.assertEqual(state, SUPERVISOR_MSG_CONFIRM)
+        preview = pick_update.callback_query.message.reply_text.await_args.args[0]
         self.assertIn("Иванов Иван", preview)
         self.assertIn("Отправить?", preview)
+
+    def test_receive_target_without_telegram_id_still_builds_template(self) -> None:
+        sup_ws = FakeWorksheet(
+            [
+                ["fio", "telegram_id"],
+                ["Петров Петр Петрович", ""],
+            ]
+        )
+        reg_ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(reg_ws)
+        spreadsheet = FakeSpreadsheet({"научрук": sup_ws})
+        update = _make_update(text="2")
+
+        with _patch_admin_check(True), patch(
+            "magister_checking.bot.handlers.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            state = _run(handlers.supervisor_message_receive_target(update, ctx))
+
+        self.assertEqual(state, SUPERVISOR_MSG_PICK_KIND)
+        self.assertEqual(ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID], 0)
+        preview = update.message.reply_text.await_args.args[0]
+        self.assertIn("доступен только шаблон", preview)
+
+    def test_supervisor_message_custom_text_previews_and_sends(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_ROW] = 2
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_FIO] = "Петров Петр"
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID] = 444
+
+        pick_update = _make_callback_update(callback_data="admsupmsg:custom")
+        with _patch_admin_check(True):
+            state = _run(handlers.supervisor_message_pick_template(pick_update, ctx))
+        self.assertEqual(state, SUPERVISOR_MSG_ASK_CUSTOM)
+        self.assertIn(
+            "Пришлите полный текст",
+            pick_update.callback_query.message.reply_text.await_args.args[0],
+        )
+
+        text_update = _make_update(text="Здравствуйте! Индивидуальное сообщение.")
+        with _patch_admin_check(True):
+            state = _run(handlers.supervisor_message_receive_custom(text_update, ctx))
+        self.assertEqual(state, SUPERVISOR_MSG_CONFIRM)
+        preview = text_update.message.reply_text.await_args.args[0]
+        self.assertIn("Индивидуальное сообщение", preview)
+        self.assertEqual(
+            ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHUNKS],
+            ["Здравствуйте! Индивидуальное сообщение."],
+        )
 
     def test_confirm_sends_chunks_to_supervisor(self) -> None:
         ws = FakeWorksheet([list(SHEET_HEADER)])
@@ -2002,6 +2148,25 @@ class AdminSupervisorMessageTests(unittest.TestCase):
         ctx.bot.send_message.assert_awaited_once()
         self.assertIn(
             "Сообщение научруку отправлено",
+            update.callback_query.message.reply_text.await_args.args[0],
+        )
+
+    def test_confirm_without_telegram_id_reports_template_only(self) -> None:
+        ws = FakeWorksheet([list(SHEET_HEADER)])
+        ctx = _FakeContext(ws)
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_ROW] = 2
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_FIO] = "Петров Петр"
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHAT_ID] = 0
+        ctx.user_data[handlers.USER_DATA_SUPERVISOR_MESSAGE_CHUNKS] = ["Текст"]
+        update = _make_callback_update(callback_data="admsupmsg:send")
+
+        with _patch_admin_check(True):
+            state = _run(handlers.supervisor_message_confirm_callback(update, ctx))
+
+        self.assertEqual(state, ConversationHandler.END)
+        ctx.bot.send_message.assert_not_awaited()
+        self.assertIn(
+            "не отправлен в Telegram",
             update.callback_query.message.reply_text.await_args.args[0],
         )
 

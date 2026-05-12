@@ -47,6 +47,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
             [
                 ("start", "Запуск и регистрация"),
                 ("status", "Проверить магистранта"),
+                ("admin_message", "Написать администратору"),
                 ("unreg", "Кто не зарегистрировался"),
                 ("reg_list", "Кто зарегистрировался"),
                 ("student_message", "Сообщение магистранту"),
@@ -78,7 +79,11 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 "STUDENT_MSG_BULK_CONFIRM": h.STUDENT_MSG_BULK_CONFIRM,
                 "PIN_VERIFY_INPUT": h.PIN_VERIFY_INPUT,
                 "SUPERVISOR_MSG_ASK_TARGET": h.SUPERVISOR_MSG_ASK_TARGET,
+                "SUPERVISOR_MSG_PICK_KIND": h.SUPERVISOR_MSG_PICK_KIND,
+                "SUPERVISOR_MSG_ASK_CUSTOM": h.SUPERVISOR_MSG_ASK_CUSTOM,
                 "SUPERVISOR_MSG_CONFIRM": h.SUPERVISOR_MSG_CONFIRM,
+                "ADMIN_MSG_ASK_TEXT": h.ADMIN_MSG_ASK_TEXT,
+                "ADMIN_MSG_CONFIRM": h.ADMIN_MSG_CONFIRM,
             },
             {
                 "ASK_FIELD": 0,
@@ -100,7 +105,11 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 "STUDENT_MSG_BULK_CONFIRM": 16,
                 "PIN_VERIFY_INPUT": 17,
                 "SUPERVISOR_MSG_ASK_TARGET": 18,
-                "SUPERVISOR_MSG_CONFIRM": 19,
+                "SUPERVISOR_MSG_PICK_KIND": 19,
+                "SUPERVISOR_MSG_ASK_CUSTOM": 20,
+                "SUPERVISOR_MSG_CONFIRM": 21,
+                "ADMIN_MSG_ASK_TEXT": 22,
+                "ADMIN_MSG_CONFIRM": 23,
             },
         )
 
@@ -144,6 +153,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("cancel",), "cancel"),
                 (("start",), "start"),
                 (("register",), "register_command"),
+                (("admin_message",), "admin_message_start"),
                 (("project_card",), "project_card_start"),
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
@@ -151,6 +161,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("spravka",), "spravka_start"),
                 (("about",), "about_command"),
                 (("status",), "status_command"),
+                (("unreg",), "supervisor_unregistered_list_command"),
+                (("reg_list",), "supervisor_registered_list_command"),
             ],
         )
         self.assertEqual(
@@ -172,6 +184,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 h.CLAIM_ASK_FIO,
                 h.CLAIM_CONFIRM,
                 h.PIN_VERIFY_INPUT,
+                h.ADMIN_MSG_ASK_TEXT,
+                h.ADMIN_MSG_CONFIRM,
                 h.PROJECT_CARD_ASK_TARGET,
                 h.ROLE_PICK,
                 h.SPRAVKA_ASK_TARGET,
@@ -183,8 +197,10 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 h.STUDENT_MSG_BULK_CONFIRM,
                 h.STUDENT_MSG_CONFIRM,
                 h.STUDENT_MSG_PICK_KIND,
+                h.SUPERVISOR_MSG_ASK_CUSTOM,
                 h.SUPERVISOR_MSG_ASK_TARGET,
                 h.SUPERVISOR_MSG_CONFIRM,
+                h.SUPERVISOR_MSG_PICK_KIND,
                 ]
             ),
         )
@@ -194,6 +210,7 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("cancel",), "cancel"),
                 (("start",), "start"),
                 (("register",), "register_command"),
+                (("admin_message",), "admin_message_start"),
                 (("project_card",), "project_card_start"),
                 (("student_message",), "student_reminder_start"),
                 (("student_message_bulk",), "student_message_bulk_start"),
@@ -201,6 +218,8 @@ class Phase0CommandInventoryTests(unittest.TestCase):
                 (("spravka",), "spravka_start"),
                 (("about",), "about_command"),
                 (("status",), "status_command"),
+                (("unreg",), "supervisor_unregistered_list_command"),
+                (("reg_list",), "supervisor_registered_list_command"),
             ],
         )
         self.assertEqual(

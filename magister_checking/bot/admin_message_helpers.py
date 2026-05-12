@@ -10,11 +10,14 @@ ADMSTU_CALLBACK_TEMPLATE_PATTERN = r"^admstu:(std|stdex|cust)$"
 ADMSTU_CALLBACK_CONFIRM_PATTERN = r"^admstu:(send|cancel)$"
 ADMSTUB_CALLBACK_CONFIRM_PATTERN = r"^admstub:(send|cancel)$"
 ADMSUPMSG_CALLBACK_CONFIRM_PATTERN = r"^admsupmsg:(send|cancel)$"
+ADMSUPMSG_CALLBACK_TEMPLATE_PATTERN = r"^admsupmsg:(unreg|custom)$"
+ADMMSG_CALLBACK_CONFIRM_PATTERN = r"^admmsg:(send|cancel)$"
 
 ADMIN_PROJECT_CARD_BUTTON = "Сформировать карточку проекта"
 ADMIN_STUDENT_MESSAGE_BUTTON = "Сообщение магистранту"
 ADMIN_STUDENT_MESSAGE_BULK_BUTTON = "Групповое напоминание"
 ADMIN_SUPERVISOR_MESSAGE_BUTTON = "Сообщение научруку"
+STUDENT_ADMIN_MESSAGE_BUTTON = "Написать администратору"
 ROLE_MENU_SPRAVKA_BUTTON = "Справка / проверка"
 ROLE_MENU_HELP_BUTTON = "Помощь"
 ROLE_MENU_ABOUT_BUTTON = "О проекте"
@@ -31,6 +34,7 @@ def _admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [ROLE_MENU_SPRAVKA_BUTTON],
+            [ROLE_MENU_STATUS_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BUTTON],
             [ADMIN_STUDENT_MESSAGE_BULK_BUTTON],
             [ADMIN_SUPERVISOR_MESSAGE_BUTTON],
@@ -64,6 +68,7 @@ def _student_keyboard() -> ReplyKeyboardMarkup:
             [ROLE_MENU_SPRAVKA_BUTTON],
             [ROLE_MENU_REGISTER_BUTTON],
             [ROLE_MENU_STATUS_BUTTON],
+            [STUDENT_ADMIN_MESSAGE_BUTTON],
             [ROLE_MENU_ABOUT_BUTTON],
             [ROLE_MENU_HELP_BUTTON],
         ],
@@ -118,6 +123,17 @@ def _student_reminder_bulk_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _student_admin_message_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Отправить", callback_data="admmsg:send"),
+                InlineKeyboardButton("Отмена", callback_data="admmsg:cancel"),
+            ]
+        ]
+    )
+
+
 def _supervisor_message_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -125,6 +141,15 @@ def _supervisor_message_confirm_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Отправить научруку", callback_data="admsupmsg:send"),
                 InlineKeyboardButton("Отмена", callback_data="admsupmsg:cancel"),
             ]
+        ]
+    )
+
+
+def _supervisor_message_template_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("нет регистрации", callback_data="admsupmsg:unreg")],
+            [InlineKeyboardButton("свободное сообщение", callback_data="admsupmsg:custom")],
         ]
     )
 

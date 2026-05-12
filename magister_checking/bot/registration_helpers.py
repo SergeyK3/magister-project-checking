@@ -42,6 +42,7 @@ def _student_help_text(*, require_phone_pin: bool) -> str:
         "Команды бота (магистрант):\n\n"
         "/start — регистрация.\n"
         "/spravka — запустить проверку проекта.\n"
+        "/admin_message — написать администратору.\n"
         "/about — информация о проекте.\n"
         "/help — эта справка.\n\n"
         f"{pin_note}"
@@ -56,6 +57,7 @@ HELP_REPLY_TEXT_STUDENT = _student_help_text(require_phone_pin=False)
 HELP_REPLY_TEXT_ADMIN = (
     "Команды бота (администратор):\n\n"
     "/start — регистрация, привязка к строке таблицы или продолжение анкеты\n"
+    "/status [номер строки | ФИО] — проверить зарегистрированного магистранта по листу «Регистрация»\n"
     "/spravka — кратко для магистранта, полный текст для комиссии в чате, PDF, "
     "либо вложенный JSON с Drive в человекочитаемый вид (режимы «чужой строки» "
     "и JSON — у админа)\n"
@@ -103,6 +105,7 @@ def default_bot_commands() -> list[BotCommand]:
     return [
         BotCommand("start", "Запуск и регистрация"),
         BotCommand("status", "Проверить магистранта"),
+        BotCommand("admin_message", "Написать администратору"),
         BotCommand("unreg", "Кто не зарегистрировался"),
         BotCommand("reg_list", "Кто зарегистрировался"),
         BotCommand("student_message", "Сообщение магистранту"),

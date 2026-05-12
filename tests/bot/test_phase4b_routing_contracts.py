@@ -102,6 +102,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                         h.CLAIM_ASK_FIO,
                         h.CLAIM_CONFIRM,
                         h.PIN_VERIFY_INPUT,
+                        h.ADMIN_MSG_ASK_TEXT,
+                        h.ADMIN_MSG_CONFIRM,
                         h.PROJECT_CARD_ASK_TARGET,
                         h.ROLE_PICK,
                         h.SPRAVKA_ASK_TARGET,
@@ -113,8 +115,10 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                         h.STUDENT_MSG_BULK_CONFIRM,
                         h.STUDENT_MSG_CONFIRM,
                         h.STUDENT_MSG_PICK_KIND,
+                        h.SUPERVISOR_MSG_ASK_CUSTOM,
                         h.SUPERVISOR_MSG_ASK_TARGET,
                         h.SUPERVISOR_MSG_CONFIRM,
+                        h.SUPERVISOR_MSG_PICK_KIND,
                     ]
                 ),
             )
@@ -198,6 +202,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "cancel",
                     "start",
                     "spravka_start",
+                    "admin_message_start",
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
@@ -219,6 +224,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("cancel",), "cancel"),
                     (("start",), "start"),
                     (("register",), "register_command"),
+                    (("admin_message",), "admin_message_start"),
                     (("project_card",), "project_card_start"),
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
@@ -226,6 +232,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("spravka",), "spravka_start"),
                     (("about",), "about_command"),
                     (("status",), "status_command"),
+                    (("unreg",), "supervisor_unregistered_list_command"),
+                    (("reg_list",), "supervisor_registered_list_command"),
                 ],
             )
             self.assertEqual(
@@ -234,6 +242,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     "cancel",
                     "start",
                     "spravka_start",
+                    "admin_message_start",
                     "project_card_start",
                     "student_reminder_start",
                     "student_message_bulk_start",
@@ -255,6 +264,7 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("cancel",), "cancel"),
                     (("start",), "start"),
                     (("register",), "register_command"),
+                    (("admin_message",), "admin_message_start"),
                     (("project_card",), "project_card_start"),
                     (("student_message",), "student_reminder_start"),
                     (("student_message_bulk",), "student_message_bulk_start"),
@@ -262,6 +272,8 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                     (("spravka",), "spravka_start"),
                     (("about",), "about_command"),
                     (("status",), "status_command"),
+                    (("unreg",), "supervisor_unregistered_list_command"),
+                    (("reg_list",), "supervisor_registered_list_command"),
                 ],
             )
         finally:
@@ -311,6 +323,14 @@ class Phase4BRoutingContractTests(unittest.TestCase):
                 ["receive_pin_input"],
             )
             self.assertEqual(
+                _message_routes(conv.states[h.ADMIN_MSG_ASK_TEXT]),
+                ["admin_message_receive_text"],
+            )
+            self.assertEqual(
+                _callback_routes(conv.states[h.ADMIN_MSG_CONFIRM]),
+                [(h.ADMMSG_CALLBACK_CONFIRM_PATTERN, "admin_message_confirm_callback")],
+            )
+            self.assertEqual(
                 _message_routes(conv.states[h.PROJECT_CARD_ASK_TARGET]),
                 ["project_card_receive_target"],
             )
@@ -345,6 +365,19 @@ class Phase4BRoutingContractTests(unittest.TestCase):
             self.assertEqual(
                 _message_routes(conv.states[h.SUPERVISOR_MSG_ASK_TARGET]),
                 ["supervisor_message_receive_target"],
+            )
+            self.assertEqual(
+                _callback_routes(conv.states[h.SUPERVISOR_MSG_PICK_KIND]),
+                [
+                    (
+                        h.ADMSUPMSG_CALLBACK_TEMPLATE_PATTERN,
+                        "supervisor_message_pick_template",
+                    )
+                ],
+            )
+            self.assertEqual(
+                _message_routes(conv.states[h.SUPERVISOR_MSG_ASK_CUSTOM]),
+                ["supervisor_message_receive_custom"],
             )
             self.assertEqual(
                 _callback_routes(conv.states[h.SUPERVISOR_MSG_CONFIRM]),

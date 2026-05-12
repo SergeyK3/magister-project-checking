@@ -1,6 +1,6 @@
 # Commands
 
-Технический перечень slash-команд и compatibility routes. Основной пользовательский UX описан в `docs/guide_admin_ruV3.md`: `/start` → определение роли → меню кнопками.
+Технический перечень slash-команд и compatibility routes. Основной пользовательский UX описан в `docs/guide_admin_ruV3.md` и `docs/guide_userV3.md`: `/start` → определение роли → меню кнопками.
 
 Соответствует регистрации хендлеров в `magister_checking/bot/app.py` и сценариям в `magister_checking/bot/handlers.py`. Русские команды `/старт`, `/справка`, `/выход` обрабатываются через `MessageHandler` с regex в том же приложении.
 
@@ -25,7 +25,7 @@
 | `/register` | — | регистрация (латинский вход в тот же FSM) |
 | `/help` | — | подсказка по роли (`help_command`) |
 
-В меню Telegram через API задаются короткие пункты: `start`, `status`, `unreg`, `reg_list`, `student_message`, `student_message_bulk`, `about` — см. `default_bot_commands()`.
+В меню Telegram через API задаются короткие пункты: `start`, `status`, `admin_message`, `unreg`, `reg_list`, `student_message`, `student_message_bulk`, `supervisor_message`, `about` — см. `default_bot_commands()`.
 
 ---
 
@@ -38,6 +38,7 @@
 | `/spravka` | канонический запуск проверки своей строки «Регистрация» |
 | `/status` | краткий статус своей строки (ветка без прав научрука) |
 | `/recheck` | повторная проверка своей строки; можно `/recheck quick` |
+| `/admin_message` | отправка сообщения всем активным администраторам с контекстом своей строки |
 | `/about` | информация о проекте |
 
 ---
@@ -62,12 +63,12 @@
 
 | Команда | Назначение |
 | ------- | ---------- |
-| `/admin` | панель и подсказки по `/project_card`, `/student_message`, `/student_message_bulk` |
+| `/admin` | панель и подсказки по `/status`, `/project_card`, `/student_message`, `/student_message_bulk` |
 | `/stats` | статистика |
 | `/ops_row` | диагностика строки |
 | `/sync_dashboard` | синхронизация дашборда регистрации |
 | `/sync_magistrants` | обновление листа магистрантов |
-| `/status` | если пользователь не в ветке научрука — краткий статус своей строки «Регистрация» (как у магистранта; см. `status_command`) |
+| `/status [номер_строки | ФИО]` | админ: проверка зарегистрированного магистранта по листу «Регистрация»; без админских прав и без ветки научрука — краткий статус своей строки |
 | `/unreg` / `/reg_list` | без аргументов — как у научрука, если пользователь научрук; с аргументом ФИО — превью отчёта для указанного научрука |
 | `/recheck` | повторная проверка; админ может указать строку или ФИО в команде |
 | `/about` | информация о проекте |

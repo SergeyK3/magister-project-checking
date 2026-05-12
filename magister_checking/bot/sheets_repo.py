@@ -1352,6 +1352,44 @@ def is_admin_telegram_id(config: BotConfig, telegram_id: str) -> bool:
     return _is_telegram_id_active_in_worksheet(ws, telegram_id)
 
 
+def get_active_admin_telegram_ids(config: BotConfig) -> list[int]:
+    """Возвращает активные ``telegram_id`` из листа ``Администраторы``."""
+
+    spreadsheet = get_spreadsheet(config)
+    ws = get_optional_worksheet(spreadsheet, ADMINS_WORKSHEET_NAME)
+    if ws is None:
+        return []
+
+    header = _header_row(ws)
+    normalized_to_index = {normalize_fio(str(v)): i for i, v in enumerate(header)}
+    telegram_col = normalized_to_index.get("telegram_id")
+    active_col = normalized_to_index.get("active")
+    if telegram_col is None:
+        return []
+
+    max_rows = max((len(ws.col_values(idx + 1)) for idx in range(len(header))), default=0)
+    out: list[int] = []
+    seen: set[int] = set()
+    for row_number in range(2, max_rows + 1):
+        row = ws.row_values(row_number)
+        if telegram_col >= len(row):
+            continue
+        raw = str(row[telegram_col] or "").strip()
+        if not raw:
+            continue
+        if active_col is not None and active_col < len(row) and not _bool_cell(row[active_col]):
+            continue
+        try:
+            chat_id = int(raw)
+        except ValueError:
+            continue
+        if chat_id in seen:
+            continue
+        seen.add(chat_id)
+        out.append(chat_id)
+    return out
+
+
 def is_supervisor_telegram_id(config: BotConfig, telegram_id: str) -> bool:
     """Проверяет, есть ли Telegram ID в листе «научрук» (``SUPERVISORS_WORKSHEET_NAME``)."""
 

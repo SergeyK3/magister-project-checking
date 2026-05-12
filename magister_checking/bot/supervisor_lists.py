@@ -31,12 +31,6 @@ _UNREG_SUPERVISOR_ACTION_HINT = (
     "(Telegram) и вступить в телеграм группу \"Магистр аттестаия КОЗМ\""
 )
 
-_ADMIN_SUPERVISOR_UNREG_ACTION_HINT = (
-    "\n\nПожалуйста, свяжитесь с этими магистрантами и попросите их "
-    "зарегистрироваться в боте @magistrcheck."
-)
-
-
 def split_supervisor_message_chunks(
     text: str, limit: int = _TELEGRAM_TEXT_SOFT_LIMIT
 ) -> List[str]:
@@ -78,6 +72,15 @@ def _resolve_sup_fio_for_preview(
             "Проверьте строку или используйте --supervisor-fio «как в научрук»."
         )
     return sup.strip(), None
+
+
+def _supervisor_name_patronymic(sup_fio: str) -> str:
+    parts = [part for part in (sup_fio or "").strip().split() if part]
+    if len(parts) >= 3:
+        return " ".join(parts[1:3])
+    if len(parts) >= 2:
+        return " ".join(parts[-2:])
+    return (sup_fio or "").strip()
 
 
 def supervisor_unregistered_report(
@@ -194,12 +197,12 @@ def supervisor_unregistered_from_magistrants_registration_report(
             "со значением «нет» в колонке «Регистрация»."
         ], None
 
+    supervisor_name = _supervisor_name_patronymic(sup_fio) or sup_fio
     text = (
-        "Здравствуйте!\n\n"
-        "По данным листа «Магистранты» у следующих ваших магистрантов "
-        "в колонке «Регистрация» указано «нет»:\n\n"
+        f"Уважаемый (ая) {supervisor_name}! Часть ваших магистрантов до сих пор "
+        "не зарегистрировались в Телеграм боте @magistrcheck. "
+        "Переправьте это сообщение указанным магистрантам по вацапу.\n\n"
         + "\n".join(lines_body)
-        + _ADMIN_SUPERVISOR_UNREG_ACTION_HINT
     )
     return split_supervisor_message_chunks(text), None
 

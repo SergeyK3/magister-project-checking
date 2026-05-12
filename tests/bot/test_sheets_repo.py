@@ -28,6 +28,7 @@ from magister_checking.bot.sheets_repo import (
     find_magistrants_rows_by_fio,
     find_rows_by_fio,
     format_dashboard_telegram_message,
+    get_active_admin_telegram_ids,
     get_or_create_worksheet,
     get_telegram_id_at_row,
     is_admin_telegram_id,
@@ -774,6 +775,33 @@ class AdminSheetTests(unittest.TestCase):
             self.assertTrue(is_admin_telegram_id(cfg, "300398364"))
             self.assertFalse(is_admin_telegram_id(cfg, "999"))
             self.assertFalse(is_admin_telegram_id(cfg, "123"))
+
+    def test_get_active_admin_telegram_ids_returns_only_active_numeric_unique_ids(self) -> None:
+        registration = FakeWorksheet([list(SHEET_HEADER)])
+        admins = FakeWorksheet(
+            [
+                ["telegram_id", "username", "fio", "role", "active"],
+                ["300398364", "kim", "Ким СВ", "admin", "yes"],
+                ["300398364", "kim2", "Ким СВ", "admin", "yes"],
+                ["not-a-number", "bad", "Некорректный", "admin", "yes"],
+                ["999", "old", "Старый", "admin", "no"],
+                ["", "empty", "Пустой", "admin", "yes"],
+                ["123", "ann", "Анна", "admin", "да"],
+            ]
+        )
+        spreadsheet = FakeSpreadsheet(
+            {
+                "Регистрация": registration,
+                ADMINS_WORKSHEET_NAME: admins,
+            }
+        )
+
+        with patch(
+            "magister_checking.bot.sheets_repo.get_spreadsheet",
+            return_value=spreadsheet,
+        ):
+            cfg = MagicMock()
+            self.assertEqual(get_active_admin_telegram_ids(cfg), [300398364, 123])
 
     def test_is_supervisor_telegram_id_checks_supervisor_sheet(self) -> None:
         registration = FakeWorksheet([list(SHEET_HEADER)])

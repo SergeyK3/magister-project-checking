@@ -257,6 +257,32 @@ class DetectTitleFromGdocTests(unittest.TestCase):
             "посмертного донорства в Республике Казахстан",
         )
 
+    def test_govt_template_accepts_plain_mixed_case_title_between_fio_and_specialty(self) -> None:
+        # Реальный шаблон row 21: тема не CAPS и не в кавычках, но находится
+        # на титуле между ФИО автора и шифром специальности.
+        document = _document(
+            [
+                _paragraph("НАО «Медицинский университет Астана»\n"),
+                _paragraph("УДК: 614.2:005:339.138:004\n"),
+                _paragraph("МПК:\n"),
+                _paragraph("Джумабекова Инкар Сериковна\n"),
+                _paragraph(
+                    "Развитие системы цифрового маркетинга в управлении "
+                    "медицинской организации\n"
+                ),
+                _paragraph("7М10121 «Менеджмент в здравоохранении»\n"),
+                _paragraph(
+                    "Магистерский проект на соискание степени магистра "
+                    "здравоохранения\n"
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_gdoc(document),
+            "Развитие системы цифрового маркетинга в управлении "
+            "медицинской организации",
+        )
+
     def test_govt_template_caps_title_above_degree_marker_kk(self) -> None:
         # Структура реальной диссертации Камзебаевой.
         document = _document(
@@ -391,6 +417,32 @@ class DetectTitleFromDocxTests(unittest.TestCase):
         self.assertEqual(
             detect_dissertation_title_from_docx_bytes(blob),
             "Цифровая трансформация образования в Казахстане",
+        )
+
+    def test_govt_template_plain_mixed_case_title_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("НАО «Медицинский университет Астана»", None),
+                ("УДК: 614.2:005:339.138:004", None),
+                ("МПК:", None),
+                ("Джумабекова Инкар Сериковна", None),
+                (
+                    "Развитие системы цифрового маркетинга в управлении "
+                    "медицинской организации",
+                    None,
+                ),
+                ("7М10121 «Менеджмент в здравоохранении»", None),
+                (
+                    "Магистерский проект на соискание степени магистра "
+                    "здравоохранения",
+                    None,
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "Развитие системы цифрового маркетинга в управлении "
+            "медицинской организации",
         )
 
     def test_empty_blob(self) -> None:

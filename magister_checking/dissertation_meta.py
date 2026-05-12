@@ -158,6 +158,10 @@ _LOCATION_LINE_RE = re.compile(
 # «УДК: 614.2», «МПК: G16H 20/00», «ББК 65», «ISBN ...», «ISSN ...».
 _BIBLIO_PREFIX_RE = re.compile(r"(?i)^\s*(удк|мпк|ббк|isbn|issn|udc|doi)[\s:№#]")
 
+# Шифр образовательной программы / специальности на титуле:
+# ``7M10116 – «Общественное здравоохранение»``, ``7М10121 ...``.
+_SPECIALTY_CODE_RE = re.compile(r"(?i)^\s*\d+\s*[a-zа-я]\s*\d")
+
 # ФИО автора, написанное CAPS: «СУЛЕЙМЕНОВА ИНДИРА САРСЕНБЕКОВНА». Слов
 # 2..4, и хотя бы одно с типичным русским / казахским ФИО-суффиксом.
 _FIO_SUFFIX_RE = re.compile(
@@ -289,6 +293,9 @@ def _detect_title_from_govt_template(paragraphs: list[str]) -> str:
        длиной 20..300 символов, не из стоп-списка. ФИО автора отбрасывается
        по CAPS-проверке (ФИО — «Иванов И. И.», не CAPS), служебные
        строки — по стоп-фильтру.
+    3. Если тема на титуле набрана обычным регистром (не CAPS и не в
+       кавычках), допускаем её только в характерном контексте:
+       строка стоит между ФИО автора и шифром специальности / якорем степени.
     """
 
     head_window = paragraphs[:30]
@@ -304,9 +311,12 @@ def _detect_title_from_govt_template(paragraphs: list[str]) -> str:
                 continue
             if _is_stop_phrase(candidate):
                 continue
-            if not (_is_caps_paragraph(candidate) or _is_quoted_title_candidate(candidate)):
-                continue
-            cleaned = _clean_title(_join_wrapped_caps_title_lines(paragraphs, k))
+            if _is_caps_paragraph(candidate) or _is_quoted_title_candidate(candidate):
+                cleaned = _clean_title(_join_wrapped_caps_title_lines(paragraphs, k))
+            else:
+                if not _looks_like_mixed_case_title_in_govt_context(head_window, k, idx):
+                    continue
+                cleaned = _clean_title(candidate)
             if _looks_like_title(cleaned):
                 return cleaned
         # Якорь нашли, но темы над ним нет — дальше ловить нечего, выходим
@@ -343,6 +353,46 @@ def _is_quoted_title_candidate(text: str) -> bool:
         or (stripped.startswith('"') and stripped.endswith('"'))
         or (stripped.startswith("“") and stripped.endswith("”"))
     )
+
+
+def _previous_nonempty(paragraphs: list[str], idx: int) -> str:
+    for pos in range(idx - 1, -1, -1):
+        candidate = paragraphs[pos].strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _next_nonempty_before_marker(paragraphs: list[str], idx: int, marker_idx: int) -> str:
+    for pos in range(idx + 1, min(marker_idx, len(paragraphs))):
+        candidate = paragraphs[pos].strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _looks_like_specialty_line(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return bool(_SPECIALTY_CODE_RE.match(stripped))
+
+
+def _looks_like_mixed_case_title_in_govt_context(
+    paragraphs: list[str], candidate_idx: int, marker_idx: int
+) -> bool:
+    """Mixed-case тема на титуле: между ФИО автора и шифром/якорем степени."""
+
+    candidate = paragraphs[candidate_idx].strip()
+    if not _looks_like_title(candidate):
+        return False
+    prev_line = _previous_nonempty(paragraphs, candidate_idx)
+    if not _looks_like_fio(prev_line):
+        return False
+    next_line = _next_nonempty_before_marker(paragraphs, candidate_idx, marker_idx)
+    if not next_line:
+        return True
+    return _looks_like_specialty_line(next_line) or bool(_DEGREE_MARKER_RE.search(next_line))
 
 
 def _looks_like_title(text: str) -> bool:

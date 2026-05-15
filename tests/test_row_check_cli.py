@@ -19,6 +19,7 @@ from magister_checking.row_check_cli import (
     _compute_recheck_fingerprint,
     _is_plausible_manual_link_cell,
     _merge_parsed_report_with_sheet_links,
+    _try_load_dissertation_metrics_and_meta,
     _try_load_dissertation_metrics,
     format_report,
     run_row_check,
@@ -734,6 +735,108 @@ class TryLoadDissertationMetricsTests(unittest.TestCase):
                 drive_service=MagicMock(),
             )
         self.assertIsNone(result)
+
+    def test_drive_file_docx_prefers_converted_google_doc_when_buffer_configured(self) -> None:
+        diss_url = "https://drive.google.com/file/d/diss-docx-id/view"
+        docs_service = MagicMock()
+        doc_payload = {"body": {"content": []}}
+        docs_service.documents.return_value.get.return_value.execute.return_value = (
+            doc_payload
+        )
+        drive_service = MagicMock()
+        converted_metrics = _make_metrics(approx_pages=69, sources_count=45, pdf_pages=None)
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"PK\x03\x04docx-bytes",
+        ) as dl, patch(
+            "magister_checking.row_check_cli.google_doc_from_drive_file"
+        ) as convert, patch(
+            "magister_checking.row_check_cli.analyze_dissertation",
+            return_value=converted_metrics,
+        ) as analyze_gdoc, patch(
+            "magister_checking.row_check_cli.count_pdf_pages_via_drive_export",
+            return_value=71,
+        ) as pdf_exp, patch(
+            "magister_checking.row_check_cli.detect_dissertation_title_from_gdoc",
+            return_value="Точная тема",
+        ), patch(
+            "magister_checking.row_check_cli.detect_dissertation_language_from_gdoc",
+            return_value="русский",
+        ), patch(
+            "magister_checking.row_check_cli.warn_if_unusual_language"
+        ):
+            convert.return_value.__enter__.return_value = "converted-doc-id"
+            convert.return_value.__exit__.return_value = False
+            metrics, title, language = _try_load_dissertation_metrics_and_meta(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+                docx_conversion_folder_id="buffer-folder",
+            )
+        self.assertIsNotNone(metrics)
+        assert metrics is not None
+        self.assertEqual(metrics.sources_count, 45)
+        self.assertEqual(metrics.pdf_pages, 71)
+        self.assertEqual(title, "Точная тема")
+        self.assertEqual(language, "русский")
+        dl.assert_called_once_with(
+            drive_service=drive_service, file_id="diss-docx-id"
+        )
+        convert.assert_called_once_with(
+            drive_service,
+            "diss-docx-id",
+            conversion_folder_id="buffer-folder",
+        )
+        docs_service.documents.return_value.get.assert_called_once_with(
+            documentId="converted-doc-id"
+        )
+        analyze_gdoc.assert_called_once_with(doc_payload)
+        pdf_exp.assert_called_once_with(
+            drive_service=drive_service, file_id="converted-doc-id"
+        )
+
+    def test_drive_file_docx_uses_docx_title_fallback_when_converted_doc_has_no_title(self) -> None:
+        diss_url = "https://drive.google.com/file/d/diss-docx-id/view"
+        docs_service = MagicMock()
+        doc_payload = {"body": {"content": []}}
+        docs_service.documents.return_value.get.return_value.execute.return_value = (
+            doc_payload
+        )
+        drive_service = MagicMock()
+        converted_metrics = _make_metrics(approx_pages=28, sources_count=40, pdf_pages=None)
+        with patch(
+            "magister_checking.row_check_cli._download_drive_file_bytes_all_drives",
+            return_value=b"PK\x03\x04docx-bytes",
+        ), patch(
+            "magister_checking.row_check_cli.google_doc_from_drive_file"
+        ) as convert, patch(
+            "magister_checking.row_check_cli.analyze_dissertation",
+            return_value=converted_metrics,
+        ), patch(
+            "magister_checking.row_check_cli.count_pdf_pages_via_drive_export",
+            return_value=35,
+        ), patch(
+            "magister_checking.row_check_cli.detect_dissertation_title_from_gdoc",
+            return_value="",
+        ), patch(
+            "magister_checking.row_check_cli.detect_dissertation_title_from_docx_bytes",
+            return_value="Тема из исходного DOCX",
+        ), patch(
+            "magister_checking.row_check_cli.detect_dissertation_language_from_gdoc",
+            return_value="русский",
+        ), patch(
+            "magister_checking.row_check_cli.warn_if_unusual_language"
+        ):
+            convert.return_value.__enter__.return_value = "converted-doc-id"
+            convert.return_value.__exit__.return_value = False
+            _metrics, title, language = _try_load_dissertation_metrics_and_meta(
+                dissertation_url=diss_url,
+                docs_service=docs_service,
+                drive_service=drive_service,
+                docx_conversion_folder_id="buffer-folder",
+            )
+        self.assertEqual(title, "Тема из исходного DOCX")
+        self.assertEqual(language, "русский")
 
     def test_unsupported_kind_returns_none(self) -> None:
         result = _try_load_dissertation_metrics(

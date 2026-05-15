@@ -196,6 +196,8 @@ class RowCheckReport:
 
     fio: str
     row_number: int | None = None
+    dissertation_title: str = ""
+    dissertation_language: str = ""
     stage1: StageResult = field(default_factory=lambda: StageResult("stage1"))
     stage2: StageResult = field(default_factory=lambda: StageResult("stage2"))
     stage3: StageResult = field(default_factory=lambda: StageResult("stage3"))

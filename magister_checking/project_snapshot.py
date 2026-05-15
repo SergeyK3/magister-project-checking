@@ -188,8 +188,14 @@ def build_project_snapshot(
         publication_url=str(ex.get("publication_url", "") or ""),
         report_url_valid=(user.report_url_valid or "").strip(),
         report_url_accessible=(user.report_url_accessible or "").strip(),
-        dissertation_title=str(ex.get("dissertation_title", "") or ""),
-        dissertation_language=str(ex.get("dissertation_language", "") or ""),
+        dissertation_title=(
+            str(ex.get("dissertation_title", "") or "")
+            or (report.dissertation_title or "").strip()
+        ),
+        dissertation_language=(
+            str(ex.get("dissertation_language", "") or "")
+            or (report.dissertation_language or "").strip()
+        ),
     )
 
     p1 = SnapshotPhase(

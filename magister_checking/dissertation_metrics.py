@@ -1527,12 +1527,22 @@ def analyze_docx_bytes(docx_bytes: bytes) -> DissertationMetrics:
     #    нумерации нет вовсе): типовой ГОСТ — каждая запись содержит свой URL.
     #    Без этого fallback-а text-индексы ловили хвосты диапазонов страниц/
     #    годов и возвращали мусор.
-    if word_list_count is not None and word_list_count >= 3:
+    has_line_numbering = _docx_bibliography_has_line_numbering(doc)
+    if has_line_numbering and (
+        word_list_count is None or text_sources is None or text_sources >= word_list_count
+    ):
+        # Для реальной нумерации в начале абзацев (`1. …`, `1) …`, `[1] …`)
+        # max(index) надёжнее URL-подсчёта и коротких numPr-стрик-блоков,
+        # если он не выглядит заниженным относительно Word-списка.
+        # Row 6: text_sources=45, word_list_count=10 -> берём 45.
+        # Row 8: text_sources=4, word_list_count=40 -> не доверяем text_sources.
+        sources = text_sources
+    elif word_list_count is not None and word_list_count >= 3:
         if url_count is not None and url_count > word_list_count:
             sources = url_count
         else:
             sources = word_list_count
-    elif _docx_bibliography_has_line_numbering(doc):
+    elif has_line_numbering:
         sources = text_sources
     elif url_count is not None:
         sources = url_count

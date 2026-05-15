@@ -268,6 +268,44 @@ class AnalyzeDocxBytesBibliographyTests(unittest.TestCase):
         metrics = analyze_docx_bytes(_build_docx_bytes(paragraphs))
         self.assertEqual(metrics.sources_count, 45)
 
+    def test_line_numbering_has_priority_over_short_word_list_and_url_count(self) -> None:
+        """Row 6 pattern: text=45, word_list=10, url_count=36 -> итог должен быть 45."""
+
+        bib_entries: list[str] = []
+        for i in range(1, 46):
+            if i <= 10:
+                bib_entries.append(f"{i}. Источник номер {i}. URL: https://x/{i}")
+            elif i <= 36:
+                bib_entries.append(f"{i}. Источник номер {i}. https://x/{i}")
+            else:
+                bib_entries.append(f"{i}. Источник номер {i}.")
+        paragraphs = [
+            "Введение…",
+            "Список литературы",
+            *bib_entries,
+            "Приложение",
+        ]
+        metrics = analyze_docx_bytes(_build_docx_bytes(paragraphs))
+        self.assertEqual(metrics.sources_count, 45)
+
+    def test_word_list_wins_when_text_indices_are_obviously_truncated(self) -> None:
+        """Row 8 pattern: word_list=40, text_sources=4 -> итог должен быть 40."""
+
+        bib_entries: list[str] = [f"{i}. Источник номер {i}" for i in range(1, 41)]
+        paragraphs = [
+            "Введение…",
+            "Список литературы",
+            *bib_entries,
+            "Приложение",
+        ]
+        docx = _build_docx_bytes(paragraphs)
+        with mock.patch(
+            "magister_checking.dissertation_metrics._estimate_sources_count",
+            return_value=4,
+        ):
+            metrics = analyze_docx_bytes(docx)
+        self.assertEqual(metrics.sources_count, 40)
+
     def test_short_url_run_does_not_trigger_fallback(self) -> None:
         """В библиографии всего 2 URL-абзаца — fallback не сработает (порог < 3).
 

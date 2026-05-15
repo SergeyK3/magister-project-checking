@@ -18,6 +18,7 @@ from magister_checking.dissertation_meta import (
     LANGUAGE_ENGLISH,
     LANGUAGE_KAZAKH,
     LANGUAGE_RUSSIAN,
+    _normalize_kazakh_text,
     detect_dissertation_language_from_docx_bytes,
     detect_dissertation_language_from_gdoc,
     detect_dissertation_language_from_text,
@@ -283,6 +284,25 @@ class DetectTitleFromGdocTests(unittest.TestCase):
             "медицинской организации",
         )
 
+    def test_govt_template_accepts_wrapped_mixed_case_kazakh_title_before_degree_marker(self) -> None:
+        document = _document(
+            [
+                _paragraph("«Астана Медицина Университеті» КеАҚ\n"),
+                _paragraph("УДК: 614.2\n"),
+                _paragraph("МПК: A61B 5/12\n"),
+                _paragraph("Қожахметова Аружан Серікқызы\n"),
+                _paragraph("денсаулық сақтау ұйымындағы цифрлық\n"),
+                _paragraph("процестерді жетілдіру\n"),
+                _paragraph(
+                    "магистрлік жоба (бейіндік бағыт үшін)\n"
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_gdoc(document),
+            "денсаулық сақтау ұйымындағы цифрлық процестерді жетілдіру",
+        )
+
     def test_govt_template_caps_title_above_degree_marker_kk(self) -> None:
         # Структура реальной диссертации Камзебаевой.
         document = _document(
@@ -445,6 +465,118 @@ class DetectTitleFromDocxTests(unittest.TestCase):
             "медицинской организации",
         )
 
+    def test_govt_template_mixed_case_title_before_degree_line_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("НАО «Медицинский университет Астана»", None),
+                ("Школа общественного здоровья", None),
+                ("УДК: 614.2:658", None),
+                ("МПК: A61B, G06Q10", None),
+                ("Абдрахманова Алия Сериковна", None),
+                (
+                    "Совершенствование системы управления медицинской организацией",
+                    None,
+                ),
+                (
+                    "Магистерский проект на соискание степени магистра "
+                    "здравоохранения",
+                    None,
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "Совершенствование системы управления медицинской организацией",
+        )
+
+    def test_govt_template_caps_title_above_prisuzhdenie_degree_marker_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("НАО «Медицинский Университет Астана»", None),
+                ("УДК: 303.446:618.1:338.465.4", None),
+                ("МПК: G06Q30/01, G06Q30/012, G16H20/00", None),
+                ("Амангелді Қуаныш Маратұлы", None),
+                (
+                    "СРАВНИТЕЛЬНЫЙ АНАЛИЗ ОКАЗАНИЯ ГИНЕКОЛОГИЧЕСКОЙ ПОМОЩИ "
+                    "В КРУГЛОСУТОЧНОМ СТАЦИОНАРЕ НА ПЛАТНОЙ И "
+                    "БЕЗВОЗМЕЗДНОЙ ОСНОВЕ В РАМКАХ КЛИНИКИ ТОО ЭКО",
+                    None,
+                ),
+                (
+                    "Диссертация на присуждение академической степени "
+                    "магистра медицинских наук",
+                    None,
+                ),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "СРАВНИТЕЛЬНЫЙ АНАЛИЗ ОКАЗАНИЯ ГИНЕКОЛОГИЧЕСКОЙ ПОМОЩИ "
+            "В КРУГЛОСУТОЧНОМ СТАЦИОНАРЕ НА ПЛАТНОЙ И "
+            "БЕЗВОЗМЕЗДНОЙ ОСНОВЕ В РАМКАХ КЛИНИКИ ТОО ЭКО",
+        )
+
+    def test_govt_template_wrapped_mixed_case_kazakh_title_before_degree_line_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("«Астана Медицина Университеті» КеАҚ", None),
+                ("УДК: 614.2", None),
+                ("МПК: A61B 5/12", None),
+                ("Қожахметова Аружан Серікқызы", None),
+                ("денсаулық сақтау ұйымындағы цифрлық", None),
+                ("процестерді жетілдіру", None),
+                ("магистрлік жоба (бейіндік бағыт үшін)", None),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "денсаулық сақтау ұйымындағы цифрлық процестерді жетілдіру",
+        )
+
+    def test_govt_template_accepts_degree_marker_with_schwa_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("«Астана медициналық университеті» КеАҚ", None),
+                ("УДК: 614.2:005:004.4", None),
+                ("МПК: G16H10/00, G16H20/00", None),
+                ("Акылбекова Айнур Оразбаевна", None),
+                (
+                    "Медициналық ұйымдағы икемді басқару əдістемелері: "
+                    "операциялық тиімділікті арттыру үшін Agile жəне Scrum "
+                    "əдісітерін еңгізуді зерттеу.",
+                    None,
+                ),
+                ("7М10122 – «Денсаулық сақтау менеджменті бойынша МВА»", None),
+                ("Магистр дəрежесін алу үшін ұсынылған жоба.", None),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "Медициналық ұйымдағы икемді басқару әдістемелері: "
+            "операциялық тиімділікті арттыру үшін Agile және Scrum "
+            "әдісітерін еңгізуді зерттеу",
+        )
+
+    def test_govt_template_accepts_mixed_latin_kazakh_letters_in_docx(self) -> None:
+        blob = _build_docx_bytes(
+            [
+                ("«Астана медициналық университеті» КеАҚ", None),
+                ("УДК: 614.2", None),
+                ("МПК: A61B 5/12", None),
+                ("Қожахметова Аружан Серікқызы", None),
+                (
+                    "Медициналық ұйымдаǵы üдерістерді жетıлдıру",
+                    None,
+                ),
+                ("7М10116 - \"Қоғамдық денсаулық сақтау\"", None),
+                ("Магистр дəрежесін алу үшін ұсынылған жоба.", None),
+            ]
+        )
+        self.assertEqual(
+            detect_dissertation_title_from_docx_bytes(blob),
+            "Медициналық ұйымдағы үдерістерді жетілдіру",
+        )
+
     def test_empty_blob(self) -> None:
         self.assertEqual(detect_dissertation_title_from_docx_bytes(b""), "")
 
@@ -493,6 +625,12 @@ _ENGLISH_INTRO = (
 
 
 class DetectLanguageFromTextTests(unittest.TestCase):
+    def test_normalize_kazakh_variant_letters(self) -> None:
+        self.assertEqual(
+            _normalize_kazakh_text("дəреже ǵылым üдеріс jetıстік óń"),
+            "дәреже ғылым үдеріс jetістік өң",
+        )
+
     def test_russian_text(self) -> None:
         self.assertEqual(detect_dissertation_language_from_text(_RUSSIAN_INTRO), LANGUAGE_RUSSIAN)
 

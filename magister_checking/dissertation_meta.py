@@ -45,6 +45,42 @@ EXPECTED_LANGUAGES: frozenset[str] = frozenset({LANGUAGE_RUSSIAN, LANGUAGE_KAZAK
 """
 
 
+# Смешанные латинские / legacy-варианты казахских букв, которые реально
+# попадаются в DOCX/Google Docs после копипаста, OCR или конвертации раскладки.
+# Нормализуем только НЕ-ASCII символы, чтобы не ломать английские слова вроде
+# Agile / Scrum внутри названий.
+_KAZAKH_CHAR_VARIANTS: dict[str, str] = {
+    "ə": "ә",
+    "Ə": "Ә",
+    "ǵ": "ғ",
+    "Ǵ": "Ғ",
+    "ğ": "ғ",
+    "Ğ": "Ғ",
+    "ń": "ң",
+    "Ń": "Ң",
+    "ñ": "ң",
+    "Ñ": "Ң",
+    "ó": "ө",
+    "Ó": "Ө",
+    "ö": "ө",
+    "Ö": "Ө",
+    "ú": "ү",
+    "Ú": "Ү",
+    "ü": "ү",
+    "Ü": "Ү",
+    "ı": "і",
+    "İ": "І",
+}
+
+
+def _normalize_kazakh_text(text: str) -> str:
+    """Приводит mixed-script казахские буквы к канонической кириллице."""
+
+    if not text:
+        return ""
+    return "".join(_KAZAKH_CHAR_VARIANTS.get(ch, ch) for ch in text)
+
+
 # ---------------------------------------------------------------------------
 # Тема диссертации
 # ---------------------------------------------------------------------------
@@ -202,8 +238,9 @@ _DEGREE_MARKER_RE = re.compile(
     r"(?im)\b("
     r"магистерск(?:ая|ий)\s+(?:диссертац|проект)"
     r"|магистрл[іi]к\s+(?:жоба|диссертац)"
-    r"|магистр\s+(?:академиялы[қk]\s+)?[дd][әa]режес"
+    r"|магистр\s+(?:академиялы[қk]\s+)?[дd][әəa]режес"
     r"|соискан\w+\s+(?:академическ\w+\s+)?степени\s+магистр"
+    r"|присуждени\w+\s+(?:академическ\w+\s+)?степени\s+магистр"
     r"|степени\s+магистр[а]?\s+(?:здравоохранения|общественного|техническ|социальн|педагогик|экономик|деловог)"
     r"|денсаулы[қk]\s+са[қk]тау\s+магистр"
     r")"
@@ -216,7 +253,7 @@ _MAX_TITLE_LEN = 300
 
 
 def _clean_title(raw: str) -> str:
-    text = (raw or "").strip()
+    text = _normalize_kazakh_text(raw or "").strip()
     text = re.sub(r"\s+", " ", text)
     text = text.strip(_QUOTE_CHARS + " .,;:")
     text = re.sub(r"\s+", " ", text).strip()
@@ -224,7 +261,7 @@ def _clean_title(raw: str) -> str:
 
 
 def _is_stop_phrase(text: str) -> bool:
-    raw = text or ""
+    raw = _normalize_kazakh_text(text or "")
     low = raw.lower()
     norm = re.sub(r"\s+", " ", low.strip(_QUOTE_CHARS + " .,;:"))
     if not norm:
@@ -254,7 +291,8 @@ def _looks_like_fio(text: str) -> bool:
     («СУЛЕЙМЕНОВА ИНДИРА САРСЕНБЕКОВНА»).
     """
 
-    words = [w for w in re.split(r"\s+", text.strip()) if w]
+    normalized = _normalize_kazakh_text(text)
+    words = [w for w in re.split(r"\s+", normalized.strip()) if w]
     if not (2 <= len(words) <= 4):
         return False
     cleaned = [w.strip(_QUOTE_CHARS + ".,;:()") for w in words]
@@ -275,7 +313,8 @@ def _is_caps_paragraph(text: str, *, ratio_threshold: float = 0.7) -> bool:
     «СПЛОШНЫМ КАПСОМ» → ratio ≈ 1.0.
     """
 
-    letters = [ch for ch in text if ch.isalpha()]
+    normalized = _normalize_kazakh_text(text)
+    letters = [ch for ch in normalized if ch.isalpha()]
     if not letters:
         return False
     upper = sum(1 for ch in letters if ch.isupper())
@@ -314,13 +353,15 @@ def _detect_title_from_govt_template(paragraphs: list[str]) -> str:
             if _is_caps_paragraph(candidate) or _is_quoted_title_candidate(candidate):
                 cleaned = _clean_title(_join_wrapped_caps_title_lines(paragraphs, k))
             else:
-                if not _looks_like_mixed_case_title_in_govt_context(head_window, k, idx):
+                cleaned = _mixed_case_title_in_govt_context(head_window, k, idx)
+                if not cleaned:
                     continue
-                cleaned = _clean_title(candidate)
             if _looks_like_title(cleaned):
                 return cleaned
-        # Якорь нашли, но темы над ним нет — дальше ловить нечего, выходим
-        break
+        # В реальных .docx строка степени может быть склеена/разбита так, что
+        # соседние окна ``idx:idx+2`` тоже матчятся как degree-marker. Если
+        # над текущим окном темы не нашли, продолжаем искать следующий маркер
+        # вместо преждевременного выхода (row 8 Досанов).
     return ""
 
 
@@ -340,6 +381,32 @@ def _join_wrapped_caps_title_lines(paragraphs: list[str], start_idx: int) -> str
             break
         parts.append(candidate)
     return " ".join(parts)
+
+
+def _join_wrapped_mixed_case_title_lines(
+    paragraphs: list[str], start_idx: int, marker_idx: int
+) -> tuple[str, int]:
+    """Склеивает mixed-case тему на титуле, если её перенесли на 2-3 строки."""
+
+    parts = [paragraphs[start_idx].strip()]
+    end_idx = start_idx
+    upper_bound = min(marker_idx + 1, start_idx + 4, len(paragraphs))
+    for idx in range(start_idx + 1, upper_bound):
+        candidate = paragraphs[idx].strip()
+        if not candidate:
+            break
+        if _DEGREE_MARKER_RE.search(candidate):
+            break
+        if _looks_like_specialty_line(candidate):
+            break
+        if _is_stop_phrase(candidate) or _looks_like_fio(candidate):
+            break
+        cleaned = _clean_title(candidate)
+        if not _looks_like_title(cleaned):
+            break
+        parts.append(candidate)
+        end_idx = idx
+    return " ".join(parts), end_idx
 
 
 def _is_quoted_title_candidate(text: str) -> bool:
@@ -372,27 +439,34 @@ def _next_nonempty_before_marker(paragraphs: list[str], idx: int, marker_idx: in
 
 
 def _looks_like_specialty_line(text: str) -> bool:
-    stripped = (text or "").strip()
+    stripped = _normalize_kazakh_text(text or "").strip()
     if not stripped:
         return False
     return bool(_SPECIALTY_CODE_RE.match(stripped))
 
 
-def _looks_like_mixed_case_title_in_govt_context(
+def _mixed_case_title_in_govt_context(
     paragraphs: list[str], candidate_idx: int, marker_idx: int
-) -> bool:
+) -> str:
     """Mixed-case тема на титуле: между ФИО автора и шифром/якорем степени."""
 
-    candidate = paragraphs[candidate_idx].strip()
-    if not _looks_like_title(candidate):
-        return False
+    candidate, end_idx = _join_wrapped_mixed_case_title_lines(
+        paragraphs, candidate_idx, marker_idx
+    )
+    cleaned = _clean_title(candidate)
+    if not _looks_like_title(cleaned):
+        return ""
     prev_line = _previous_nonempty(paragraphs, candidate_idx)
     if not _looks_like_fio(prev_line):
-        return False
-    next_line = _next_nonempty_before_marker(paragraphs, candidate_idx, marker_idx)
+        return ""
+    next_line = _next_nonempty_before_marker(paragraphs, end_idx, marker_idx)
     if not next_line:
-        return True
-    return _looks_like_specialty_line(next_line) or bool(_DEGREE_MARKER_RE.search(next_line))
+        return cleaned
+    if _DEGREE_MARKER_RE.search(next_line):
+        return cleaned
+    if _looks_like_specialty_line(next_line):
+        return cleaned
+    return ""
 
 
 def _looks_like_title(text: str) -> bool:
@@ -417,7 +491,7 @@ def _first_paragraphs_from_plain(text: str, *, limit: int = 80) -> list[str]:
 
     out: list[str] = []
     for raw in (text or "").split("\n"):
-        s = raw.strip()
+        s = _normalize_kazakh_text(raw).strip()
         if not s:
             continue
         out.append(s)
@@ -485,7 +559,11 @@ def detect_dissertation_title_from_gdoc(document: dict[str, Any]) -> str:
 
     plain = extract_plain_text(document) if document else ""
     paragraphs = _first_paragraphs_from_plain(plain, limit=80)
-    headings = [h.strip() for h in iter_heading_texts(document or {}) if (h or "").strip()]
+    headings = [
+        _normalize_kazakh_text(h).strip()
+        for h in iter_heading_texts(document or {})
+        if (h or "").strip()
+    ]
     return _detect_title_from_paragraphs(paragraphs, headings)
 
 
@@ -512,6 +590,7 @@ def _docx_api_paragraphs_and_headings(doc: Document) -> tuple[list[str], list[st
     headings: list[str] = []
     for para in doc.paragraphs:
         text = re.sub(r"\s+", " ", (para.text or "").strip())
+        text = _normalize_kazakh_text(text)
         if not text:
             continue
         paragraphs.append(text)
@@ -542,6 +621,7 @@ def _docx_xml_paragraphs_and_headings(doc: Document) -> tuple[list[str], list[st
             " ",
             "".join((node.text or "") for node in para.xpath(".//w:t")).strip(),
         )
+        text = _normalize_kazakh_text(text)
         if not text:
             continue
         paragraphs.append(text)
@@ -614,7 +694,7 @@ def _slice_for_language(plain_text: str) -> str:
 def detect_dissertation_language_from_text(text: str) -> str:
     """«русский» / «казахский» / «английский» / «» (если букв вообще нет)."""
 
-    chunk = _slice_for_language(text)
+    chunk = _slice_for_language(_normalize_kazakh_text(text))
     if not chunk:
         return ""
 

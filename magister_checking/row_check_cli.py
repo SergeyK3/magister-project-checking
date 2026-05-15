@@ -499,6 +499,7 @@ def _try_load_dissertation_metrics_and_meta(
     dissertation_url: str,
     docs_service: Any,
     drive_service: Any,
+    docx_conversion_folder_id: str = "",
     row_number: int | None = None,
 ) -> tuple[DissertationMetrics | None, str, str]:
     """Загружает диссертацию: метрики Stage 4 + название и язык для листа.
@@ -572,6 +573,32 @@ def _try_load_dissertation_metrics_and_meta(
         )
         if not data:
             return None, "", ""
+        if docx_conversion_folder_id:
+            try:
+                with google_doc_from_drive_file(
+                    drive_service,
+                    file_id,
+                    conversion_folder_id=docx_conversion_folder_id,
+                ) as loadable_id:
+                    doc = docs_service.documents().get(documentId=loadable_id).execute()
+                    metrics = analyze_dissertation(doc)
+                    pdf_pages = count_pdf_pages_via_drive_export(
+                        drive_service=drive_service, file_id=loadable_id
+                    )
+                    if pdf_pages is not None and pdf_pages > 0:
+                        metrics = replace(metrics, pdf_pages=pdf_pages)
+                    title = detect_dissertation_title_from_gdoc(doc)
+                    if not title:
+                        title = detect_dissertation_title_from_docx_bytes(data)
+                    language = detect_dissertation_language_from_gdoc(doc)
+                    warn_if_unusual_language(
+                        language, context=f"dissertation_file_hash={hash_value(file_id)}"
+                    )
+                    return metrics, title, language
+            except Exception:  # noqa: BLE001
+                # Если конверсия или чтение через Docs API не удались, откатываемся
+                # к прямому анализу байтов .docx, как раньше.
+                pass
         try:
             metrics = analyze_docx_bytes(data)
         except Exception:  # noqa: BLE001
@@ -974,6 +1001,7 @@ def run_row_check(
                 dissertation_url=diss_url,
                 docs_service=docs_service,
                 drive_service=drive_service,
+                docx_conversion_folder_id=config.docx_conversion_folder_id,
                 row_number=row_number,
             )
 
@@ -988,6 +1016,8 @@ def run_row_check(
         formatting_rules=load_formatting_rules(),
         row_number=row_number,
     )
+    pipeline_report.dissertation_title = dissertation_title_for_sheet
+    pipeline_report.dissertation_language = dissertation_language_for_sheet
 
     # Если документ не удалось загрузить, но URL валиден и доступен — это значит,
     # что ссылка ведёт не на «Промежуточный отчёт» (другой тип файла/папка без

@@ -164,19 +164,23 @@ def _student_sheet_link_html_lines(links: SnapshotLinks) -> list[str]:
 def _student_dissertation_fact_lines(links: SnapshotLinks) -> list[str]:
     if not (links.dissertation_title or links.dissertation_language):
         return []
-    return [
-        f"  название: {links.dissertation_title or '—'}",
-        f"  язык: {links.dissertation_language or '—'}",
-    ]
+    lines: list[str] = []
+    if links.dissertation_title:
+        lines.append(f"  название: {links.dissertation_title}")
+    if links.dissertation_language:
+        lines.append(f"  язык: {links.dissertation_language}")
+    return lines
 
 
 def _student_dissertation_fact_html_lines(links: SnapshotLinks) -> list[str]:
     if not (links.dissertation_title or links.dissertation_language):
         return []
-    return [
-        f"название: {escape_tg_html(links.dissertation_title) or '—'}",
-        f"язык: {escape_tg_html(links.dissertation_language) or '—'}",
-    ]
+    lines: list[str] = []
+    if links.dissertation_title:
+        lines.append(f"название: {escape_tg_html(links.dissertation_title)}")
+    if links.dissertation_language:
+        lines.append(f"язык: {escape_tg_html(links.dissertation_language)}")
+    return lines
 
 
 def _html_commission_link_line(display_label: str, raw: str) -> str:
@@ -216,9 +220,6 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
     )
     p4w = list(by_id[PHASE_STAGE4].warnings)
 
-    # Stage 4 warnings must also appear in the main deviation list; otherwise
-    # the header may say "Нарушений не найдено" while formatting issues are
-    # shown only below in the detailed block.
     results_issues = p1w + p2w + leftover_s3 + p4w
 
     if not results_issues:
@@ -227,7 +228,7 @@ def render_spravka_telegram(snapshot: ProjectSnapshot, *, applied: bool) -> str:
         lines.append("Найдены отклонения:")
         for issue in results_issues:
             lines.append(f"- {issue}")
-    detail_p4w = [w for w in p4w if w not in results_issues]
+    detail_p4w = p4w
     if snapshot.stopped_at:
         lines.append(f"Проверка остановлена на этапе: {snapshot.stopped_at}")
     sheet_link_lines = _student_sheet_link_lines(snapshot.links)
@@ -400,8 +401,6 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
     )
     p4w = list(by_id[PHASE_STAGE4].warnings)
 
-    # Keep HTML and plaintext renderers aligned: Stage 4 formatting warnings
-    # belong to the main "Результаты" list as well.
     results_issues = p1w + p2w + leftover_s3 + p4w
 
     lines.append("<b>Результаты</b>")
@@ -411,7 +410,7 @@ def render_spravka_telegram_html(snapshot: ProjectSnapshot, *, applied: bool) ->
         lines.append("Найдены отклонения:")
         for issue in results_issues:
             lines.append(f"• {escape_tg_html(issue)}")
-    detail_p4w = [w for w in p4w if w not in results_issues]
+    detail_p4w = p4w
     if snapshot.stopped_at:
         lines.append(
             f"<b>Остановка</b>\nэтап: {escape_tg_html(snapshot.stopped_at)}"

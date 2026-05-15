@@ -122,7 +122,50 @@ class RenderSpravkaTests(unittest.TestCase):
         self.assertIn("название: Разработка модели", html)
         self.assertIn("язык: русский", html)
 
-    def test_spravka_html_stage4_issue_is_not_duplicated_after_results(self) -> None:
+    def test_spravka_uses_report_dissertation_title_when_sheet_not_loaded(self) -> None:
+        r = RowCheckReport(
+            fio="Иванов",
+            row_number=3,
+            dissertation_title="Тема из свежего Stage 4",
+            dissertation_language="русский",
+            stage4=Stage4Result(
+                executed=True,
+                passed=True,
+                pages_total=10,
+                sources_count=5,
+                compliance=False,
+                issues=["не соответствует. Найдено: A. Нужно: B."],
+            ),
+        )
+        s = build_project_snapshot(user=UserForm(fio="Иванов"), report=r, extra_values={})
+
+        text = render_spravka_telegram(s, applied=True)
+        self.assertIn("Содержательный разбор диссертации (Stage 4)", text)
+        self.assertIn("название: Тема из свежего Stage 4", text)
+        self.assertIn("язык: русский", text)
+
+    def test_spravka_hides_empty_dissertation_title_placeholder(self) -> None:
+        r = RowCheckReport(
+            fio="Иванов",
+            row_number=3,
+            dissertation_title="",
+            dissertation_language="русский",
+            stage4=Stage4Result(
+                executed=True,
+                passed=True,
+                pages_total=10,
+                sources_count=5,
+                compliance=False,
+                issues=["не соответствует. Найдено: A. Нужно: B."],
+            ),
+        )
+        s = build_project_snapshot(user=UserForm(fio="Иванов"), report=r, extra_values={})
+
+        html = render_spravka_telegram_html(s, applied=True)
+        self.assertIn("язык: русский", html)
+        self.assertNotIn("название: —", html)
+
+    def test_spravka_html_stage4_issue_rendered_once_in_results(self) -> None:
         from magister_checking.bot.row_pipeline import (
             Stage3CellUpdate,
             Stage4Result,

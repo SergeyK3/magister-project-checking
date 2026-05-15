@@ -1,0 +1,6 @@
+fio,group_name,workplace,position,phone,supervisor,report_url
+Иванов Иван Иванович,М-101,ООО «Ромашка»,Инженер-программист,+7 999 111-11-11,Петров П.П.,https://docs.google.com/document/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ_001/edit
+Сидорова Анна Сергеевна,М-101,АО «Сириус»,Аналитик,+7 999 222-22-22,Кузнецов К.К.,https://docs.google.com/document/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ_002/edit
+Кузнецов Дмитрий Олегович,М-102,ИП Лебедев,Разработчик,+7 999 333-33-33,Смирнов С.С.,
+Орлова Мария Викторовна,М-102,ООО «ТехноПром»,Менеджер проектов,+7 999 444-44-44,,https://docs.google.com/document/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ_004/edit
+Лебедев Артём Павлович,М-103,,,+7 999 555-55-55,Иванова И.И.,https://invalid url

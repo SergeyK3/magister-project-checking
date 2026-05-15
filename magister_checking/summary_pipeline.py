@@ -286,8 +286,9 @@ def resolve_report_google_doc_id(report_url: str, *, drive_service: Any | None) 
         doc_id = pick_intermediate_report_doc_id(drive_service=drive_service, folder_id=folder_id)
         if not doc_id:
             raise ValueError(
-                "В папке нет Google Doc с именем, начинающимся с «Проммежуточный отчет» "
-                "(или варианта с «ё» / «Промежуточный»)."
+                "В папке (и в её подпапках с префиксом «Промежуточный отчет ...») "
+                "не найден Google Doc или .docx с подходящим именем "
+                "(см. drive_folder.INTERMEDIATE_REPORT_NAME_PREFIXES)."
             )
         return doc_id
     return extract_google_file_id(report_url)

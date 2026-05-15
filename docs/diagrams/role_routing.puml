@@ -1,0 +1,24 @@
+@startuml
+title Role Routing
+
+[*] --> USER
+
+state USER
+
+USER --> MAGISTRANT : role=magistrant
+USER --> SUPERVISOR : role=supervisor
+USER --> ADMIN : role=admin
+
+state MAGISTRANT {
+state "Команды:\n/start\n/справка\n/выход" as MAG_CMDS
+}
+
+state SUPERVISOR {
+state "Команды:\n/start\n/справка Фамилия\n/список\n/выход" as SUP_CMDS
+}
+
+state ADMIN {
+state "Команды:\n/start\n/справка Фамилия\n/список\n/ошибка\n/выход" as ADM_CMDS
+}
+
+@enduml

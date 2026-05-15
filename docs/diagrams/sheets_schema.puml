@@ -1,0 +1,46 @@
+@startuml
+title Google Sheets Schema
+
+left to right direction
+
+entity "Научрук" as supervisor {
+
+* fio
+* telegram_id
+* кафедра
+  }
+
+entity "Магистранты" as magistrants {
+
+* fio
+* telegram_id
+* group_norm
+* project_url
+* dissertation_url
+* publication_url
+  }
+
+entity "Админ" as admin {
+
+* fio
+* telegram_id
+* role
+  }
+
+entity "Регистрация" as registration {
+
+* row_id
+* telegram_id
+* fio
+* snapshot_id
+* status
+* updated_at
+  }
+
+supervisor -down-> registration : supervises
+
+magistrants -down-> registration : project_state
+
+admin -down-> registration : manages
+
+@enduml
